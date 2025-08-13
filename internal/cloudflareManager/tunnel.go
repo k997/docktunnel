@@ -2,12 +2,27 @@ package cloudflareManager
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/cloudflare/cloudflare-go"
 )
+
+// generateTunnelSecret 生成一个用于Cloudflare Tunnel的随机secret
+func generateTunnelSecret() (string, error) {
+	// 创建一个32字节的随机密钥
+	secret := make([]byte, 32)
+	_, err := rand.Read(secret)
+	if err != nil {
+		return "", err
+	}
+	
+	// 将密钥编码为十六进制字符串
+	return hex.EncodeToString(secret), nil
+}
 
 // Manager 封装了所有Cloudflare Tunnel相关的操作
 type Manager struct {
@@ -73,11 +88,17 @@ func (m *Manager) GetOrCreateTunnel(ctx context.Context, tunnelName string) (str
 		return m.tunnelID, nil
 	}
 
+	// 生成一个随机secret
+	secret, err := generateTunnelSecret()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate tunnel secret: %w", err)
+	}
+
 	// 如果没有找到同名tunnel，创建一个新的
 	tunnel, err := m.client.CreateTunnel(ctx, accountResource, cloudflare.TunnelCreateParams{
 		Name:      tunnelName,
-		Secret:    "",      // 让Cloudflare生成secret
-		ConfigSrc: "cloud", // 使用云端配置
+		Secret:    secret,           // 使用生成的secret
+		ConfigSrc: "cloudflare", // 使用云端配置
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create tunnel: %w", err)
