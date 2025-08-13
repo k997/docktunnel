@@ -1,4 +1,4 @@
-package cloudflare
+package cloudflareManager
 
 import (
 	"context"
