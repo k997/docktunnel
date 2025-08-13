@@ -9,11 +9,12 @@ import (
 	"syscall"
 	"time"
 
+	"docktunnel/internal/cloudflareManager"
 	"docktunnel/internal/config"
 	"docktunnel/internal/controller"
 	"docktunnel/internal/docker"
-	"docktunnel/internal/cloudflareManager"
 	"docktunnel/internal/logger"
+	"log/slog"
 )
 
 func main() {
@@ -31,8 +32,8 @@ func main() {
 	}
 
 	// 初始化日志记录器
-	logger := logger.New(cfg.GetLogLevel(), cfg.GetLogFormat())
-	logger.Info("Configuration loaded successfully")
+	var appLogger *slog.Logger = logger.New(cfg.GetLogLevel(), cfg.GetLogFormat())
+	appLogger.Info("Configuration loaded successfully")
 
 	// 创建上下文用于优雅关闭
 	ctx, cancel := context.WithCancel(context.Background())
@@ -41,7 +42,7 @@ func main() {
 	// 初始化Docker管理器
 	dockerManager, err := docker.NewManager()
 	if err != nil {
-		logger.Error("Failed to create Docker manager", "error", err)
+		appLogger.Error("Failed to create Docker manager", "error", err)
 		os.Exit(1)
 	}
 	defer dockerManager.Close()
@@ -53,13 +54,13 @@ func main() {
 		cfg.Cloudflare.TunnelID,
 	)
 	if err != nil {
-		logger.Error("Failed to create Cloudflare manager", "error", err)
+		appLogger.Error("Failed to create Cloudflare manager", "error", err)
 		os.Exit(1)
 	}
 
 	// 验证Cloudflare连接
 	if err := cfManager.ValidateConnection(ctx); err != nil {
-		logger.Error("Failed to validate Cloudflare connection", "error", err)
+		appLogger.Error("Failed to validate Cloudflare connection", "error", err)
 		os.Exit(1)
 	}
 
@@ -74,18 +75,18 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		logger.Info("Starting Docker event listener")
+		appLogger.Info("Starting Docker event listener")
 		if err := dockerManager.ListenForEvents(ctx, updateChan); err != nil {
-			logger.Error("Docker event listener error", "error", err)
+			appLogger.Error("Docker event listener error", "error", err)
 		}
 	}()
 
 	// 首次同步配置
-	logger.Info("Performing initial synchronization")
+	appLogger.Info("Performing initial synchronization")
 	if err := controller.Sync(ctx); err != nil {
-		logger.Error("Initial synchronization failed", "error", err)
+		appLogger.Error("Initial synchronization failed", "error", err)
 	} else {
-		logger.Info("Initial synchronization completed successfully")
+		appLogger.Info("Initial synchronization completed successfully")
 	}
 
 	// 设置系统信号处理
@@ -93,26 +94,26 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// 主循环
-	logger.Info("DockTunnel started successfully, entering main loop")
+	appLogger.Info("DockTunnel started successfully, entering main loop")
 
 	// 启动主事件循环
 	for {
 		select {
 		case <-updateChan:
-			logger.Info("Docker event received, triggering synchronization")
+			appLogger.Info("Docker event received, triggering synchronization")
 			// 添加一个小的延迟，以防止在容器启动/停止时过于频繁地触发同步
 			time.Sleep(2 * time.Second)
-			
+
 			if err := controller.Sync(ctx); err != nil {
-				logger.Error("Synchronization failed", "error", err)
+				appLogger.Error("Synchronization failed", "error", err)
 			} else {
-				logger.Info("Synchronization completed successfully")
+				appLogger.Info("Synchronization completed successfully")
 			}
 		case <-sigChan:
-			logger.Info("Shutdown signal received")
+			appLogger.Info("Shutdown signal received")
 			goto shutdown
 		case <-ctx.Done():
-			logger.Info("Context cancelled")
+			appLogger.Info("Context cancelled")
 			goto shutdown
 		}
 	}
@@ -120,9 +121,40 @@ func main() {
 shutdown:
 	// 取消上下文以通知所有goroutine关闭
 	cancel()
-	
+
+	// 如果配置要求清理资源，则执行清理操作
+	if cfg.ShouldCleanupOnExit() {
+		appLogger.Info("Cleaning up resources as requested in configuration")
+		if err := cleanupResources(ctx, cfManager, controller, appLogger); err != nil {
+			appLogger.Error("Failed to cleanup resources", "error", err)
+		} else {
+			appLogger.Info("Resources cleaned up successfully")
+		}
+	}
+
 	// 等待所有goroutine完成
 	wg.Wait()
-	
-	logger.Info("DockTunnel shutdown complete")
+
+	appLogger.Info("DockTunnel shutdown complete")
+}
+
+// cleanupResources 清理创建的DNS记录和tunnel
+func cleanupResources(ctx context.Context, cfManager *cloudflareManager.Manager, controller *controller.Controller, logger *slog.Logger) error {
+	// 获取当前的ingress规则以获取所有主机名
+	ingressRules := controller.GetIngressRules()
+
+	// 删除所有DNS记录
+	for _, rule := range ingressRules {
+		if rule.Hostname != "" && rule.Service != "http_status:404" {
+			if err := cfManager.DeleteDNSRecord(ctx, rule.Hostname); err != nil {
+				logger.Error("Failed to delete DNS record", "hostname", rule.Hostname, "error", err)
+				// 继续尝试删除其他记录
+			}
+		}
+	}
+
+	// 注意：我们不删除tunnel本身，因为这可能会影响其他服务
+	// 如果需要删除tunnel，用户可以手动删除或通过Cloudflare仪表板操作
+
+	return nil
 }

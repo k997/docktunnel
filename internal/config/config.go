@@ -19,6 +19,11 @@ type Config struct {
 		APIToken  string `yaml:"apiToken"`
 		TunnelID  string `yaml:"tunnelId"`
 	} `yaml:"cloudflare"`
+	// Cleanup选项控制程序退出时是否清理生成的资源
+	Cleanup struct {
+		// OnExit控制程序退出时是否清理DNS记录和删除tunnel
+		OnExit bool `yaml:"onExit"`
+	} `yaml:"cleanup"`
 }
 
 // Load 从指定路径加载配置文件
@@ -32,6 +37,12 @@ func Load(path string) (*Config, error) {
 	err = yaml.Unmarshal(data, &config)
 	if err != nil {
 		return nil, err
+	}
+
+	// 设置默认值
+	if config.Cleanup.OnExit != false {
+		// 默认情况下启用清理功能
+		config.Cleanup.OnExit = true
 	}
 
 	return &config, nil
@@ -82,4 +93,9 @@ func (c *Config) GetLogFormat() string {
 		return "text"
 	}
 	return c.Log.Format
+}
+
+// ShouldCleanupOnExit 返回是否在退出时清理资源，默认为true
+func (c *Config) ShouldCleanupOnExit() bool {
+	return c.Cleanup.OnExit
 }

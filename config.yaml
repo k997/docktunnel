@@ -1,8 +1,21 @@
+# 日志配置
 log:
-  level: "info"
-  format: "text"
+  # 日志级别, 支持: debug, info, warn, error
+  level: info
+  # 日志格式, 支持: text, json
+  format: text
 
+# Cloudflare 配置
 cloudflare:
-  accountId: "your-cloudflare-account-id"
-  apiToken: "your-cloudflare-api-token"
-  tunnelId: ""  # 如果为空，将自动创建隧道
+  # Cloudflare 账户 ID
+  accountId: ""
+  # Cloudflare API Token (推荐使用这种方式认证)
+  apiToken: ""
+  # 可选: 预创建的 Tunnel ID (如果为空，将自动创建一个新的)
+  tunnelId: ""
+
+# 清理配置
+cleanup:
+  # 程序退出时是否清理资源 (true/false)
+  # 默认值为true，即默认清理资源
+  onExit: true
