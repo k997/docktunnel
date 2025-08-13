@@ -65,3 +65,85 @@ func TestLoadConfigFileNotFound(t *testing.T) {
 		t.Error("Expected error when loading non-existent config file, but got none")
 	}
 }
+
+func TestValidateConfig(t *testing.T) {
+	// 测试有效配置
+	validConfig := &Config{}
+	validConfig.Cloudflare.AccountID = "account-id"
+	validConfig.Cloudflare.APIToken = "api-token"
+	
+	err := validConfig.Validate()
+	if err != nil {
+		t.Errorf("Expected valid config, but got error: %v", err)
+	}
+	
+	// 测试缺少 AccountID 的配置
+	invalidConfig1 := &Config{}
+	invalidConfig1.Cloudflare.APIToken = "api-token"
+	
+	err = invalidConfig1.Validate()
+	if err == nil {
+		t.Error("Expected error for missing AccountID, but got none")
+	}
+	
+	// 测试缺少 APIToken 的配置
+	invalidConfig2 := &Config{}
+	invalidConfig2.Cloudflare.AccountID = "account-id"
+	
+	err = invalidConfig2.Validate()
+	if err == nil {
+		t.Error("Expected error for missing APIToken, but got none")
+	}
+	
+	// 测试无效日志级别
+	invalidConfig3 := &Config{}
+	invalidConfig3.Cloudflare.AccountID = "account-id"
+	invalidConfig3.Cloudflare.APIToken = "api-token"
+	invalidConfig3.Log.Level = "invalid"
+	
+	err = invalidConfig3.Validate()
+	if err == nil {
+		t.Error("Expected error for invalid log level, but got none")
+	}
+	
+	// 测试无效日志格式
+	invalidConfig4 := &Config{}
+	invalidConfig4.Cloudflare.AccountID = "account-id"
+	invalidConfig4.Cloudflare.APIToken = "api-token"
+	invalidConfig4.Log.Format = "invalid"
+	
+	err = invalidConfig4.Validate()
+	if err == nil {
+		t.Error("Expected error for invalid log format, but got none")
+	}
+}
+
+func TestGetLogLevel(t *testing.T) {
+	// 测试获取设置的日志级别
+	config1 := &Config{}
+	config1.Log.Level = "debug"
+	if config1.GetLogLevel() != "debug" {
+		t.Errorf("Expected 'debug', got '%s'", config1.GetLogLevel())
+	}
+	
+	// 测试获取默认日志级别
+	config2 := &Config{}
+	if config2.GetLogLevel() != "info" {
+		t.Errorf("Expected default 'info', got '%s'", config2.GetLogLevel())
+	}
+}
+
+func TestGetLogFormat(t *testing.T) {
+	// 测试获取设置的日志格式
+	config1 := &Config{}
+	config1.Log.Format = "json"
+	if config1.GetLogFormat() != "json" {
+		t.Errorf("Expected 'json', got '%s'", config1.GetLogFormat())
+	}
+	
+	// 测试获取默认日志格式
+	config2 := &Config{}
+	if config2.GetLogFormat() != "text" {
+		t.Errorf("Expected default 'text', got '%s'", config2.GetLogFormat())
+	}
+}

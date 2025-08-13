@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -34,4 +35,51 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// Validate 验证配置是否有效
+func (c *Config) Validate() error {
+	if c.Cloudflare.AccountID == "" {
+		return fmt.Errorf("cloudflare accountId is required")
+	}
+	
+	if c.Cloudflare.APIToken == "" {
+		return fmt.Errorf("cloudflare apiToken is required")
+	}
+	
+	// TunnelID 可以为空，如果为空将在运行时自动创建
+	
+	// 验证日志级别
+	switch c.Log.Level {
+	case "debug", "info", "warn", "error", "":
+		// 有效值或空值（将使用默认值）
+	default:
+		return fmt.Errorf("invalid log level: %s", c.Log.Level)
+	}
+	
+	// 验证日志格式
+	switch c.Log.Format {
+	case "text", "json", "":
+		// 有效值或空值（将使用默认值）
+	default:
+		return fmt.Errorf("invalid log format: %s", c.Log.Format)
+	}
+	
+	return nil
+}
+
+// GetLogLevel 返回日志级别，如果未设置则返回默认值
+func (c *Config) GetLogLevel() string {
+	if c.Log.Level == "" {
+		return "info"
+	}
+	return c.Log.Level
+}
+
+// GetLogFormat 返回日志格式，如果未设置则返回默认值
+func (c *Config) GetLogFormat() string {
+	if c.Log.Format == "" {
+		return "text"
+	}
+	return c.Log.Format
 }
