@@ -35,6 +35,16 @@ func NewManager(accountID, apiToken, tunnelID string) (*Manager, error) {
 	}, nil
 }
 
+// 测试连接是否正常
+func (m *Manager) ValidateConnection(ctx context.Context) error {
+	// 尝试列出区域来验证凭证是否有效
+	_, err := m.client.ListZones(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to connect to cloudflare: invalid credentials or network issue: %w", err)
+	}
+	return nil
+}
+
 // GetOrCreateTunnel 检查Tunnel是否存在，如果不存在则创建一个新的
 func (m *Manager) GetOrCreateTunnel(ctx context.Context, tunnelName string) (string, error) {
 	// 创建账户资源容器
@@ -66,7 +76,7 @@ func (m *Manager) GetOrCreateTunnel(ctx context.Context, tunnelName string) (str
 	// 如果没有找到同名tunnel，创建一个新的
 	tunnel, err := m.client.CreateTunnel(ctx, accountResource, cloudflare.TunnelCreateParams{
 		Name:      tunnelName,
-		Secret:    "", // 让Cloudflare生成secret
+		Secret:    "",      // 让Cloudflare生成secret
 		ConfigSrc: "cloud", // 使用云端配置
 	})
 	if err != nil {

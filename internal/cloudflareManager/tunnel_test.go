@@ -1,6 +1,7 @@
 package cloudflareManager
 
 import (
+	"context"
 	"testing"
 )
 
@@ -17,6 +18,57 @@ func TestNewManager(t *testing.T) {
 	
 	// 注意：由于需要有效的API令牌，我们不能进行实际的API调用测试
 	// 这些测试主要验证结构是否正确创建
+}
+
+func TestNewManagerWithInvalidConfig(t *testing.T) {
+	// 测试使用无效配置创建Cloudflare管理器
+	testCases := []struct {
+		name      string
+		accountID string
+		apiToken  string
+		tunnelID  string
+	}{
+		{
+			name:      "Empty account ID",
+			accountID: "",
+			apiToken:  "test-api-token",
+			tunnelID:  "test-tunnel-id",
+		},
+		{
+			name:      "Empty API token",
+			accountID: "test-account-id",
+			apiToken:  "",
+			tunnelID:  "test-tunnel-id",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, err := NewManager(tc.accountID, tc.apiToken, tc.tunnelID)
+			if err == nil {
+				t.Error("Expected error but got none")
+			}
+			
+			if manager != nil {
+				t.Error("Manager should be nil when config is invalid")
+			}
+		})
+	}
+}
+
+func TestValidateConnection(t *testing.T) {
+	// 测试连接验证功能
+	manager, err := NewManager("test-account-id", "test-api-token", "test-tunnel-id")
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	// 由于我们使用的是测试凭据，验证应该失败
+	ctx := context.Background()
+	err = manager.ValidateConnection(ctx)
+	if err == nil {
+		t.Error("Expected validation error but got none")
+	}
 }
 
 func TestGetOrCreateTunnel(t *testing.T) {

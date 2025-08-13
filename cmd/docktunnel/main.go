@@ -57,6 +57,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 验证Cloudflare连接
+	if err := cfManager.ValidateConnection(ctx); err != nil {
+		logger.Error("Failed to validate Cloudflare connection", "error", err)
+		os.Exit(1)
+	}
+
 	// 初始化控制器
 	controller := controller.NewController(dockerManager, cfManager, "DockTunnel")
 
