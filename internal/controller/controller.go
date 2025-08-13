@@ -79,6 +79,11 @@ func (c *Controller) parseLabelsToIngress(containers []docker.Container) ([]clou
 			// 解析标签格式: docktunnel.<service-name>.<attribute>
 			parts := strings.Split(label, ".")
 			if len(parts) < 3 {
+				// 特殊处理docktunnel.enable标签，它只有两部分
+				if len(parts) == 2 && parts[1] == "enable" {
+					// 这是启用标签，不需要特殊处理，继续解析其他标签
+					continue
+				}
 				slog.Warn("Invalid label format, skipping", "label", label, "containerID", container.ID[:12])
 				continue
 			}
