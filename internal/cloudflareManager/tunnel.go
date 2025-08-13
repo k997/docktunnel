@@ -36,6 +36,15 @@ type Manager struct {
 
 // NewManager 创建一个新的Cloudflare Manager实例
 func NewManager(accountID, apiToken, tunnelID string) (*Manager, error) {
+	// 验证必要参数
+	if accountID == "" {
+		return nil, fmt.Errorf("accountID cannot be empty")
+	}
+	
+	if apiToken == "" {
+		return nil, fmt.Errorf("apiToken cannot be empty")
+	}
+
 	// 使用API令牌创建Cloudflare API客户端
 	client, err := cloudflare.NewWithAPIToken(apiToken)
 	if err != nil {
