@@ -54,9 +54,9 @@ func (c *Controller) Sync(ctx context.Context) error {
 		return fmt.Errorf("failed to parse container labels: %w", err)
 	}
 
-	// 更新Cloudflare Tunnel配置
-	if err := c.updateCloudflareTunnel(ctx, ingressRules); err != nil {
-		return fmt.Errorf("failed to update cloudflare tunnel: %w", err)
+	// 更新Cloudflare Tunnel配置和DNS记录
+	if err := c.updateCloudflareConfiguration(ctx, ingressRules, containers); err != nil {
+		return fmt.Errorf("failed to update cloudflare configuration: %w", err)
 	}
 
 	slog.Info("Synchronization completed successfully")
@@ -197,8 +197,8 @@ func (c *Controller) parseLabelsToIngress(containers []docker.Container) ([]clou
 	return ingressRules, nil
 }
 
-// updateCloudflareTunnel 更新Cloudflare Tunnel配置
-func (c *Controller) updateCloudflareTunnel(ctx context.Context, ingressRules []cloudflare.UnvalidatedIngressRule) error {
+// updateCloudflareConfiguration 更新Cloudflare Tunnel配置和DNS记录
+func (c *Controller) updateCloudflareConfiguration(ctx context.Context, ingressRules []cloudflare.UnvalidatedIngressRule, containers []docker.Container) error {
 	// 获取或创建Tunnel
 	tunnelID, err := c.cloudflareManager.GetOrCreateTunnel(ctx, c.tunnelName)
 	if err != nil {
@@ -213,6 +213,24 @@ func (c *Controller) updateCloudflareTunnel(ctx context.Context, ingressRules []
 	}
 
 	slog.Info("Updated tunnel configuration", "ruleCount", len(ingressRules)-1) // -1 for catch-all rule
+
+	// 收集所有需要的主机名
+	hostnames := make(map[string]bool)
+	for _, rule := range ingressRules {
+		if rule.Hostname != "" && rule.Service != "http_status:404" {
+			hostnames[rule.Hostname] = true
+		}
+	}
+
+	// 为每个主机名创建或更新DNS记录
+	for hostname := range hostnames {
+		if err := c.cloudflareManager.UpsertDNSRecord(ctx, hostname, tunnelID); err != nil {
+			slog.Error("Failed to upsert DNS record", "hostname", hostname, "error", err)
+			// 继续处理其他主机名，不因单个错误而中断整个过程
+		} else {
+			slog.Info("Upserted DNS record", "hostname", hostname)
+		}
+	}
 
 	// 保存规则到控制器状态
 	c.mu.Lock()

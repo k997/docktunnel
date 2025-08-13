@@ -3,6 +3,8 @@ package cloudflareManager
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/cloudflare/cloudflare-go"
 )
@@ -12,6 +14,9 @@ type Manager struct {
 	client    *cloudflare.API
 	accountID string
 	tunnelID  string
+	// hostname到zoneID的缓存映射
+	zoneCache map[string]string
+	cacheMu   sync.RWMutex
 }
 
 // NewManager 创建一个新的Cloudflare Manager实例
@@ -26,6 +31,7 @@ func NewManager(accountID, apiToken, tunnelID string) (*Manager, error) {
 		client:    client,
 		accountID: accountID,
 		tunnelID:  tunnelID,
+		zoneCache: make(map[string]string),
 	}, nil
 }
 
@@ -112,4 +118,128 @@ func (m *Manager) GetTunnelToken(ctx context.Context) (string, error) {
 	}
 
 	return token, nil
+}
+
+// getZoneIDForHostname 根据主机名获取Zone ID，首先检查缓存，如果缓存中没有则查询Cloudflare API
+func (m *Manager) getZoneIDForHostname(ctx context.Context, hostname string) (string, error) {
+	// 检查缓存
+	m.cacheMu.RLock()
+	if zoneID, exists := m.zoneCache[hostname]; exists {
+		m.cacheMu.RUnlock()
+		return zoneID, nil
+	}
+	m.cacheMu.RUnlock()
+
+	// 从主机名提取域名部分（例如：从 api.example.com 提取 example.com）
+	domain := hostname
+	parts := strings.Split(hostname, ".")
+	if len(parts) > 2 {
+		// 取最后两个部分作为域名
+		domain = strings.Join(parts[len(parts)-2:], ".")
+	}
+
+	// 查询Cloudflare API获取zone信息
+	zones, err := m.client.ListZones(ctx, domain)
+	if err != nil {
+		return "", fmt.Errorf("failed to list zones: %w", err)
+	}
+
+	if len(zones) == 0 {
+		return "", fmt.Errorf("no zone found for domain: %s", domain)
+	}
+
+	// 使用第一个匹配的zone
+	zoneID := zones[0].ID
+
+	// 缓存结果
+	m.cacheMu.Lock()
+	m.zoneCache[hostname] = zoneID
+	m.cacheMu.Unlock()
+
+	return zoneID, nil
+}
+
+// UpsertDNSRecord 创建或更新DNS记录
+func (m *Manager) UpsertDNSRecord(ctx context.Context, hostname, tunnelID string) error {
+	// 获取zone ID
+	zoneID, err := m.getZoneIDForHostname(ctx, hostname)
+	if err != nil {
+		return fmt.Errorf("failed to get zone ID for hostname %s: %w", hostname, err)
+	}
+
+	// 创建区域资源容器
+	zoneResource := cloudflare.ZoneIdentifier(zoneID)
+
+	// 构造CNAME记录内容，指向Cloudflare Tunnel
+	content := fmt.Sprintf("%s.cfargotunnel.com", tunnelID)
+
+	// 查找现有的DNS记录
+	records, _, err := m.client.ListDNSRecords(ctx, zoneResource, cloudflare.ListDNSRecordsParams{
+		Name: hostname,
+		Type: "CNAME",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list DNS records: %w", err)
+	}
+
+	// 如果记录已存在，更新它
+	if len(records) > 0 {
+		record := records[0]
+		_, err = m.client.UpdateDNSRecord(ctx, zoneResource, cloudflare.UpdateDNSRecordParams{
+			ID:      record.ID,
+			Name:    hostname,
+			Type:    "CNAME",
+			Content: content,
+			Proxied: cloudflare.BoolPtr(true),
+			TTL:     1, // 自动TTL
+		})
+		if err != nil {
+			return fmt.Errorf("failed to update DNS record: %w", err)
+		}
+	} else {
+		// 如果记录不存在，创建新记录
+		_, err = m.client.CreateDNSRecord(ctx, zoneResource, cloudflare.CreateDNSRecordParams{
+			Name:    hostname,
+			Type:    "CNAME",
+			Content: content,
+			Proxied: cloudflare.BoolPtr(true),
+			TTL:     1, // 自动TTL
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create DNS record: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// DeleteDNSRecord 删除指定主机名的DNS记录
+func (m *Manager) DeleteDNSRecord(ctx context.Context, hostname string) error {
+	// 获取zone ID
+	zoneID, err := m.getZoneIDForHostname(ctx, hostname)
+	if err != nil {
+		return fmt.Errorf("failed to get zone ID for hostname %s: %w", hostname, err)
+	}
+
+	// 创建区域资源容器
+	zoneResource := cloudflare.ZoneIdentifier(zoneID)
+
+	// 查找现有的DNS记录
+	records, _, err := m.client.ListDNSRecords(ctx, zoneResource, cloudflare.ListDNSRecordsParams{
+		Name: hostname,
+		Type: "CNAME",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list DNS records: %w", err)
+	}
+
+	// 删除所有匹配的记录
+	for _, record := range records {
+		err = m.client.DeleteDNSRecord(ctx, zoneResource, record.ID)
+		if err != nil {
+			return fmt.Errorf("failed to delete DNS record %s: %w", record.ID, err)
+		}
+	}
+
+	return nil
 }

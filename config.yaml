@@ -5,4 +5,4 @@ log:
 cloudflare:
   accountId: "your-cloudflare-account-id"
   apiToken: "your-cloudflare-api-token"
-  tunnelId: "your-tunnel-id"
+  tunnelId: ""  # 如果为空，将自动创建隧道
