@@ -87,23 +87,12 @@ func (m *Manager) ListenForEvents(ctx context.Context, updateChan chan<- struct{
 			if err != nil {
 				return fmt.Errorf("docker event error: %w", err)
 			}
-		case msg := <-messages:
-			// 检查事件类型，确保是我们关心的事件
-			if msg.Type == events.ContainerEventType && 
-				(msg.Action == events.ActionCreate ||
-				 msg.Action == events.ActionStart ||
-				 msg.Action == events.ActionRestart ||
-				 msg.Action == events.ActionDie ||
-				 msg.Action == events.ActionStop ||
-				 msg.Action == events.ActionKill ||
-				 msg.Action == events.ActionDestroy ||
-				 msg.Action == events.ActionRemove) {
-				// 当监听到相关事件时，发送通知
-				select {
-				case updateChan <- struct{}{}:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
+		case <-messages:
+			// 当监听到相关事件时，发送通知
+			select {
+			case updateChan <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
