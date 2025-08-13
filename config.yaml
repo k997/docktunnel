@@ -1,0 +1,8 @@
+log:
+  level: "info"
+  format: "text"
+
+cloudflare:
+  accountId: "your-cloudflare-account-id"
+  apiToken: "your-cloudflare-api-token"
+  tunnelId: "your-tunnel-id"
