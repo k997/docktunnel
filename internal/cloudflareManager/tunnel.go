@@ -11,6 +11,8 @@ import (
 	"github.com/cloudflare/cloudflare-go"
 )
 
+const DEFAULT_TUNNEL_NAME = "DockTunnel"
+
 // generateTunnelSecret 生成一个用于Cloudflare Tunnel的随机secret
 func generateTunnelSecret() (string, error) {
 	// 创建一个32字节的随机密钥
@@ -19,23 +21,23 @@ func generateTunnelSecret() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	// 将密钥编码为十六进制字符串
 	return hex.EncodeToString(secret), nil
 }
 
 // Manager 封装了所有Cloudflare Tunnel相关的操作
 type Manager struct {
-	client    *cloudflare.API
-	accountID string
-	tunnelID  string
+	client  *cloudflare.API
+	account *cloudflare.ResourceContainer
+	tunnel  *cloudflare.Tunnel
 	// hostname到zoneID的缓存映射
 	zoneCache map[string]string
 	cacheMu   sync.RWMutex
 }
 
 // NewManager 创建一个新的Cloudflare Manager实例
-func NewManager(accountID, apiToken, tunnelID string) (*Manager, error) {
+func NewManager(accountID, apiToken, tunnelID, tunnelName string) (*Manager, error) {
 	// 验证必要参数
 	if accountID == "" {
 		return nil, fmt.Errorf("accountID cannot be empty")
@@ -51,91 +53,89 @@ func NewManager(accountID, apiToken, tunnelID string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to create cloudflare client: %w", err)
 	}
 
-	return &Manager{
+	// 创建manager实例
+	manager := &Manager{
 		client:    client,
-		accountID: accountID,
-		tunnelID:  tunnelID,
+		account:   cloudflare.AccountIdentifier(accountID),
 		zoneCache: make(map[string]string),
-	}, nil
-}
+	}
 
-// 测试连接是否正常
-func (m *Manager) ValidateConnection(ctx context.Context) error {
-	// 尝试列出区域来验证凭证是否有效
-	_, err := m.client.ListZones(ctx)
+	// 获取或创建隧道
+	ctx := context.Background()
+	tunnel, err := getOrCreateTunnel(client, ctx, manager.account, tunnelID, tunnelName)
 	if err != nil {
-		return fmt.Errorf("failed to connect to cloudflare: invalid credentials or network issue: %w", err)
+		return nil, fmt.Errorf("failed to get or create tunnel: %w", err)
 	}
-	return nil
+
+	manager.tunnel = &tunnel
+	return manager, nil
 }
 
-// GetOrCreateTunnel 检查Tunnel是否存在，如果不存在则创建一个新的
-func (m *Manager) GetOrCreateTunnel(ctx context.Context, tunnelName string) (string, error) {
-	// 创建账户资源容器
-	accountResource := cloudflare.AccountIdentifier(m.accountID)
-
-	// 如果tunnelID已经设置，验证它是否存在
-	if m.tunnelID != "" {
-		_, err := m.client.GetTunnel(ctx, accountResource, m.tunnelID)
+// getOrCreateTunnel 检查Tunnel是否存在，如果不存在则创建一个新的
+func getOrCreateTunnel(client *cloudflare.API, ctx context.Context, account *cloudflare.ResourceContainer, tunnelID, tunnelName string) (cloudflare.Tunnel, error) {
+	// 如果提供了tunnelID，则初始化tunnel信息
+	if tunnelID != "" {
+		tunnel, err := client.GetTunnel(ctx, account, tunnelID)
 		if err != nil {
-			return "", fmt.Errorf("failed to get tunnel %s: %w", m.tunnelID, err)
+			return cloudflare.Tunnel{}, fmt.Errorf("failed to get tunnel %s: %w", tunnelID, err)
 		}
-		return m.tunnelID, nil
+		return tunnel, nil
 	}
 
-	// 如果没有设置tunnelID，尝试查找同名的tunnel
-	tunnels, _, err := m.client.ListTunnels(ctx, accountResource, cloudflare.TunnelListParams{
+	// 如果没有提供tunnelID，则根据tunnelName查找或创建隧道
+	if tunnelName == "" {
+		// 如果tunnelName为空，则使用默认名称
+		tunnelName = "DockTunnel"
+	}
+
+	// 尝试查找同名的tunnel
+	tunnels, _, err := client.ListTunnels(ctx, account, cloudflare.TunnelListParams{
 		Name: tunnelName,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to list tunnels: %w", err)
+		return cloudflare.Tunnel{}, fmt.Errorf("failed to list tunnels: %w", err)
 	}
 
 	// 如果找到同名tunnel，使用它
 	if len(tunnels) > 0 {
-		m.tunnelID = tunnels[0].ID
-		return m.tunnelID, nil
+		return tunnels[0], nil
 	}
 
 	// 生成一个随机secret
 	secret, err := generateTunnelSecret()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate tunnel secret: %w", err)
+		return cloudflare.Tunnel{}, fmt.Errorf("failed to generate tunnel secret: %w", err)
 	}
 
 	// 如果没有找到同名tunnel，创建一个新的
-	tunnel, err := m.client.CreateTunnel(ctx, accountResource, cloudflare.TunnelCreateParams{
+	tunnel, err := client.CreateTunnel(ctx, account, cloudflare.TunnelCreateParams{
 		Name:      tunnelName,
 		Secret:    secret,           // 使用生成的secret
 		ConfigSrc: "cloudflare", // 使用云端配置
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to create tunnel: %w", err)
+		return cloudflare.Tunnel{}, fmt.Errorf("failed to create tunnel: %w", err)
 	}
 
-	m.tunnelID = tunnel.ID
-	return m.tunnelID, nil
+	return tunnel, nil
 }
 
 // UpdateConfiguration 更新Tunnel的配置
 func (m *Manager) UpdateConfiguration(ctx context.Context, ingressRules []cloudflare.UnvalidatedIngressRule) error {
-	if m.tunnelID == "" {
-		return fmt.Errorf("tunnel ID is not set")
+	if m.tunnel == nil || m.tunnel.ID == "" {
+		return fmt.Errorf("tunnel is not set")
 	}
-
-	// 创建账户资源容器
-	accountResource := cloudflare.AccountIdentifier(m.accountID)
 
 	// 创建配置参数对象
 	configParams := cloudflare.TunnelConfigurationParams{
-		TunnelID: m.tunnelID,
+		TunnelID: m.tunnel.ID,
 		Config: cloudflare.TunnelConfiguration{
 			Ingress: ingressRules,
 		},
 	}
 
 	// 更新Tunnel配置
-	_, err := m.client.UpdateTunnelConfiguration(ctx, accountResource, configParams)
+	_, err := m.client.UpdateTunnelConfiguration(ctx, m.account, configParams)
 	if err != nil {
 		return fmt.Errorf("failed to update tunnel configuration: %w", err)
 	}
@@ -145,19 +145,21 @@ func (m *Manager) UpdateConfiguration(ctx context.Context, ingressRules []cloudf
 
 // GetTunnelToken 获取Tunnel的令牌
 func (m *Manager) GetTunnelToken(ctx context.Context) (string, error) {
-	if m.tunnelID == "" {
-		return "", fmt.Errorf("tunnel ID is not set")
+	if m.tunnel == nil || m.tunnel.ID == "" {
+		return "", fmt.Errorf("tunnel is not set")
 	}
 
-	// 创建账户资源容器
-	accountResource := cloudflare.AccountIdentifier(m.accountID)
-
-	token, err := m.client.GetTunnelToken(ctx, accountResource, m.tunnelID)
+	token, err := m.client.GetTunnelToken(ctx, m.account, m.tunnel.ID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get tunnel token: %w", err)
 	}
 
 	return token, nil
+}
+
+// GetTunnel 返回当前隧道信息
+func (m *Manager) GetTunnel() *cloudflare.Tunnel {
+	return m.tunnel
 }
 
 // getZoneIDForHostname 根据主机名获取Zone ID，首先检查缓存，如果缓存中没有则查询Cloudflare API

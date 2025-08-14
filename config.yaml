@@ -13,6 +13,8 @@ cloudflare:
   apiToken: ""
   # 可选: 预创建的 Tunnel ID (如果为空，将自动创建一个新的)
   tunnelId: ""
+  # 可选: Tunnel 名称 (当tunnelId为空时使用，如果此项也为空则使用系统内置名称)
+  tunnelName: ""
 
 # 清理配置
 cleanup:

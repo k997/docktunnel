@@ -18,6 +18,7 @@ type Config struct {
 		// 使用 API Token 进行认证，这是 Cloudflare 推荐的最佳实践，无需 API Key 和 Email
 		APIToken  string `yaml:"apiToken"`
 		TunnelID  string `yaml:"tunnelId"`
+		TunnelName string `yaml:"tunnelName"`
 	} `yaml:"cloudflare"`
 	// Cleanup选项控制程序退出时是否清理生成的资源
 	Cleanup struct {

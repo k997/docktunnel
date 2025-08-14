@@ -52,20 +52,17 @@ func main() {
 		cfg.Cloudflare.AccountID,
 		cfg.Cloudflare.APIToken,
 		cfg.Cloudflare.TunnelID,
+		cfg.Cloudflare.TunnelName,
 	)
 	if err != nil {
 		appLogger.Error("Failed to create Cloudflare manager", "error", err)
 		os.Exit(1)
 	}
 
-	// 验证Cloudflare连接
-	if err := cfManager.ValidateConnection(ctx); err != nil {
-		appLogger.Error("Failed to validate Cloudflare connection", "error", err)
-		os.Exit(1)
-	}
+	appLogger.Info("Using tunnel", "tunnel", cfManager.GetTunnel())
 
 	// 初始化控制器
-	controller := controller.NewController(dockerManager, cfManager, "DockTunnel")
+	controller := controller.NewController(dockerManager, cfManager)
 
 	// 创建事件通道
 	eventChan := make(chan events.Event, 10)
@@ -88,7 +85,7 @@ func main() {
 			}
 		}
 	}()
-	
+
 	// 启动Docker事件监听器
 	wg.Add(1)
 	go func() {

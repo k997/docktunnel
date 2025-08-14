@@ -24,7 +24,6 @@ type ContainerRules struct {
 type Controller struct {
 	dockerManager     *docker.Manager
 	cloudflareManager *cloudflareManager.Manager
-	tunnelID          string
 	ingressRules      map[string]cloudflare.UnvalidatedIngressRule // hostname -> rule map
 	containerRules    map[string][]string                          // containerID -> hostnames map
 	ruleValidator     RuleValidator
@@ -32,11 +31,10 @@ type Controller struct {
 }
 
 // NewController 创建一个新的控制器实例
-func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareManager.Manager, tunnelID string) *Controller {
+func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareManager.Manager) *Controller {
 	return &Controller{
 		dockerManager:     dockerManager,
 		cloudflareManager: cloudflareManager,
-		tunnelID:          tunnelID,
 		ingressRules:      make(map[string]cloudflare.UnvalidatedIngressRule),
 		containerRules:    make(map[string][]string),
 		ruleValidator:     NewCompositeValidator(),
@@ -154,7 +152,13 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 
 // Sync 同步Docker容器状态到Cloudflare Tunnel配置
 func (c *Controller) Sync(ctx context.Context) error {
-	slog.Info("Starting synchronization", "tunnelID", c.tunnelID)
+	// 从cloudflareManager获取tunnel信息
+	tunnel := c.cloudflareManager.GetTunnel()
+	if tunnel == nil {
+		return fmt.Errorf("tunnel is not available")
+	}
+	
+	slog.Info("Starting synchronization", "tunnelID", tunnel.ID)
 
 	// 扫描运行中的容器
 	eventsList, err := c.dockerManager.ScanRunningContainers(ctx)
@@ -235,7 +239,13 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 		Service: "http_status:404",
 	})
 
-	slog.Info("Using tunnel", "tunnelID", c.tunnelID)
+	// 从cloudflareManager获取tunnel信息
+	tunnel := c.cloudflareManager.GetTunnel()
+	if tunnel == nil {
+		return fmt.Errorf("tunnel is not available")
+	}
+	
+	slog.Info("Using tunnel", "tunnelID", tunnel.ID)
 
 	// 更新配置
 	if err := c.cloudflareManager.UpdateConfiguration(ctx, ingressRules); err != nil {
@@ -247,7 +257,7 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 	// 为每个主机名创建或更新DNS记录
 	for _, rule := range ingressRules {
 		if rule.Hostname != "" && rule.Service != "http_status:404" {
-			if err := c.cloudflareManager.UpsertDNSRecord(ctx, rule.Hostname, c.tunnelID); err != nil {
+			if err := c.cloudflareManager.UpsertDNSRecord(ctx, rule.Hostname, tunnel.ID); err != nil {
 				slog.Error("Failed to upsert DNS record", "hostname", rule.Hostname, "error", err)
 				// 继续处理其他主机名，不因单个错误而中断整个过程
 			} else {
