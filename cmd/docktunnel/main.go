@@ -21,18 +21,14 @@ func main() {
 	log.Println("DockTunnel starting...")
 
 	// 加载配置
-	cfg, err := config.Load("config.yaml")
+	cfg, err := config.New()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// 验证配置
-	if err := cfg.Validate(); err != nil {
-		log.Fatalf("Invalid config: %v", err)
-	}
 
 	// 初始化日志记录器
-	var appLogger *slog.Logger = logger.New(cfg.GetLogLevel(), cfg.GetLogFormat())
+	var appLogger *slog.Logger = logger.New(cfg.Log.Level, cfg.Log.Format)
 	appLogger.Info("Configuration loaded successfully")
 
 	// 创建上下文用于优雅关闭
@@ -128,7 +124,7 @@ shutdown:
 	cancel()
 
 	// 如果配置要求清理资源，则执行清理操作
-	if cfg.ShouldCleanupOnExit() {
+	if cfg.Cleanup.OnExit {
 		appLogger.Info("Cleaning up resources as requested in configuration")
 		if err := cleanupResources(ctx, cfManager, controller, appLogger); err != nil {
 			appLogger.Error("Failed to cleanup resources", "error", err)
