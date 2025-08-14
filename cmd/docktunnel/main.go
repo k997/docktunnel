@@ -7,12 +7,12 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
-	"time"
 
 	"docktunnel/internal/cloudflareManager"
 	"docktunnel/internal/config"
 	"docktunnel/internal/controller"
 	"docktunnel/internal/docker"
+	"docktunnel/internal/events"
 	"docktunnel/internal/logger"
 	"log/slog"
 )
@@ -67,16 +67,34 @@ func main() {
 	// 初始化控制器
 	controller := controller.NewController(dockerManager, cfManager, "DockTunnel")
 
-	// 创建用于接收Docker事件的channel
-	updateChan := make(chan struct{}, 1)
+	// 创建事件通道
+	eventChan := make(chan events.Event, 10)
 
-	// 启动Docker事件监听器
+	// 启动事件处理循环
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		for {
+			select {
+			case event := <-eventChan:
+				appLogger.Info("Processing Docker event", "type", event.Type, "containerID", event.ContainerID)
+				if err := controller.Dispatch(ctx, event); err != nil {
+					appLogger.Error("Failed to dispatch event", "error", err)
+				}
+			case <-ctx.Done():
+				appLogger.Info("Event processing loop stopped")
+				return
+			}
+		}
+	}()
+	
+	// 启动Docker事件监听器
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		appLogger.Info("Starting Docker event listener")
-		if err := dockerManager.ListenForEvents(ctx, updateChan); err != nil {
+		if err := dockerManager.ListenForEvents(ctx, eventChan); err != nil {
 			appLogger.Error("Docker event listener error", "error", err)
 		}
 	}()
@@ -99,16 +117,6 @@ func main() {
 	// 启动主事件循环
 	for {
 		select {
-		case <-updateChan:
-			appLogger.Info("Docker event received, triggering synchronization")
-			// 添加一个小的延迟，以防止在容器启动/停止时过于频繁地触发同步
-			time.Sleep(2 * time.Second)
-
-			if err := controller.Sync(ctx); err != nil {
-				appLogger.Error("Synchronization failed", "error", err)
-			} else {
-				appLogger.Info("Synchronization completed successfully")
-			}
 		case <-sigChan:
 			appLogger.Info("Shutdown signal received")
 			goto shutdown
