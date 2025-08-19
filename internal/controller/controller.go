@@ -76,7 +76,7 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	}
 
 	// 解析容器标签生成规则
-	ingressRules, err := parseLabelsToIngress(event.ContainerInfo.Config.Labels, c.ruleValidator)
+	ingressRules, err := parseLabelsToIngress(event.ContainerInfo, c.ruleValidator)
 	if err != nil {
 		slog.Error("Failed to parse container labels", "error", err)
 		return fmt.Errorf("failed to parse container labels: %w", err)
@@ -168,25 +168,24 @@ func (c *Controller) Sync(ctx context.Context) error {
 
 	slog.Info("Found containers with docktunnel labels", "count", len(eventsList))
 
-	// 收集所有容器的标签
-	allLabels := make(map[string]string)
+	// 收集所有ingress规则
+	var allIngressRules []cloudflare.UnvalidatedIngressRule
 	containerHostnames := make(map[string][]string) // containerID -> hostnames
 	
 	for _, event := range eventsList {
 		if event.ContainerInfo != nil && 
 		   event.ContainerInfo.Config != nil && 
 		   event.ContainerInfo.Config.Labels != nil {
-			// 收集标签
-			for label, value := range event.ContainerInfo.Config.Labels {
-				allLabels[label] = value
-			}
 			
 			// 解析标签获取主机名
-			ingressRules, err := parseLabelsToIngress(event.ContainerInfo.Config.Labels, c.ruleValidator)
+			ingressRules, err := parseLabelsToIngress(event.ContainerInfo, c.ruleValidator)
 			if err != nil {
 				slog.Error("Failed to parse container labels during sync", "containerID", event.ContainerID, "error", err)
 				continue
 			}
+			
+			// 收集规则
+			allIngressRules = append(allIngressRules, ingressRules...)
 			
 			// 收集主机名
 			hostnames := make([]string, 0)
@@ -199,16 +198,10 @@ func (c *Controller) Sync(ctx context.Context) error {
 		}
 	}
 
-	// 解析容器标签生成规则
-	ingressRules, err := parseLabelsToIngress(allLabels, c.ruleValidator)
-	if err != nil {
-		return fmt.Errorf("failed to parse container labels: %w", err)
-	}
-
 	// 更新内部状态
 	c.mu.Lock()
 	c.ingressRules = make(map[string]cloudflare.UnvalidatedIngressRule)
-	for _, rule := range ingressRules {
+	for _, rule := range allIngressRules {
 		// 跳过catch-all规则
 		if rule.Service == "http_status:404" {
 			continue

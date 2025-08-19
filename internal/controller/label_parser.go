@@ -7,10 +7,24 @@ import (
 	"time"
 
 	"github.com/cloudflare/cloudflare-go"
+	"github.com/docker/docker/api/types/container"
 )
 
 // parseLabelsToIngress 解析容器标签并生成Ingress规则
-func parseLabelsToIngress(labels map[string]string, ruleValidator RuleValidator) ([]cloudflare.UnvalidatedIngressRule, error) {
+func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidator RuleValidator) ([]cloudflare.UnvalidatedIngressRule, error) {
+	// 检查containerInfo和Config是否存在
+	if containerInfo == nil || containerInfo.Config == nil || containerInfo.Config.Labels == nil {
+		// 返回空规则列表而不是错误，因为没有标签是有效的情况
+		return []cloudflare.UnvalidatedIngressRule{
+			{
+				Service: "http_status:404",
+			},
+		}, nil
+	}
+	
+	// 获取容器标签
+	labels := containerInfo.Config.Labels
+	
 	// 创建临时存储，键是服务名称，值是该服务对应的Ingress规则
 	rawRules := make(map[string]*cloudflare.UnvalidatedIngressRule)
 	
@@ -48,6 +62,30 @@ func parseLabelsToIngress(labels map[string]string, ruleValidator RuleValidator)
 			rule.Hostname = value
 		case "service":
 			rule.Service = value
+		case "port":
+			// port标签，仅当没有设置service时使用
+			if rule.Service == "" {
+				// 如果有容器信息，我们可以生成服务地址
+				if containerInfo != nil && containerInfo.NetworkSettings != nil {
+					// 默认协议为http
+					proto := "http"
+					// 检查是否已设置proto标签
+					protoLabel := "docktunnel." + serviceName + ".proto"
+					if protoValue, exists := labels[protoLabel]; exists {
+						proto = protoValue
+					}
+					
+					// 获取容器IP地址
+					containerIP := getContainerIP(containerInfo)
+					if containerIP != "" {
+						rule.Service = proto + "://" + containerIP + ":" + value
+					}
+				}
+			}
+		case "proto":
+			// proto标签，仅当没有设置service且有port时使用
+			// 不单独处理proto，只在处理port时检查proto的值
+			// 这里不需要做任何事情，因为proto的处理已经在port中完成了
 		case "path":
 			rule.Path = value
 		// 源站请求配置
@@ -238,4 +276,25 @@ func parseLabelsToIngress(labels map[string]string, ruleValidator RuleValidator)
 	})
 	
 	return ingressRules, nil
+}
+
+// getContainerIP 获取容器的IP地址
+func getContainerIP(containerInfo *container.InspectResponse) string {
+	if containerInfo.NetworkSettings == nil {
+		return ""
+	}
+	
+	// 优先使用bridge网络模式的IP
+	if network, exists := containerInfo.NetworkSettings.Networks["bridge"]; exists && network.IPAddress != "" {
+		return network.IPAddress
+	}
+	
+	// 如果没有bridge网络，使用第一个找到的网络IP
+	for _, network := range containerInfo.NetworkSettings.Networks {
+		if network.IPAddress != "" {
+			return network.IPAddress
+		}
+	}
+	
+	return ""
 }
