@@ -51,18 +51,6 @@ func parseLabelsToIngress(labels map[string]string, ruleValidator RuleValidator)
 		case "path":
 			rule.Path = value
 		// 源站请求配置
-		case "originRequest.noTLSVerify":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
-			}
-			
-			if value == "true" {
-				noTLSVerify := true
-				rule.OriginRequest.NoTLSVerify = &noTLSVerify
-			} else if value == "false" {
-				noTLSVerify := false
-				rule.OriginRequest.NoTLSVerify = &noTLSVerify
-			}
 		case "originRequest.connectTimeout":
 			if rule.OriginRequest == nil {
 				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
@@ -70,8 +58,8 @@ func parseLabelsToIngress(labels map[string]string, ruleValidator RuleValidator)
 			
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
-				tunnelDuration := cloudflare.TunnelDuration{Duration: duration}
-				rule.OriginRequest.ConnectTimeout = &tunnelDuration
+				tunnelDuration := &cloudflare.TunnelDuration{Duration: duration}
+				rule.OriginRequest.ConnectTimeout = tunnelDuration
 			} else {
 				slog.Warn("Invalid connect timeout value, skipping", "value", value)
 			}
@@ -82,10 +70,34 @@ func parseLabelsToIngress(labels map[string]string, ruleValidator RuleValidator)
 			
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
-				tunnelDuration := cloudflare.TunnelDuration{Duration: duration}
-				rule.OriginRequest.TLSTimeout = &tunnelDuration
+				tunnelDuration := &cloudflare.TunnelDuration{Duration: duration}
+				rule.OriginRequest.TLSTimeout = tunnelDuration
 			} else {
 				slog.Warn("Invalid TLS timeout value, skipping", "value", value)
+			}
+		case "originRequest.tcpKeepAlive":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			// 解析时间值
+			if duration, err := time.ParseDuration(value); err == nil {
+				tunnelDuration := &cloudflare.TunnelDuration{Duration: duration}
+				rule.OriginRequest.TCPKeepAlive = tunnelDuration
+			} else {
+				slog.Warn("Invalid TCP keep alive value, skipping", "value", value)
+			}
+		case "originRequest.noHappyEyeballs":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			if value == "true" {
+				noHappyEyeballs := true
+				rule.OriginRequest.NoHappyEyeballs = &noHappyEyeballs
+			} else if value == "false" {
+				noHappyEyeballs := false
+				rule.OriginRequest.NoHappyEyeballs = &noHappyEyeballs
 			}
 		case "originRequest.keepAliveConnections":
 			if rule.OriginRequest == nil {
@@ -104,11 +116,93 @@ func parseLabelsToIngress(labels map[string]string, ruleValidator RuleValidator)
 			
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
-				tunnelDuration := cloudflare.TunnelDuration{Duration: duration}
-				rule.OriginRequest.KeepAliveTimeout = &tunnelDuration
+				tunnelDuration := &cloudflare.TunnelDuration{Duration: duration}
+				rule.OriginRequest.KeepAliveTimeout = tunnelDuration
 			} else {
 				slog.Warn("Invalid keep alive timeout value, skipping", "value", value)
 			}
+		case "originRequest.httpHostHeader":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			httpHostHeader := value
+			rule.OriginRequest.HTTPHostHeader = &httpHostHeader
+		case "originRequest.originServerName":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			originServerName := value
+			rule.OriginRequest.OriginServerName = &originServerName
+		case "originRequest.caPool":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			caPool := value
+			rule.OriginRequest.CAPool = &caPool
+		case "originRequest.noTLSVerify":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			if value == "true" {
+				noTLSVerify := true
+				rule.OriginRequest.NoTLSVerify = &noTLSVerify
+			} else if value == "false" {
+				noTLSVerify := false
+				rule.OriginRequest.NoTLSVerify = &noTLSVerify
+			}
+		case "originRequest.disableChunkedEncoding":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			if value == "true" {
+				disableChunkedEncoding := true
+				rule.OriginRequest.DisableChunkedEncoding = &disableChunkedEncoding
+			} else if value == "false" {
+				disableChunkedEncoding := false
+				rule.OriginRequest.DisableChunkedEncoding = &disableChunkedEncoding
+			}
+		case "originRequest.bastionMode":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			if value == "true" {
+				bastionMode := true
+				rule.OriginRequest.BastionMode = &bastionMode
+			} else if value == "false" {
+				bastionMode := false
+				rule.OriginRequest.BastionMode = &bastionMode
+			}
+		case "originRequest.proxyAddress":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			proxyAddress := value
+			rule.OriginRequest.ProxyAddress = &proxyAddress
+		case "originRequest.proxyPort":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			if port, err := strconv.ParseUint(value, 10, 32); err == nil {
+				port32 := uint(port)
+				rule.OriginRequest.ProxyPort = &port32
+			} else {
+				slog.Warn("Invalid proxy port value, skipping", "value", value)
+			}
+		case "originRequest.proxyType":
+			if rule.OriginRequest == nil {
+				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			}
+			
+			proxyType := value
+			rule.OriginRequest.ProxyType = &proxyType
 		case "originRequest.http2Origin":
 			if rule.OriginRequest == nil {
 				rule.OriginRequest = &cloudflare.OriginRequestConfig{}

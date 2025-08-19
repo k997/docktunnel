@@ -88,12 +88,25 @@ docker run -d \
 - `docktunnel.<service-name>.hostname`: 服务的主机名
 - `docktunnel.<service-name>.service`: 服务地址（例如 `http://localhost:8080`）
 - `docktunnel.<service-name>.path`: 可选，服务路径
-- `docktunnel.<service-name>.originRequest.noTLSVerify`: 可选，是否跳过 TLS 验证
-- `docktunnel.<service-name>.originRequest.connectTimeout`: 可选，连接超时时间
-- `docktunnel.<service-name>.originRequest.tlsTimeout`: 可选，TLS 超时时间
+
+#### OriginRequest 配置选项
+
+- `docktunnel.<service-name>.originRequest.connectTimeout`: 可选，连接超时时间（例如 `30s`）
+- `docktunnel.<service-name>.originRequest.tlsTimeout`: 可选，TLS 超时时间（例如 `10s`）
+- `docktunnel.<service-name>.originRequest.tcpKeepAlive`: 可选，TCP 保持连接时间（例如 `60s`）
+- `docktunnel.<service-name>.originRequest.noHappyEyeballs`: 可选，禁用 IPv4/IPv6 回退机制（`true` 或 `false`）
 - `docktunnel.<service-name>.originRequest.keepAliveConnections`: 可选，保持连接数
-- `docktunnel.<service-name>.originRequest.keepAliveTimeout`: 可选，保持连接超时时间
-- `docktunnel.<service-name>.originRequest.http2Origin`: 可选，是否启用 HTTP/2
+- `docktunnel.<service-name>.originRequest.keepAliveTimeout`: 可选，保持连接超时时间（例如 `90s`）
+- `docktunnel.<service-name>.originRequest.httpHostHeader`: 可选，设置 HTTP Host 头
+- `docktunnel.<service-name>.originRequest.originServerName`: 可选，源服务器证书上的主机名
+- `docktunnel.<service-name>.originRequest.caPool`: 可选，源服务器证书 CA 路径
+- `docktunnel.<service-name>.originRequest.noTLSVerify`: 可选，是否跳过 TLS 验证（`true` 或 `false`）
+- `docktunnel.<service-name>.originRequest.disableChunkedEncoding`: 可选，禁用分块传输编码（`true` 或 `false`）
+- `docktunnel.<service-name>.originRequest.bastionMode`: 可选，作为跳板机运行（`true` 或 `false`）
+- `docktunnel.<service-name>.originRequest.proxyAddress`: 可选，代理监听地址
+- `docktunnel.<service-name>.originRequest.proxyPort`: 可选，代理监听端口
+- `docktunnel.<service-name>.originRequest.proxyType`: 可选，代理类型（`socks` 或空）
+- `docktunnel.<service-name>.originRequest.http2Origin`: 可选，是否启用 HTTP/2（`true` 或 `false`）
 
 ### 运行
 
@@ -158,7 +171,38 @@ docker run -d \
   -l docktunnel.legacy.originRequest.noTLSVerify=true \
   -l docktunnel.legacy.originRequest.connectTimeout=10s \
   -l docktunnel.legacy.originRequest.keepAliveConnections=10 \
+  -l docktunnel.legacy.originRequest.http2Origin=true \
   legacy-service:latest
+```
+
+### 完整配置示例
+
+以下示例展示了所有可用的配置选项：
+
+```bash
+docker run -d \
+  --name=full-config-service \
+  -l docktunnel.enable=true \
+  -l docktunnel.full.hostname=full.example.com \
+  -l docktunnel.full.service=http://localhost:8080 \
+  -l docktunnel.full.path=/api \
+  -l docktunnel.full.originRequest.connectTimeout=30s \
+  -l docktunnel.full.originRequest.tlsTimeout=10s \
+  -l docktunnel.full.originRequest.tcpKeepAlive=60s \
+  -l docktunnel.full.originRequest.noHappyEyeballs=true \
+  -l docktunnel.full.originRequest.keepAliveConnections=10 \
+  -l docktunnel.full.originRequest.keepAliveTimeout=90s \
+  -l docktunnel.full.originRequest.httpHostHeader=host.example.com \
+  -l docktunnel.full.originRequest.originServerName=origin.example.com \
+  -l docktunnel.full.originRequest.caPool=/path/to/ca \
+  -l docktunnel.full.originRequest.noTLSVerify=true \
+  -l docktunnel.full.originRequest.disableChunkedEncoding=true \
+  -l docktunnel.full.originRequest.bastionMode=false \
+  -l docktunnel.full.originRequest.proxyAddress=127.0.0.1 \
+  -l docktunnel.full.originRequest.proxyPort=8081 \
+  -l docktunnel.full.originRequest.proxyType=socks \
+  -l docktunnel.full.originRequest.http2Origin=true \
+  full-config-service:latest
 ```
 
 ## 开发
