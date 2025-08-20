@@ -25,14 +25,24 @@ type Controller struct {
 }
 
 // NewController 创建一个新的控制器实例
-func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareManager.Manager) *Controller {
-	return &Controller{
+func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareManager.Manager, catchAllService string) *Controller {
+	controller := &Controller{
 		dockerManager:     dockerManager,
 		cloudflareManager: cloudflareManager,
 		ingressRules:      make(map[string]cloudflare.UnvalidatedIngressRule),
 		containerRules:    make(map[string][]string),
 		ruleValidator:     NewCompositeValidator(),
 	}
+
+	// 其他初始化逻辑...
+
+	// 初始化默认的catch-all规则
+	catchAllRule := cloudflare.UnvalidatedIngressRule{
+		Service: catchAllService,
+	}
+	controller.ingressRules["CATCH_ALL"] = catchAllRule
+
+	return controller
 }
 
 // Dispatch 是所有事件处理的统一入口
@@ -79,19 +89,18 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	// 收集主机名列表
 	hostnames := make([]string, 0)
 	for _, rule := range ingressRules {
-		// 跳过catch-all规则
-		if rule.Service == "http_status:404" {
-			continue
+		// 跳过没有主机名的规则（catch-all规则）
+		if rule.Hostname != "" {
+			hostnames = append(hostnames, rule.Hostname)
 		}
-		hostnames = append(hostnames, rule.Hostname)
 	}
 
 	// 更新内部状态
 	c.mu.Lock()
 	// 添加规则
 	for _, rule := range ingressRules {
-		// 跳过catch-all规则
-		if rule.Service == "http_status:404" {
+		// 跳过没有主机名的规则（catch-all规则）
+		if rule.Hostname == "" {
 			continue
 		}
 		c.ingressRules[rule.Hostname] = rule
@@ -184,7 +193,8 @@ func (c *Controller) Sync(ctx context.Context) error {
 			// 收集主机名
 			hostnames := make([]string, 0)
 			for _, rule := range ingressRules {
-				if rule.Service != "http_status:404" {
+				// 跳过没有主机名的规则（catch-all规则）
+				if rule.Hostname != "" {
 					hostnames = append(hostnames, rule.Hostname)
 				}
 			}
@@ -194,15 +204,26 @@ func (c *Controller) Sync(ctx context.Context) error {
 
 	// 更新内部状态
 	c.mu.Lock()
+	// 保存现有的catch-all规则
+	catchAllRule, catchAllExists := c.ingressRules["CATCH_ALL"]
+	
+	// 重新创建ingress规则map
 	c.ingressRules = make(map[string]cloudflare.UnvalidatedIngressRule)
+	
+	// 添加所有新规则
 	for _, rule := range allIngressRules {
-		// 跳过catch-all规则
-		if rule.Service == "http_status:404" {
+		// 跳过没有主机名的规则（catch-all规则）
+		if rule.Hostname == "" {
 			continue
 		}
 		c.ingressRules[rule.Hostname] = rule
 	}
-
+	
+	// 恢复catch-all规则
+	if catchAllExists {
+		c.ingressRules["CATCH_ALL"] = catchAllRule
+	}
+	
 	// 更新容器与主机名的关联关系
 	c.containerRules = containerHostnames
 	c.mu.Unlock()
@@ -233,7 +254,8 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 
 	// 为每个主机名创建或更新DNS记录
 	for _, rule := range ingressRules {
-		if rule.Hostname != "" && rule.Service != "http_status:404" {
+		// 只为有主机名的规则创建DNS记录（跳过catch-all规则）
+		if rule.Hostname != "" {
 			if err := c.cloudflareManager.UpsertDNSRecord(ctx, rule.Hostname, tunnel.ID); err != nil {
 				slog.Error("Failed to upsert DNS record", "hostname", rule.Hostname, "error", err)
 				// 继续处理其他主机名，不因单个错误而中断整个过程
@@ -251,15 +273,26 @@ func (c *Controller) GetIngressRules() []cloudflare.UnvalidatedIngressRule {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	rules := make([]cloudflare.UnvalidatedIngressRule, 0, len(c.ingressRules)+1) // +1 for catch-all rule
-	for _, rule := range c.ingressRules {
-		rules = append(rules, rule)
+	// 创建规则切片，为所有规则加上catch-all规则预留空间
+	rules := make([]cloudflare.UnvalidatedIngressRule, 0, len(c.ingressRules))
+
+	// 添加所有非catch-all规则
+	for hostname, rule := range c.ingressRules {
+		// 跳过catch-all规则，稍后专门添加
+		if hostname != "CATCH_ALL" {
+			rules = append(rules, rule)
+		}
 	}
 	
-	// 添加默认的catch-all规则
-	rules = append(rules, cloudflare.UnvalidatedIngressRule{
-		Service: "http_status:404",
-	})
+	// 添加catch-all规则
+	if catchAllRule, exists := c.ingressRules["CATCH_ALL"]; exists {
+		rules = append(rules, catchAllRule)
+	} else {
+		// 如果由于某种原因catch-all规则不存在，则使用默认值
+		rules = append(rules, cloudflare.UnvalidatedIngressRule{
+			Service: "http_status:404",
+		})
+	}
 	
 	return rules
 }

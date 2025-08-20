@@ -19,6 +19,25 @@ func TestNewController(t *testing.T) {
 	}
 }
 
+func TestNewControllerWithCatchAll(t *testing.T) {
+	// 测试使用catchAllService创建控制器实例
+	controller := NewController(nil, nil, "http_status:404")
+	
+	if controller == nil {
+		t.Error("Controller should not be nil")
+	}
+	
+	// 检查catch-all规则是否正确初始化
+	catchAllRule, exists := controller.ingressRules["CATCH_ALL"]
+	if !exists {
+		t.Error("Catch-all rule should exist")
+	}
+	
+	if catchAllRule.Service != "http_status:404" {
+		t.Errorf("Expected catch-all service to be 'http_status:404', got '%s'", catchAllRule.Service)
+	}
+}
+
 func TestParseLabelsToIngress(t *testing.T) {
 	// 创建测试用的标签数据
 	labels := map[string]string{

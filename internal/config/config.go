@@ -16,6 +16,7 @@ type Config struct {
 		APIToken   string `mapstructure:"apiToken"`
 		TunnelID   string `mapstructure:"tunnelId"`
 		TunnelName string `mapstructure:"tunnelName"`
+		CatchAll   string `mapstructure:"catchAll"`
 	} `mapstructure:"cloudflare"`
 	Cleanup struct {
 		OnExit bool `mapstructure:"onExit"`
@@ -30,6 +31,7 @@ func New() (*Config, error) {
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")
 	v.SetDefault("cloudflare.tunnelName", "DockTunnel") // 默认通道名称
+	v.SetDefault("cloudflare.catchAll", "http_status:404") // 默认catch-all规则
 	v.SetDefault("cleanup.onExit", true)
 
 	// 2. 设置配置文件

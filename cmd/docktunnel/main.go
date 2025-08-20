@@ -58,7 +58,7 @@ func main() {
 	appLogger.Info("Using tunnel", "tunnel", cfManager.GetTunnel())
 
 	// 初始化控制器
-	controller := controller.NewController(dockerManager, cfManager)
+	controller := controller.NewController(dockerManager, cfManager, cfg.Cloudflare.CatchAll)
 
 	// 创建事件通道
 	eventChan := make(chan events.Event, 10)
