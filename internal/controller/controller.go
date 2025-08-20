@@ -9,16 +9,10 @@ import (
 	"github.com/cloudflare/cloudflare-go"
 	eventTypes "github.com/docker/docker/api/types/events"
 
+	"docktunnel/internal/cloudflareManager"
 	"docktunnel/internal/docker"
 	"docktunnel/internal/events"
-	"docktunnel/internal/cloudflareManager"
 )
-
-// ContainerRules 用于跟踪容器和其规则的关联关系
-type ContainerRules struct {
-	ContainerID string
-	Hostnames   []string
-}
 
 // Controller 负责协调Docker和Cloudflare模块的工作
 type Controller struct {
@@ -102,7 +96,7 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 		}
 		c.ingressRules[rule.Hostname] = rule
 	}
-	
+
 	// 记录容器与主机名的关联关系
 	c.containerRules[event.ContainerID] = hostnames
 	c.mu.Unlock()
@@ -123,10 +117,10 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 		slog.Warn("No rules found for stopped container", "containerID", event.ContainerID)
 		return nil
 	}
-	
+
 	// 从容器规则映射中删除
 	delete(c.containerRules, event.ContainerID)
-	
+
 	// 从ingress规则中删除对应的规则
 	for _, hostname := range hostnamesToRemove {
 		delete(c.ingressRules, hostname)
@@ -157,7 +151,7 @@ func (c *Controller) Sync(ctx context.Context) error {
 	if tunnel == nil {
 		return fmt.Errorf("tunnel is not available")
 	}
-	
+
 	slog.Info("Starting synchronization", "tunnelID", tunnel.ID)
 
 	// 扫描运行中的容器
@@ -171,22 +165,22 @@ func (c *Controller) Sync(ctx context.Context) error {
 	// 收集所有ingress规则
 	var allIngressRules []cloudflare.UnvalidatedIngressRule
 	containerHostnames := make(map[string][]string) // containerID -> hostnames
-	
+
 	for _, event := range eventsList {
-		if event.ContainerInfo != nil && 
-		   event.ContainerInfo.Config != nil && 
-		   event.ContainerInfo.Config.Labels != nil {
-			
+		if event.ContainerInfo != nil &&
+			event.ContainerInfo.Config != nil &&
+			event.ContainerInfo.Config.Labels != nil {
+
 			// 解析标签获取主机名
 			ingressRules, err := parseLabelsToIngress(event.ContainerInfo, c.ruleValidator)
 			if err != nil {
 				slog.Error("Failed to parse container labels during sync", "containerID", event.ContainerID, "error", err)
 				continue
 			}
-			
+
 			// 收集规则
 			allIngressRules = append(allIngressRules, ingressRules...)
-			
+
 			// 收集主机名
 			hostnames := make([]string, 0)
 			for _, rule := range ingressRules {
@@ -208,7 +202,7 @@ func (c *Controller) Sync(ctx context.Context) error {
 		}
 		c.ingressRules[rule.Hostname] = rule
 	}
-	
+
 	// 更新容器与主机名的关联关系
 	c.containerRules = containerHostnames
 	c.mu.Unlock()
@@ -220,24 +214,14 @@ func (c *Controller) Sync(ctx context.Context) error {
 // syncToCloudflare 将当前规则同步到Cloudflare
 func (c *Controller) syncToCloudflare(ctx context.Context) error {
 	// 构建规则列表
-	c.mu.RLock()
-	ingressRules := make([]cloudflare.UnvalidatedIngressRule, 0, len(c.ingressRules)+1)
-	for _, rule := range c.ingressRules {
-		ingressRules = append(ingressRules, rule)
-	}
-	c.mu.RUnlock()
-
-	// 添加默认的catch-all规则
-	ingressRules = append(ingressRules, cloudflare.UnvalidatedIngressRule{
-		Service: "http_status:404",
-	})
+	ingressRules := c.GetIngressRules()
 
 	// 从cloudflareManager获取tunnel信息
 	tunnel := c.cloudflareManager.GetTunnel()
 	if tunnel == nil {
 		return fmt.Errorf("tunnel is not available")
 	}
-	
+
 	slog.Info("Using tunnel", "tunnelID", tunnel.ID)
 
 	// 更新配置
@@ -266,10 +250,16 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 func (c *Controller) GetIngressRules() []cloudflare.UnvalidatedIngressRule {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
-	rules := make([]cloudflare.UnvalidatedIngressRule, 0, len(c.ingressRules))
+
+	rules := make([]cloudflare.UnvalidatedIngressRule, 0, len(c.ingressRules)+1) // +1 for catch-all rule
 	for _, rule := range c.ingressRules {
 		rules = append(rules, rule)
 	}
+	
+	// 添加默认的catch-all规则
+	rules = append(rules, cloudflare.UnvalidatedIngressRule{
+		Service: "http_status:404",
+	})
+	
 	return rules
 }
