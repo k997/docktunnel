@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -254,6 +255,51 @@ func (m *Manager) UpsertDNSRecord(ctx context.Context, hostname, tunnelID string
 
 	return nil
 }
+
+// ListDNSRecords 列出所有与当前隧道相关的DNS记录
+// 此方法会获取账户下所有zone，然后查找所有指向当前隧道的DNS记录
+func (m *Manager) ListDNSRecords(ctx context.Context) ([]cloudflare.DNSRecord, error) {
+	// 确保tunnel存在
+	if m.tunnel == nil {
+		return nil, fmt.Errorf("tunnel is not available")
+	}
+
+	// 获取所有zone
+	zones, err := m.client.ListZones(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list zones: %w", err)
+	}
+
+	// 收集所有与当前隧道相关的DNS记录
+	var allTunnelRecords []cloudflare.DNSRecord
+	expectedContent := fmt.Sprintf("%s.cfargotunnel.com", m.tunnel.ID)
+
+	// 遍历所有zone
+	for _, zone := range zones {
+		// 创建区域资源容器
+		zoneResource := cloudflare.ZoneIdentifier(zone.ID)
+
+		// 列出zone中的所有CNAME记录
+		records, _, err := m.client.ListDNSRecords(ctx, zoneResource, cloudflare.ListDNSRecordsParams{
+			Type: "CNAME",
+		})
+		if err != nil {
+			// 如果某个zone访问失败，记录错误但继续处理其他zone
+			slog.Warn("Failed to list DNS records for zone", "zone", zone.Name, "error", err)
+			continue
+		}
+
+		// 过滤出指向当前隧道的记录
+		for _, record := range records {
+			if record.Content == expectedContent {
+				allTunnelRecords = append(allTunnelRecords, record)
+			}
+		}
+	}
+
+	return allTunnelRecords, nil
+}
+
 
 // DeleteDNSRecord 删除指定主机名的DNS记录
 func (m *Manager) DeleteDNSRecord(ctx context.Context, hostname string) error {
