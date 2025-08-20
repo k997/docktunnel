@@ -15,6 +15,9 @@ cloudflare:
   tunnelId: ""
   # 可选: Tunnel 名称 (当tunnelId为空时使用，如果此项也为空则使用系统内置名称)
   tunnelName: ""
+  # Catch-all 服务配置 (当没有匹配的规则时使用的默认服务)
+  # 默认值为 http_status:404，也可以设置为其他服务如 http://localhost:8080
+  catchAll: "http_status:404"
 
 # 清理配置
 cleanup:
