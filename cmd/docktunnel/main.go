@@ -126,7 +126,7 @@ shutdown:
 	// 如果配置要求清理资源，则执行清理操作
 	if cfg.Cleanup.OnExit {
 		appLogger.Info("Cleaning up resources as requested in configuration")
-		if err := cleanupResources(ctx, cfManager, controller, appLogger); err != nil {
+		if err := controller.CleanupResources(ctx); err != nil {
 			appLogger.Error("Failed to cleanup resources", "error", err)
 		} else {
 			appLogger.Info("Resources cleaned up successfully")
@@ -139,23 +139,3 @@ shutdown:
 	appLogger.Info("DockTunnel shutdown complete")
 }
 
-// cleanupResources 清理创建的DNS记录和tunnel
-func cleanupResources(ctx context.Context, cfManager *cloudflareManager.Manager, controller *controller.Controller, logger *slog.Logger) error {
-	// 获取当前的ingress规则以获取所有主机名
-	ingressRules := controller.GetIngressRules()
-
-	// 删除所有DNS记录
-	for _, rule := range ingressRules {
-		if rule.Hostname != "" && rule.Service != "http_status:404" {
-			if err := cfManager.DeleteDNSRecord(ctx, rule.Hostname); err != nil {
-				logger.Error("Failed to delete DNS record", "hostname", rule.Hostname, "error", err)
-				// 继续尝试删除其他记录
-			}
-		}
-	}
-
-	// 注意：我们不删除tunnel本身，因为这可能会影响其他服务
-	// 如果需要删除tunnel，用户可以手动删除或通过Cloudflare仪表板操作
-
-	return nil
-}

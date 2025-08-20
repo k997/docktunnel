@@ -60,6 +60,33 @@ func (c *Controller) Dispatch(ctx context.Context, event events.Event) error {
 	}
 }
 
+// CleanupResources 清理创建的DNS记录
+func (c *Controller) CleanupResources(ctx context.Context) error {
+	c.mu.Lock()
+	// 保存现有的catch-all规则
+	catchAllRule, catchAllExists := c.ingressRules["CATCH_ALL"]
+	
+	// 清空ingressRules和containerRules
+	c.ingressRules = make(map[string]cloudflare.UnvalidatedIngressRule)
+	c.containerRules = make(map[string][]string)
+	
+	// 恢复catch-all规则
+	if catchAllExists {
+		c.ingressRules["CATCH_ALL"] = catchAllRule
+	}
+	c.mu.Unlock()
+
+	// 调用syncToCloudflare同步空的规则集（这将删除所有DNS记录）
+	if err := c.syncToCloudflare(ctx); err != nil {
+		return err
+	}
+
+	// 注意：我们不删除tunnel本身，因为这可能会影响其他服务
+	// 如果需要删除tunnel，用户可以手动删除或通过Cloudflare仪表板操作
+
+	return nil
+}
+
 // handleContainerStart 处理容器启动事件
 func (c *Controller) handleContainerStart(ctx context.Context, event events.Event) error {
 	slog.Info("Handling container start event", "containerID", event.ContainerID)
@@ -137,17 +164,9 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 	c.mu.Unlock()
 
 	// 同步更新后的规则到Cloudflare
+	// syncToCloudflare会调用syncDNSRecords来处理DNS记录的同步（包括删除不再需要的记录）
 	if err := c.syncToCloudflare(ctx); err != nil {
 		return err
-	}
-
-	// 删除已停止容器对应的DNS记录
-	for _, hostname := range hostnamesToRemove {
-		if err := c.cloudflareManager.DeleteDNSRecord(ctx, hostname); err != nil {
-			slog.Error("Failed to delete DNS record", "hostname", hostname, "error", err)
-		} else {
-			slog.Info("Deleted DNS record", "hostname", hostname)
-		}
 	}
 
 	return nil
@@ -252,18 +271,82 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 
 	slog.Info("Updated tunnel configuration", "ruleCount", len(ingressRules)-1) // -1 for catch-all rule
 
-	// 为每个主机名创建或更新DNS记录
-	for _, rule := range ingressRules {
-		// 只为有主机名的规则创建DNS记录（跳过catch-all规则）
-		if rule.Hostname != "" {
-			if err := c.cloudflareManager.UpsertDNSRecord(ctx, rule.Hostname, tunnel.ID); err != nil {
-				slog.Error("Failed to upsert DNS record", "hostname", rule.Hostname, "error", err)
-				// 继续处理其他主机名，不因单个错误而中断整个过程
+	// 同步DNS记录
+	if err := c.syncDNSRecords(ctx); err != nil {
+		return fmt.Errorf("failed to sync DNS records: %w", err)
+	}
+
+	return nil
+}
+
+// syncDNSRecords 同步DNS记录到Cloudflare
+// 这个方法会确保Cloudflare中的DNS记录与当前ingress规则保持一致
+// 1. 先获取Cloudflare上当前的所有DNS记录信息
+// 2. 为所有现有的ingress规则创建或更新DNS记录
+// 3. 删除不再需要的DNS记录
+func (c *Controller) syncDNSRecords(ctx context.Context) error {
+	// 获取当前隧道信息
+	tunnel := c.cloudflareManager.GetTunnel()
+	if tunnel == nil {
+		return fmt.Errorf("tunnel is not available")
+	}
+
+	c.mu.RLock()
+	// 收集当前需要的主机名（从containerRules中获取）
+	currentHostnames := make(map[string]bool)
+	for _, hostnames := range c.containerRules {
+		for _, hostname := range hostnames {
+			currentHostnames[hostname] = true
+		}
+	}
+	c.mu.RUnlock()
+
+	slog.Info("Syncing DNS records", "hostnamesCount", len(currentHostnames))
+
+	// 先获取Cloudflare上当前的所有DNS记录，以减少API访问次数
+	allTunnelRecords, err := c.cloudflareManager.ListDNSRecords(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list tunnel DNS records: %w", err)
+	}
+
+	// 创建一个映射以便快速查找现有的DNS记录
+	existingRecords := make(map[string]cloudflare.DNSRecord)
+	for _, record := range allTunnelRecords {
+		existingRecords[record.Name] = record
+	}
+
+	// 处理需要的DNS记录
+	createdOrUpdatedCount := 0
+	expectedContent := fmt.Sprintf("%s.cfargotunnel.com", tunnel.ID)
+	for hostname := range currentHostnames {
+		// 当记录不存在或内容不一致时才调用UpsertDNSRecord
+		if record, exists := existingRecords[hostname]; !exists || record.Content != expectedContent {
+			if err := c.cloudflareManager.UpsertDNSRecord(ctx, hostname, tunnel.ID); err != nil {
+				slog.Error("Failed to upsert DNS record", "hostname", hostname, "error", err)
 			} else {
-				slog.Info("Upserted DNS record", "hostname", rule.Hostname)
+				slog.Info("Upserted DNS record", "hostname", hostname)
+				createdOrUpdatedCount++
 			}
 		}
 	}
+
+	// 删除不再需要的DNS记录
+	deletedCount := 0
+	for hostname, record := range existingRecords {
+		if !currentHostnames[hostname] {
+			// 记录存在但不再需要，删除它
+			if err := c.cloudflareManager.DeleteDNSRecord(ctx, record.Name); err != nil {
+				slog.Error("Failed to delete DNS record", "hostname", record.Name, "error", err)
+			} else {
+				slog.Info("Deleted DNS record", "hostname", record.Name)
+				deletedCount++
+			}
+		}
+	}
+
+	slog.Info("Finished syncing DNS records", 
+		"createdOrUpdated", createdOrUpdatedCount, 
+		"deleted", deletedCount)
 
 	return nil
 }
