@@ -48,10 +48,18 @@ func (m *Manager) ScanRunningContainers(ctx context.Context) ([]events.Event, er
 	// 转换为事件结构
 	var result []events.Event
 	for _, c := range containers {
-		result = append(result, events.Event{
-			Type:        eventTypes.ActionStart, // 扫描到的容器视为启动事件
+		event := events.Event{
+			Type:        eventTypes.ActionStart,
 			ContainerID: c.ID,
-		})
+		}
+		containerInfo, err := m.client.ContainerInspect(ctx, c.ID)
+		if err != nil {
+			// 即使无法获取容器信息，也发送事件，但不包含详细信息
+			// 上层处理逻辑需要处理ContainerInfo为nil的情况
+		} else {
+			event.ContainerInfo = &containerInfo
+		}
+		result = append(result, event)
 	}
 
 	return result, nil
