@@ -6,18 +6,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v5"
+	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 	"github.com/docker/docker/api/types/container"
 )
 
-// parseLabelsToIngress 解析容器标签并生成Ingress规则
-func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidator RuleValidator) ([]cloudflare.UnvalidatedIngressRule, error) {
+// parseLabelsToIngress 解析容器标签并生成Ingress规则，适配cloudflare-go/v5
+func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidator RuleValidator) ([]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, error) {
 	// 检查containerInfo和Config是否存在
 	if containerInfo == nil || containerInfo.Config == nil || containerInfo.Config.Labels == nil {
 		// 返回空规则列表而不是错误，因为没有标签是有效的情况
-		return []cloudflare.UnvalidatedIngressRule{
+		return []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 			{
-				Service: "http_status:404",
+				Service: cloudflare.F("http_status:404"),
 			},
 		}, nil
 	}
@@ -26,7 +27,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 	labels := containerInfo.Config.Labels
 	
 	// 创建临时存储，键是服务名称，值是该服务对应的Ingress规则
-	rawRules := make(map[string]*cloudflare.UnvalidatedIngressRule)
+	rawRules := make(map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
 	
 	// 遍历所有标签，解析其内容
 	for label, value := range labels {
@@ -53,18 +54,18 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 		// 获取或创建该服务的规则
 		rule, exists := rawRules[serviceName]
 		if !exists {
-			rule = &cloudflare.UnvalidatedIngressRule{}
+			rule = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{}
 		}
 		
 		// 根据属性设置规则字段
 		switch attribute {
 		case "hostname":
-			rule.Hostname = value
+			rule.Hostname = cloudflare.F(value)
 		case "service":
-			rule.Service = value
+			rule.Service = cloudflare.F(value)
 		case "port":
 			// port标签，仅当没有设置service时使用
-			if rule.Service == "" {
+			if rule.Service.Value == "" {
 				// 如果有容器信息，我们可以生成服务地址
 				if containerInfo != nil && containerInfo.NetworkSettings != nil {
 					// 默认协议为http
@@ -78,7 +79,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 					// 获取容器IP地址
 					containerIP := getContainerIP(containerInfo)
 					if containerIP != "" {
-						rule.Service = proto + "://" + containerIP + ":" + value
+						rule.Service = cloudflare.F(proto + "://" + containerIP + ":" + value)
 					}
 				}
 			}
@@ -87,171 +88,155 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 			// 不单独处理proto，只在处理port时检查proto的值
 			// 这里不需要做任何事情，因为proto的处理已经在port中完成了
 		case "path":
-			rule.Path = value
+			rule.Path = cloudflare.F(value)
 		// 源站请求配置
 		case "originRequest.connectTimeout":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
-				tunnelDuration := &cloudflare.TunnelDuration{Duration: duration}
-				rule.OriginRequest.ConnectTimeout = tunnelDuration
+				seconds := int64(duration.Seconds())
+				rule.OriginRequest.Value.ConnectTimeout = cloudflare.F(seconds)
 			} else {
 				slog.Warn("Invalid connect timeout value, skipping", "value", value)
 			}
 		case "originRequest.tlsTimeout":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
-				tunnelDuration := &cloudflare.TunnelDuration{Duration: duration}
-				rule.OriginRequest.TLSTimeout = tunnelDuration
+				seconds := int64(duration.Seconds())
+				rule.OriginRequest.Value.TLSTimeout = cloudflare.F(seconds)
 			} else {
 				slog.Warn("Invalid TLS timeout value, skipping", "value", value)
 			}
 		case "originRequest.tcpKeepAlive":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
-				tunnelDuration := &cloudflare.TunnelDuration{Duration: duration}
-				rule.OriginRequest.TCPKeepAlive = tunnelDuration
+				seconds := int64(duration.Seconds())
+				rule.OriginRequest.Value.TCPKeepAlive = cloudflare.F(seconds)
 			} else {
 				slog.Warn("Invalid TCP keep alive value, skipping", "value", value)
 			}
 		case "originRequest.noHappyEyeballs":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			if value == "true" {
-				noHappyEyeballs := true
-				rule.OriginRequest.NoHappyEyeballs = &noHappyEyeballs
+				rule.OriginRequest.Value.NoHappyEyeballs = cloudflare.F(true)
 			} else if value == "false" {
-				noHappyEyeballs := false
-				rule.OriginRequest.NoHappyEyeballs = &noHappyEyeballs
+				rule.OriginRequest.Value.NoHappyEyeballs = cloudflare.F(false)
 			}
 		case "originRequest.keepAliveConnections":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			if num, err := strconv.Atoi(value); err == nil {
-				rule.OriginRequest.KeepAliveConnections = &num
+				rule.OriginRequest.Value.KeepAliveConnections = cloudflare.F(int64(num))
 			} else {
 				slog.Warn("Invalid keep alive connections value, skipping", "value", value)
 			}
 		case "originRequest.keepAliveTimeout":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
-				tunnelDuration := &cloudflare.TunnelDuration{Duration: duration}
-				rule.OriginRequest.KeepAliveTimeout = tunnelDuration
+				seconds := int64(duration.Seconds())
+				rule.OriginRequest.Value.KeepAliveTimeout = cloudflare.F(seconds)
 			} else {
 				slog.Warn("Invalid keep alive timeout value, skipping", "value", value)
 			}
 		case "originRequest.httpHostHeader":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
-			httpHostHeader := value
-			rule.OriginRequest.HTTPHostHeader = &httpHostHeader
+			rule.OriginRequest.Value.HTTPHostHeader = cloudflare.F(value)
 		case "originRequest.originServerName":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
-			originServerName := value
-			rule.OriginRequest.OriginServerName = &originServerName
+			rule.OriginRequest.Value.OriginServerName = cloudflare.F(value)
 		case "originRequest.caPool":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
-			caPool := value
-			rule.OriginRequest.CAPool = &caPool
+			rule.OriginRequest.Value.CAPool = cloudflare.F(value)
 		case "originRequest.noTLSVerify":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			if value == "true" {
-				noTLSVerify := true
-				rule.OriginRequest.NoTLSVerify = &noTLSVerify
+				rule.OriginRequest.Value.NoTLSVerify = cloudflare.F(true)
 			} else if value == "false" {
-				noTLSVerify := false
-				rule.OriginRequest.NoTLSVerify = &noTLSVerify
+				rule.OriginRequest.Value.NoTLSVerify = cloudflare.F(false)
 			}
 		case "originRequest.disableChunkedEncoding":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			if value == "true" {
-				disableChunkedEncoding := true
-				rule.OriginRequest.DisableChunkedEncoding = &disableChunkedEncoding
+				rule.OriginRequest.Value.DisableChunkedEncoding = cloudflare.F(true)
 			} else if value == "false" {
-				disableChunkedEncoding := false
-				rule.OriginRequest.DisableChunkedEncoding = &disableChunkedEncoding
-			}
-		case "originRequest.bastionMode":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
-			}
-			
-			if value == "true" {
-				bastionMode := true
-				rule.OriginRequest.BastionMode = &bastionMode
-			} else if value == "false" {
-				bastionMode := false
-				rule.OriginRequest.BastionMode = &bastionMode
-			}
-		case "originRequest.proxyAddress":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
-			}
-			
-			proxyAddress := value
-			rule.OriginRequest.ProxyAddress = &proxyAddress
-		case "originRequest.proxyPort":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
-			}
-			
-			if port, err := strconv.ParseUint(value, 10, 32); err == nil {
-				port32 := uint(port)
-				rule.OriginRequest.ProxyPort = &port32
-			} else {
-				slog.Warn("Invalid proxy port value, skipping", "value", value)
+				rule.OriginRequest.Value.DisableChunkedEncoding = cloudflare.F(false)
 			}
 		case "originRequest.proxyType":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
-			proxyType := value
-			rule.OriginRequest.ProxyType = &proxyType
+			rule.OriginRequest.Value.ProxyType = cloudflare.F(value)
 		case "originRequest.http2Origin":
-			if rule.OriginRequest == nil {
-				rule.OriginRequest = &cloudflare.OriginRequestConfig{}
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 			
 			if value == "true" {
-				http2Origin := true
-				rule.OriginRequest.Http2Origin = &http2Origin
+				rule.OriginRequest.Value.HTTP2Origin = cloudflare.F(true)
 			} else if value == "false" {
-				http2Origin := false
-				rule.OriginRequest.Http2Origin = &http2Origin
+				rule.OriginRequest.Value.HTTP2Origin = cloudflare.F(false)
 			}
 		}
 		
@@ -265,14 +250,14 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 	}
 	
 	// 转换为Cloudflare Ingress规则列表
-	var ingressRules []cloudflare.UnvalidatedIngressRule
+	var ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rawRules {
 		ingressRules = append(ingressRules, *rule)
 	}
 	
 	// 添加默认的catch-all规则
-	ingressRules = append(ingressRules, cloudflare.UnvalidatedIngressRule{
-		Service: "http_status:404",
+	ingressRules = append(ingressRules, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Service: cloudflare.F("http_status:404"),
 	})
 	
 	return ingressRules, nil

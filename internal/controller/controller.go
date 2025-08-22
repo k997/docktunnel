@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
-	"github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v5"
+	"github.com/cloudflare/cloudflare-go/v5/dns"
+	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 	eventTypes "github.com/docker/docker/api/types/events"
 
 	"docktunnel/internal/cloudflareManager"
@@ -18,8 +21,8 @@ import (
 type Controller struct {
 	dockerManager     *docker.Manager
 	cloudflareManager *cloudflareManager.Manager
-	ingressRules      map[string]cloudflare.UnvalidatedIngressRule // hostname -> rule map
-	containerRules    map[string][]string                          // containerID -> hostnames map
+	ingressRules      map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress // hostname -> rule map
+	containerRules    map[string][]string                                                           // containerID -> hostnames map
 	ruleValidator     RuleValidator
 	mu                sync.RWMutex
 }
@@ -29,16 +32,14 @@ func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareM
 	controller := &Controller{
 		dockerManager:     dockerManager,
 		cloudflareManager: cloudflareManager,
-		ingressRules:      make(map[string]cloudflare.UnvalidatedIngressRule),
+		ingressRules:      make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress),
 		containerRules:    make(map[string][]string),
 		ruleValidator:     NewCompositeValidator(),
 	}
 
-	// 其他初始化逻辑...
-
 	// 初始化默认的catch-all规则
-	catchAllRule := cloudflare.UnvalidatedIngressRule{
-		Service: catchAllService,
+	catchAllRule := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Service: cloudflare.F(catchAllService),
 	}
 	controller.ingressRules["CATCH_ALL"] = catchAllRule
 
@@ -65,11 +66,11 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 	c.mu.Lock()
 	// 保存现有的catch-all规则
 	catchAllRule, catchAllExists := c.ingressRules["CATCH_ALL"]
-	
+
 	// 清空ingressRules和containerRules
-	c.ingressRules = make(map[string]cloudflare.UnvalidatedIngressRule)
+	c.ingressRules = make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
 	c.containerRules = make(map[string][]string)
-	
+
 	// 恢复catch-all规则
 	if catchAllExists {
 		c.ingressRules["CATCH_ALL"] = catchAllRule
@@ -117,8 +118,8 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	hostnames := make([]string, 0)
 	for _, rule := range ingressRules {
 		// 跳过没有主机名的规则（catch-all规则）
-		if rule.Hostname != "" {
-			hostnames = append(hostnames, rule.Hostname)
+		if rule.Hostname.Value != "" {
+			hostnames = append(hostnames, rule.Hostname.Value)
 		}
 	}
 
@@ -127,10 +128,10 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	// 添加规则
 	for _, rule := range ingressRules {
 		// 跳过没有主机名的规则（catch-all规则）
-		if rule.Hostname == "" {
+		if rule.Hostname.Value == "" {
 			continue
 		}
-		c.ingressRules[rule.Hostname] = rule
+		c.ingressRules[rule.Hostname.Value] = rule
 	}
 
 	// 记录容器与主机名的关联关系
@@ -191,7 +192,7 @@ func (c *Controller) Sync(ctx context.Context) error {
 	slog.Info("Found containers with docktunnel labels", "count", len(eventsList))
 
 	// 收集所有ingress规则
-	var allIngressRules []cloudflare.UnvalidatedIngressRule
+	var allIngressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	containerHostnames := make(map[string][]string) // containerID -> hostnames
 
 	for _, event := range eventsList {
@@ -213,8 +214,8 @@ func (c *Controller) Sync(ctx context.Context) error {
 			hostnames := make([]string, 0)
 			for _, rule := range ingressRules {
 				// 跳过没有主机名的规则（catch-all规则）
-				if rule.Hostname != "" {
-					hostnames = append(hostnames, rule.Hostname)
+				if rule.Hostname.Value != "" {
+					hostnames = append(hostnames, rule.Hostname.Value)
 				}
 			}
 			containerHostnames[event.ContainerID] = hostnames
@@ -225,24 +226,24 @@ func (c *Controller) Sync(ctx context.Context) error {
 	c.mu.Lock()
 	// 保存现有的catch-all规则
 	catchAllRule, catchAllExists := c.ingressRules["CATCH_ALL"]
-	
+
 	// 重新创建ingress规则map
-	c.ingressRules = make(map[string]cloudflare.UnvalidatedIngressRule)
-	
+	c.ingressRules = make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
+
 	// 添加所有新规则
 	for _, rule := range allIngressRules {
 		// 跳过没有主机名的规则（catch-all规则）
-		if rule.Hostname == "" {
+		if rule.Hostname.Value == "" {
 			continue
 		}
-		c.ingressRules[rule.Hostname] = rule
+		c.ingressRules[rule.Hostname.Value] = rule
 	}
-	
+
 	// 恢复catch-all规则
 	if catchAllExists {
 		c.ingressRules["CATCH_ALL"] = catchAllRule
 	}
-	
+
 	// 更新容器与主机名的关联关系
 	c.containerRules = containerHostnames
 	c.mu.Unlock()
@@ -264,7 +265,7 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 
 	slog.Info("Using tunnel", "tunnelID", tunnel.ID)
 
-	// 更新配置
+	// 更新配置（保持原始的ingress规则，不需要修改Service字段）
 	if err := c.cloudflareManager.UpdateConfiguration(ctx, ingressRules); err != nil {
 		return fmt.Errorf("failed to update tunnel configuration: %w", err)
 	}
@@ -281,15 +282,15 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 
 // syncDNSRecords 同步DNS记录到Cloudflare
 // 这个方法会确保Cloudflare中的DNS记录与当前ingress规则保持一致
-// 1. 先获取Cloudflare上当前的所有DNS记录信息
-// 2. 为所有现有的ingress规则创建或更新DNS记录
-// 3. 删除不再需要的DNS记录
+// 使用批量API操作来减少对Cloudflare的访问压力
 func (c *Controller) syncDNSRecords(ctx context.Context) error {
 	// 获取当前隧道信息
 	tunnel := c.cloudflareManager.GetTunnel()
 	if tunnel == nil {
 		return fmt.Errorf("tunnel is not available")
 	}
+
+	slog.Debug("Starting DNS records sync", "tunnelID", tunnel.ID)
 
 	c.mu.RLock()
 	// 收集当前需要的主机名（从containerRules中获取）
@@ -310,54 +311,64 @@ func (c *Controller) syncDNSRecords(ctx context.Context) error {
 	}
 
 	// 创建一个映射以便快速查找现有的DNS记录
-	existingRecords := make(map[string]cloudflare.DNSRecord)
+	existingRecords := make(map[string]dns.RecordResponse)
 	for _, record := range allTunnelRecords {
 		existingRecords[record.Name] = record
 	}
 
-	// 处理需要的DNS记录
-	createdOrUpdatedCount := 0
+	// 收集需要创建/更新和删除的DNS记录
+	var upsertHostnames []string
+	var deleteHostnames []string
+
 	expectedContent := fmt.Sprintf("%s.cfargotunnel.com", tunnel.ID)
+
+	// 处理需要的DNS记录（收集需要创建或更新的记录）
 	for hostname := range currentHostnames {
-		// 当记录不存在或内容不一致时才调用UpsertDNSRecord
+		// 当记录不存在或内容不一致时需要处理
 		if record, exists := existingRecords[hostname]; !exists || record.Content != expectedContent {
-			if err := c.cloudflareManager.UpsertDNSRecord(ctx, hostname, tunnel.ID); err != nil {
-				slog.Error("Failed to upsert DNS record", "hostname", hostname, "error", err)
-			} else {
-				slog.Info("Upserted DNS record", "hostname", hostname)
-				createdOrUpdatedCount++
-			}
+			upsertHostnames = append(upsertHostnames, hostname)
 		}
 	}
 
-	// 删除不再需要的DNS记录
-	deletedCount := 0
+	// 收集需要删除的DNS记录（精确匹配cfargotunnel.com格式）
 	for hostname, record := range existingRecords {
-		if !currentHostnames[hostname] {
-			// 记录存在但不再需要，删除它
-			if err := c.cloudflareManager.DeleteDNSRecord(ctx, record.Name); err != nil {
-				slog.Error("Failed to delete DNS record", "hostname", record.Name, "error", err)
-			} else {
-				slog.Info("Deleted DNS record", "hostname", record.Name)
-				deletedCount++
-			}
+		if !currentHostnames[hostname] && strings.HasSuffix(record.Content, ".cfargotunnel.com") {
+			// 记录存在但不再需要，添加到删除列表
+			deleteHostnames = append(deleteHostnames, hostname)
 		}
 	}
 
-	slog.Info("Finished syncing DNS records", 
-		"createdOrUpdated", createdOrUpdatedCount, 
-		"deleted", deletedCount)
+	// 执行批量删除操作
+	if len(deleteHostnames) > 0 {
+		slog.Debug("Deleting DNS records", "hostnames", deleteHostnames)
+		if err := c.cloudflareManager.DeleteDNSRecords(ctx, deleteHostnames); err != nil {
+			slog.Error("Failed to batch delete DNS records", "error", err)
+			return err
+		}
+		slog.Info("Batch deleted DNS records", "count", len(deleteHostnames))
+	}
+
+	// 执行批量创建/更新操作
+	if len(upsertHostnames) > 0 {
+		if err := c.cloudflareManager.UpsertDNSRecords(ctx, upsertHostnames); err != nil {
+			slog.Error("Failed to batch upsert DNS records", "error", err)
+			return err
+		}
+		slog.Info("Batch upserted DNS records", "count", len(upsertHostnames))
+	}
+
+	slog.Info("Finished syncing DNS records")
 
 	return nil
 }
 
 // GetIngressRules 获取当前的Ingress规则
-func (c *Controller) GetIngressRules() []cloudflare.UnvalidatedIngressRule {
+func (c *Controller) GetIngressRules() []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	// 创建规则切片，为所有规则加上catch-all规则预留空间
-	rules := make([]cloudflare.UnvalidatedIngressRule, 0, len(c.ingressRules))
+	rules := make([]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, 0, len(c.ingressRules))
 
 	// 添加所有非catch-all规则
 	for hostname, rule := range c.ingressRules {
@@ -366,16 +377,16 @@ func (c *Controller) GetIngressRules() []cloudflare.UnvalidatedIngressRule {
 			rules = append(rules, rule)
 		}
 	}
-	
+
 	// 添加catch-all规则
 	if catchAllRule, exists := c.ingressRules["CATCH_ALL"]; exists {
 		rules = append(rules, catchAllRule)
 	} else {
 		// 如果由于某种原因catch-all规则不存在，则使用默认值
-		rules = append(rules, cloudflare.UnvalidatedIngressRule{
-			Service: "http_status:404",
+		rules = append(rules, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+			Service: cloudflare.F("http_status:404"),
 		})
 	}
-	
+
 	return rules
 }

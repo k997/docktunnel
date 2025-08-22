@@ -81,14 +81,14 @@ func TestGetTunnelToken(t *testing.T) {
 	t.Log("GetTunnelToken test placeholder")
 }
 
-func TestUpsertDNSRecord(t *testing.T) {
-	// TODO: 实现UpsertDNSRecord方法的测试
+func TestUpsertDNSRecords(t *testing.T) {
+	// TODO: 实现UpsertDNSRecords方法的测试
 	// 由于需要有效的Cloudflare账户和API令牌，这部分测试需要在集成测试环境中进行
-	t.Log("UpsertDNSRecord test placeholder")
+	t.Log("UpsertDNSRecords test placeholder")
 }
 
-func TestDeleteDNSRecord(t *testing.T) {
-	// TODO: 实现DeleteDNSRecord方法的测试
+func TestDeleteDNSRecords(t *testing.T) {
+	// TODO: 实现DeleteDNSRecords方法的测试
 	// 由于需要有效的Cloudflare账户和API令牌，这部分测试需要在集成测试环境中进行
-	t.Log("DeleteDNSRecord test placeholder")
+	t.Log("DeleteDNSRecords test placeholder")
 }

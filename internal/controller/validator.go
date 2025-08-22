@@ -3,29 +3,29 @@ package controller
 import (
 	"fmt"
 	
-	"github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 )
 
-// RuleValidator 定义规则验证器接口
+// RuleValidator 定义规则验证器接口，适配cloudflare-go/v5
 type RuleValidator interface {
-	Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error
+	Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error
 }
 
 // HostnameUniquenessValidator 验证主机名唯一性
 type HostnameUniquenessValidator struct{}
 
-func (v *HostnameUniquenessValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (v *HostnameUniquenessValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	hostnameMap := make(map[string]string) // hostname -> service name
 	for serviceName, rule := range rules {
-		if rule.Hostname == "" {
+		if rule.Hostname.Value == "" {
 			return fmt.Errorf("service %s missing required hostname", serviceName)
 		}
 		
-		if existingService, exists := hostnameMap[rule.Hostname]; exists {
-			return fmt.Errorf("duplicate hostname %s found in services %s and %s", rule.Hostname, existingService, serviceName)
+		if existingService, exists := hostnameMap[rule.Hostname.Value]; exists {
+			return fmt.Errorf("duplicate hostname %s found in services %s and %s", rule.Hostname.Value, existingService, serviceName)
 		}
 		
-		hostnameMap[rule.Hostname] = serviceName
+		hostnameMap[rule.Hostname.Value] = serviceName
 	}
 	return nil
 }
@@ -33,7 +33,7 @@ func (v *HostnameUniquenessValidator) Validate(rules map[string]*cloudflare.Unva
 // ServiceNameUniquenessValidator 验证服务名唯一性
 type ServiceNameUniquenessValidator struct{}
 
-func (v *ServiceNameUniquenessValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (v *ServiceNameUniquenessValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	serviceNameMap := make(map[string]bool)
 	for serviceName := range rules {
 		if serviceNameMap[serviceName] {
@@ -47,13 +47,13 @@ func (v *ServiceNameUniquenessValidator) Validate(rules map[string]*cloudflare.U
 // RequiredFieldsValidator 验证必需字段
 type RequiredFieldsValidator struct{}
 
-func (v *RequiredFieldsValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (v *RequiredFieldsValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	for serviceName, rule := range rules {
-		if rule.Hostname == "" {
+		if rule.Hostname.Value == "" {
 			return fmt.Errorf("service %s missing required hostname", serviceName)
 		}
 		
-		if rule.Service == "" {
+		if rule.Service.Value == "" {
 			return fmt.Errorf("service %s missing required service", serviceName)
 		}
 	}
@@ -75,7 +75,7 @@ func NewCompositeValidator() *CompositeValidator {
 	}
 }
 
-func (v *CompositeValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (v *CompositeValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	for _, validator := range v.validators {
 		if err := validator.Validate(rules); err != nil {
 			return err

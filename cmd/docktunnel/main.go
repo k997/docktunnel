@@ -26,7 +26,6 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-
 	// 初始化日志记录器
 	var appLogger *slog.Logger = logger.New(cfg.Log.Level, cfg.Log.Format)
 	appLogger.Info("Configuration loaded successfully")
@@ -55,7 +54,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	appLogger.Info("Using tunnel", "tunnel", cfManager.GetTunnel())
+	appLogger.Info("Using tunnel", "tunnel", cfManager.GetTunnel().ID)
 
 	// 初始化控制器
 	controller := controller.NewController(dockerManager, cfManager, cfg.Cloudflare.CatchAll)
@@ -138,4 +137,3 @@ shutdown:
 
 	appLogger.Info("DockTunnel shutdown complete")
 }
-

@@ -3,21 +3,22 @@ package controller
 import (
 	"testing"
 	
-	"github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v5"
+	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 )
 
 func TestHostnameUniquenessValidator(t *testing.T) {
 	validator := &HostnameUniquenessValidator{}
 	
 	// 测试正常情况 - 没有重复主机名
-	rules := map[string]*cloudflare.UnvalidatedIngressRule{
+	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		"service1": {
-			Hostname: "example1.com",
-			Service:  "http://localhost:8080",
+			Hostname: cloudflare.F("example1.com"),
+			Service:  cloudflare.F("http://localhost:8080"),
 		},
 		"service2": {
-			Hostname: "example2.com",
-			Service:  "http://localhost:8081",
+			Hostname: cloudflare.F("example2.com"),
+			Service:  cloudflare.F("http://localhost:8081"),
 		},
 	}
 	
@@ -27,9 +28,9 @@ func TestHostnameUniquenessValidator(t *testing.T) {
 	}
 	
 	// 测试重复主机名情况
-	rules["service3"] = &cloudflare.UnvalidatedIngressRule{
-		Hostname: "example1.com", // 与service1重复
-		Service:  "http://localhost:8082",
+	rules["service3"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example1.com"), // 与service1重复
+		Service:  cloudflare.F("http://localhost:8082"),
 	}
 	
 	err = validator.Validate(rules)
@@ -42,14 +43,14 @@ func TestServiceNameUniquenessValidator(t *testing.T) {
 	validator := &ServiceNameUniquenessValidator{}
 	
 	// 测试正常情况 - 服务名唯一（这个测试实际上不会失败，因为map的key本身就是唯一的）
-	rules := map[string]*cloudflare.UnvalidatedIngressRule{
+	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		"service1": {
-			Hostname: "example1.com",
-			Service:  "http://localhost:8080",
+			Hostname: cloudflare.F("example1.com"),
+			Service:  cloudflare.F("http://localhost:8080"),
 		},
 		"service2": {
-			Hostname: "example2.com",
-			Service:  "http://localhost:8081",
+			Hostname: cloudflare.F("example2.com"),
+			Service:  cloudflare.F("http://localhost:8081"),
 		},
 	}
 	
@@ -66,10 +67,10 @@ func TestRequiredFieldsValidator(t *testing.T) {
 	validator := &RequiredFieldsValidator{}
 	
 	// 测试正常情况 - 所有必需字段都存在
-	rules := map[string]*cloudflare.UnvalidatedIngressRule{
+	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		"service1": {
-			Hostname: "example1.com",
-			Service:  "http://localhost:8080",
+			Hostname: cloudflare.F("example1.com"),
+			Service:  cloudflare.F("http://localhost:8080"),
 		},
 	}
 	
@@ -79,8 +80,8 @@ func TestRequiredFieldsValidator(t *testing.T) {
 	}
 	
 	// 测试缺少主机名
-	rules["service2"] = &cloudflare.UnvalidatedIngressRule{
-		Service: "http://localhost:8081",
+	rules["service2"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Service: cloudflare.F("http://localhost:8081"),
 		// 缺少Hostname
 	}
 	
@@ -90,8 +91,8 @@ func TestRequiredFieldsValidator(t *testing.T) {
 	}
 	
 	// 测试缺少服务地址
-	rules["service3"] = &cloudflare.UnvalidatedIngressRule{
-		Hostname: "example3.com",
+	rules["service3"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example3.com"),
 		// 缺少Service
 	}
 	
@@ -105,14 +106,14 @@ func TestCompositeValidator(t *testing.T) {
 	validator := NewCompositeValidator()
 	
 	// 测试正常情况 - 所有验证都通过
-	rules := map[string]*cloudflare.UnvalidatedIngressRule{
+	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		"service1": {
-			Hostname: "example1.com",
-			Service:  "http://localhost:8080",
+			Hostname: cloudflare.F("example1.com"),
+			Service:  cloudflare.F("http://localhost:8080"),
 		},
 		"service2": {
-			Hostname: "example2.com",
-			Service:  "http://localhost:8081",
+			Hostname: cloudflare.F("example2.com"),
+			Service:  cloudflare.F("http://localhost:8081"),
 		},
 	}
 	
@@ -122,9 +123,9 @@ func TestCompositeValidator(t *testing.T) {
 	}
 	
 	// 测试验证失败情况
-	rules["service3"] = &cloudflare.UnvalidatedIngressRule{
-		Hostname: "example1.com", // 重复主机名
-		Service:  "http://localhost:8082",
+	rules["service3"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example1.com"), // 重复主机名
+		Service:  cloudflare.F("http://localhost:8082"),
 	}
 	
 	err = validator.Validate(rules)

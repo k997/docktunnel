@@ -3,9 +3,8 @@ package controller
 import (
 	"errors"
 	"testing"
-	"time"
 
-	"github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 )
@@ -15,7 +14,7 @@ type mockRuleValidator struct {
 	shouldError bool
 }
 
-func (m *mockRuleValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (m *mockRuleValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	if m.shouldError {
 		return errors.New("validation error")
 	}
@@ -34,8 +33,8 @@ func TestParseLabelsToIngress_NoContainerInfo(t *testing.T) {
 		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
 	
-	if rules[0].Service != "http_status:404" {
-		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service)
+	if rules[0].Service.Value != "http_status:404" {
+		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service.Value)
 	}
 }
 
@@ -52,8 +51,8 @@ func TestParseLabelsToIngress_NoConfig(t *testing.T) {
 		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
 	
-	if rules[0].Service != "http_status:404" {
-		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service)
+	if rules[0].Service.Value != "http_status:404" {
+		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service.Value)
 	}
 }
 
@@ -72,8 +71,8 @@ func TestParseLabelsToIngress_NoLabels(t *testing.T) {
 		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
 	
-	if rules[0].Service != "http_status:404" {
-		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service)
+	if rules[0].Service.Value != "http_status:404" {
+		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service.Value)
 	}
 }
 
@@ -94,8 +93,8 @@ func TestParseLabelsToIngress_EmptyLabels(t *testing.T) {
 		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
 	
-	if rules[0].Service != "http_status:404" {
-		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service)
+	if rules[0].Service.Value != "http_status:404" {
+		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service.Value)
 	}
 }
 
@@ -122,10 +121,11 @@ func TestParseLabelsToIngress_ServiceLabel(t *testing.T) {
 	}
 	
 	// 查找web服务规则
-	var webRule *cloudflare.UnvalidatedIngressRule
+	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
-		if rule.Hostname == "example.com" {
-			webRule = &rule
+		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
+			r := rule // 创建本地副本以避免循环变量问题
+			webRule = &r
 			break
 		}
 	}
@@ -135,8 +135,8 @@ func TestParseLabelsToIngress_ServiceLabel(t *testing.T) {
 		return
 	}
 	
-	if webRule.Service != "http://localhost:8080" {
-		t.Errorf("Expected service to be 'http://localhost:8080', got %s", webRule.Service)
+	if webRule.Service.Value != "http://localhost:8080" {
+		t.Errorf("Expected service to be 'http://localhost:8080', got %s", webRule.Service.Value)
 	}
 }
 
@@ -171,10 +171,11 @@ func TestParseLabelsToIngress_PortProtoLabels(t *testing.T) {
 	}
 	
 	// 查找api服务规则
-	var apiRule *cloudflare.UnvalidatedIngressRule
+	var apiRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
-		if rule.Hostname == "api.example.com" {
-			apiRule = &rule
+		if rule.Hostname.Present && rule.Hostname.Value == "api.example.com" {
+			r := rule // 创建本地副本以避免循环变量问题
+			apiRule = &r
 			break
 		}
 	}
@@ -186,8 +187,8 @@ func TestParseLabelsToIngress_PortProtoLabels(t *testing.T) {
 	
 	// 验证服务地址是否正确生成
 	expectedService := "https://172.17.0.2:8080"
-	if apiRule.Service != expectedService {
-		t.Errorf("Expected service to be '%s', got %s", expectedService, apiRule.Service)
+	if apiRule.Service.Value != expectedService {
+		t.Errorf("Expected service to be '%s', got %s", expectedService, apiRule.Service.Value)
 	}
 }
 
@@ -221,10 +222,11 @@ func TestParseLabelsToIngress_PortOnlyLabel(t *testing.T) {
 	}
 	
 	// 查找web服务规则
-	var webRule *cloudflare.UnvalidatedIngressRule
+	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
-		if rule.Hostname == "example.com" {
-			webRule = &rule
+		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
+			r := rule // 创建本地副本以避免循环变量问题
+			webRule = &r
 			break
 		}
 	}
@@ -236,8 +238,8 @@ func TestParseLabelsToIngress_PortOnlyLabel(t *testing.T) {
 	
 	// 验证服务地址是否正确生成（应该使用默认的http协议）
 	expectedService := "http://172.17.0.2:8080"
-	if webRule.Service != expectedService {
-		t.Errorf("Expected service to be '%s', got %s", expectedService, webRule.Service)
+	if webRule.Service.Value != expectedService {
+		t.Errorf("Expected service to be '%s', got %s", expectedService, webRule.Service.Value)
 	}
 }
 
@@ -273,10 +275,11 @@ func TestParseLabelsToIngress_ServiceOverridesPort(t *testing.T) {
 	}
 	
 	// 查找web服务规则
-	var webRule *cloudflare.UnvalidatedIngressRule
+	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
-		if rule.Hostname == "example.com" {
-			webRule = &rule
+		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
+			r := rule // 创建本地副本以避免循环变量问题
+			webRule = &r
 			break
 		}
 	}
@@ -288,8 +291,8 @@ func TestParseLabelsToIngress_ServiceOverridesPort(t *testing.T) {
 	
 	// 验证service标签的值被使用，而不是port/proto生成的值
 	expectedService := "http://external-service:3000"
-	if webRule.Service != expectedService {
-		t.Errorf("Expected service to be '%s', got %s", expectedService, webRule.Service)
+	if webRule.Service.Value != expectedService {
+		t.Errorf("Expected service to be '%s', got %s", expectedService, webRule.Service.Value)
 	}
 }
 
@@ -319,10 +322,11 @@ func TestParseLabelsToIngress_OriginRequestSettings(t *testing.T) {
 	}
 	
 	// 查找web服务规则
-	var webRule *cloudflare.UnvalidatedIngressRule
+	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
-		if rule.Hostname == "example.com" {
-			webRule = &rule
+		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
+			r := rule // 创建本地副本以避免循环变量问题
+			webRule = &r
 			break
 		}
 	}
@@ -332,30 +336,30 @@ func TestParseLabelsToIngress_OriginRequestSettings(t *testing.T) {
 		return
 	}
 	
-	if webRule.OriginRequest == nil {
+	if !webRule.OriginRequest.Present {
 		t.Error("Expected OriginRequest to be set")
 		return
 	}
 	
 	// 验证connectTimeout设置
-	if webRule.OriginRequest.ConnectTimeout == nil {
+	if !webRule.OriginRequest.Value.ConnectTimeout.Present {
 		t.Error("Expected ConnectTimeout to be set")
-	} else if webRule.OriginRequest.ConnectTimeout.Duration != 30*time.Second {
-		t.Errorf("Expected ConnectTimeout to be 30s, got %v", webRule.OriginRequest.ConnectTimeout.Duration)
+	} else if webRule.OriginRequest.Value.ConnectTimeout.Value != 30 {
+		t.Errorf("Expected ConnectTimeout to be 30, got %v", webRule.OriginRequest.Value.ConnectTimeout.Value)
 	}
 	
 	// 验证noTLSVerify设置
-	if webRule.OriginRequest.NoTLSVerify == nil {
+	if !webRule.OriginRequest.Value.NoTLSVerify.Present {
 		t.Error("Expected NoTLSVerify to be set")
-	} else if *webRule.OriginRequest.NoTLSVerify != true {
-		t.Errorf("Expected NoTLSVerify to be true, got %v", *webRule.OriginRequest.NoTLSVerify)
+	} else if webRule.OriginRequest.Value.NoTLSVerify.Value != true {
+		t.Errorf("Expected NoTLSVerify to be true, got %v", webRule.OriginRequest.Value.NoTLSVerify.Value)
 	}
 	
 	// 验证http2Origin设置
-	if webRule.OriginRequest.Http2Origin == nil {
+	if !webRule.OriginRequest.Value.HTTP2Origin.Present {
 		t.Error("Expected Http2Origin to be set")
-	} else if *webRule.OriginRequest.Http2Origin != false {
-		t.Errorf("Expected Http2Origin to be false, got %v", *webRule.OriginRequest.Http2Origin)
+	} else if webRule.OriginRequest.Value.HTTP2Origin.Value != false {
+		t.Errorf("Expected Http2Origin to be false, got %v", webRule.OriginRequest.Value.HTTP2Origin.Value)
 	}
 }
 
