@@ -22,20 +22,20 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 			},
 		}, nil
 	}
-	
+
 	// 获取容器标签
 	labels := containerInfo.Config.Labels
-	
+
 	// 创建临时存储，键是服务名称，值是该服务对应的Ingress规则
 	rawRules := make(map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
-	
+
 	// 遍历所有标签，解析其内容
 	for label, value := range labels {
 		// 检查是否是docktunnel标签
 		if !strings.HasPrefix(label, "docktunnel.") {
 			continue
 		}
-		
+
 		// 解析标签格式: docktunnel.<service-name>.<attribute>
 		parts := strings.Split(label, ".")
 		if len(parts) < 3 {
@@ -47,16 +47,16 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 			slog.Warn("Invalid label format, skipping", "label", label)
 			continue
 		}
-		
+
 		serviceName := parts[1]
 		attribute := strings.Join(parts[2:], ".") // 处理多级属性如 originRequest.noTLSVerify
-		
+
 		// 获取或创建该服务的规则
 		rule, exists := rawRules[serviceName]
 		if !exists {
 			rule = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{}
 		}
-		
+
 		// 根据属性设置规则字段
 		switch attribute {
 		case "hostname":
@@ -67,7 +67,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 			// port标签，仅当没有设置service时使用
 			if rule.Service.Value == "" {
 				// 如果有容器信息，我们可以生成服务地址
-				if containerInfo != nil && containerInfo.NetworkSettings != nil {
+				if containerInfo.NetworkSettings != nil {
 					// 默认协议为http
 					proto := "http"
 					// 检查是否已设置proto标签
@@ -75,7 +75,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 					if protoValue, exists := labels[protoLabel]; exists {
 						proto = protoValue
 					}
-					
+
 					// 获取容器IP地址
 					containerIP := getContainerIP(containerInfo)
 					if containerIP != "" {
@@ -96,7 +96,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
 				seconds := int64(duration.Seconds())
@@ -110,7 +110,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
 				seconds := int64(duration.Seconds())
@@ -124,7 +124,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
 				seconds := int64(duration.Seconds())
@@ -138,7 +138,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			if value == "true" {
 				rule.OriginRequest.Value.NoHappyEyeballs = cloudflare.F(true)
 			} else if value == "false" {
@@ -150,7 +150,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			if num, err := strconv.Atoi(value); err == nil {
 				rule.OriginRequest.Value.KeepAliveConnections = cloudflare.F(int64(num))
 			} else {
@@ -162,7 +162,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			// 解析时间值
 			if duration, err := time.ParseDuration(value); err == nil {
 				seconds := int64(duration.Seconds())
@@ -176,7 +176,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			rule.OriginRequest.Value.HTTPHostHeader = cloudflare.F(value)
 		case "originRequest.originServerName":
 			// 初始化OriginRequest字段
@@ -184,7 +184,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			rule.OriginRequest.Value.OriginServerName = cloudflare.F(value)
 		case "originRequest.caPool":
 			// 初始化OriginRequest字段
@@ -192,7 +192,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			rule.OriginRequest.Value.CAPool = cloudflare.F(value)
 		case "originRequest.noTLSVerify":
 			// 初始化OriginRequest字段
@@ -200,7 +200,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			if value == "true" {
 				rule.OriginRequest.Value.NoTLSVerify = cloudflare.F(true)
 			} else if value == "false" {
@@ -212,7 +212,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			if value == "true" {
 				rule.OriginRequest.Value.DisableChunkedEncoding = cloudflare.F(true)
 			} else if value == "false" {
@@ -224,7 +224,7 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			rule.OriginRequest.Value.ProxyType = cloudflare.F(value)
 		case "originRequest.http2Origin":
 			// 初始化OriginRequest字段
@@ -232,34 +232,34 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
-			
+
 			if value == "true" {
 				rule.OriginRequest.Value.HTTP2Origin = cloudflare.F(true)
 			} else if value == "false" {
 				rule.OriginRequest.Value.HTTP2Origin = cloudflare.F(false)
 			}
 		}
-		
+
 		// 更新规则
 		rawRules[serviceName] = rule
 	}
-	
+
 	// 验证规则
 	if err := ruleValidator.Validate(rawRules); err != nil {
 		return nil, err
 	}
-	
+
 	// 转换为Cloudflare Ingress规则列表
 	var ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rawRules {
 		ingressRules = append(ingressRules, *rule)
 	}
-	
+
 	// 添加默认的catch-all规则
 	ingressRules = append(ingressRules, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Service: cloudflare.F("http_status:404"),
 	})
-	
+
 	return ingressRules, nil
 }
 
@@ -268,18 +268,24 @@ func getContainerIP(containerInfo *container.InspectResponse) string {
 	if containerInfo.NetworkSettings == nil {
 		return ""
 	}
-	
+
+	// 检查是否使用host网络模式
+	if containerInfo.HostConfig != nil && containerInfo.HostConfig.NetworkMode == "host" {
+		// 对于host网络模式，使用localhost
+		return "localhost"
+	}
+
 	// 优先使用bridge网络模式的IP
 	if network, exists := containerInfo.NetworkSettings.Networks["bridge"]; exists && network.IPAddress != "" {
 		return network.IPAddress
 	}
-	
+
 	// 如果没有bridge网络，使用第一个找到的网络IP
 	for _, network := range containerInfo.NetworkSettings.Networks {
 		if network.IPAddress != "" {
 			return network.IPAddress
 		}
 	}
-	
+
 	return ""
 }
