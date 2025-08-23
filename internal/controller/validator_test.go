@@ -22,7 +22,7 @@ func TestHostnameUniquenessValidator(t *testing.T) {
 		},
 	}
 	
-	err := validator.Validate(rules)
+	err := validator.Validate(rules, nil)
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -33,9 +33,29 @@ func TestHostnameUniquenessValidator(t *testing.T) {
 		Service:  cloudflare.F("http://localhost:8082"),
 	}
 	
-	err = validator.Validate(rules)
+	err = validator.Validate(rules, nil)
 	if err == nil {
-		t.Error("Expected error for duplicate hostname, got nil")
+		t.Error("Expected error for duplicate hostname, got none")
+	}
+	
+	// 测试与现有规则的重复
+	allRules := map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"example3.com": {
+			Hostname: cloudflare.F("example3.com"),
+			Service:  cloudflare.F("http://localhost:8083"),
+		},
+	}
+	
+	rules2 := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"service4": {
+			Hostname: cloudflare.F("example3.com"), // 与现有规则重复
+			Service:  cloudflare.F("http://localhost:8084"),
+		},
+	}
+	
+	err = validator.Validate(rules2, allRules)
+	if err == nil {
+		t.Error("Expected error for duplicate hostname with existing rules, got none")
 	}
 }
 
@@ -54,7 +74,7 @@ func TestServiceNameUniquenessValidator(t *testing.T) {
 		},
 	}
 	
-	err := validator.Validate(rules)
+	err := validator.Validate(rules, nil)
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -74,31 +94,31 @@ func TestRequiredFieldsValidator(t *testing.T) {
 		},
 	}
 	
-	err := validator.Validate(rules)
+	err := validator.Validate(rules, nil)
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
 	
-	// 测试缺少主机名
+	// 测试缺少hostname的情况
 	rules["service2"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Service: cloudflare.F("http://localhost:8081"),
 		// 缺少Hostname
 	}
 	
-	err = validator.Validate(rules)
+	err = validator.Validate(rules, nil)
 	if err == nil {
-		t.Error("Expected error for missing hostname, got nil")
+		t.Error("Expected error for missing hostname, got none")
 	}
 	
-	// 测试缺少服务地址
+	// 测试缺少service的情况
 	rules["service3"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("example3.com"),
 		// 缺少Service
 	}
 	
-	err = validator.Validate(rules)
+	err = validator.Validate(rules, nil)
 	if err == nil {
-		t.Error("Expected error for missing service, got nil")
+		t.Error("Expected error for missing service, got none")
 	}
 }
 
@@ -117,7 +137,7 @@ func TestCompositeValidator(t *testing.T) {
 		},
 	}
 	
-	err := validator.Validate(rules)
+	err := validator.Validate(rules, nil)
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -128,7 +148,7 @@ func TestCompositeValidator(t *testing.T) {
 		Service:  cloudflare.F("http://localhost:8082"),
 	}
 	
-	err = validator.Validate(rules)
+	err = validator.Validate(rules, nil)
 	if err == nil {
 		t.Error("Expected error for duplicate hostname, got nil")
 	}

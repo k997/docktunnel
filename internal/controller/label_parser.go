@@ -13,7 +13,7 @@ import (
 )
 
 // parseLabelsToIngress 解析容器标签并生成Ingress规则，适配cloudflare-go/v5
-func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidator RuleValidator) ([]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, error) {
+func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, error) {
 	// 检查containerInfo是否为nil
 	if containerInfo == nil || containerInfo.Config == nil || containerInfo.Config.Labels == nil {
 		// 返回错误而不是默认规则，因为没有容器信息是无效配置
@@ -240,23 +240,12 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 		rawRules[serviceName] = rule
 	}
 
-	// 验证规则
-	if err := ruleValidator.Validate(rawRules); err != nil {
-		return nil, err
-	}
-
-	// 转换为Cloudflare Ingress规则列表
-	var ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
-	for _, rule := range rawRules {
-		ingressRules = append(ingressRules, *rule)
-	}
-
 	// 如果没有规则，返回错误
-	if len(ingressRules) == 0 {
+	if len(rawRules) == 0 {
 		return nil, fmt.Errorf("no valid ingress rules found")
 	}
 
-	return ingressRules, nil
+	return rawRules, nil
 }
 
 // getContainerIP 获取容器的IP地址

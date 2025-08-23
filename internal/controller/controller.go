@@ -157,15 +157,24 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	}
 
 	// 解析容器标签生成规则
-	ingressRules, err := parseLabelsToIngress(event.ContainerInfo, c.ruleValidator)
+	parsedRules, err := parseLabelsToIngress(event.ContainerInfo)
 	if err != nil {
-		slog.Error("Failed to parse container labels", "error", err)
-		return fmt.Errorf("failed to parse container labels: %w", err)
+		slog.Error("Failed to parse container labels", "error", err, "containerID", event.ContainerID)
+		return fmt.Errorf("failed to parse container labels for container %s: %w", event.ContainerID, err)
 	}
+
+	// 验证规则
+	c.mu.RLock()
+	if err := c.ruleValidator.Validate(parsedRules, c.ingressRules); err != nil {
+		c.mu.RUnlock()
+		slog.Error("Invalid ingress rules", "error", err, "containerID", event.ContainerID)
+		return fmt.Errorf("invalid ingress rules for container %s: %w", event.ContainerID, err)
+	}
+	c.mu.RUnlock()
 
 	// 收集主机名列表
 	hostnames := make([]string, 0)
-	for _, rule := range ingressRules {
+	for _, rule := range parsedRules {
 		// 收集所有主机名
 		if rule.Hostname.Value != "" {
 			hostnames = append(hostnames, rule.Hostname.Value)
@@ -175,10 +184,10 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	// 更新内部状态
 	c.mu.Lock()
 	// 添加规则
-	for _, rule := range ingressRules {
+	for _, rule := range parsedRules {
 		// 添加所有有主机名的规则
 		if rule.Hostname.Value != "" {
-			c.ingressRules[rule.Hostname.Value] = rule
+			c.ingressRules[rule.Hostname.Value] = *rule
 		}
 	}
 
@@ -256,7 +265,7 @@ func (c *Controller) Sync(ctx context.Context) error {
 	slog.Info("Found containers with docktunnel labels", "count", len(eventsList))
 
 	// 收集所有ingress规则
-	var allIngressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
+	allParsedRules := make(map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
 	containerHostnames := make(map[string][]string) // containerID -> hostnames
 
 	for _, event := range eventsList {
@@ -266,17 +275,23 @@ func (c *Controller) Sync(ctx context.Context) error {
 		}
 
 		// 解析标签获取主机名
-		ingressRules, err := parseLabelsToIngress(event.ContainerInfo, c.ruleValidator)
+		parsedRules, err := parseLabelsToIngress(event.ContainerInfo)
 		if err != nil {
 			slog.Error("Failed to parse container labels during sync", "containerID", event.ContainerID, "error", err)
 			continue
 		}
 
-		// 收集规则和主机名
-		allIngressRules = append(allIngressRules, ingressRules...)
+		// 合并规则，确保服务名唯一
+		for serviceName, rule := range parsedRules {
+			if _, exists := allParsedRules[serviceName]; exists {
+				slog.Warn("Duplicate service name found during sync, skipping.", "serviceName", serviceName, "containerID", event.ContainerID)
+				continue
+			}
+			allParsedRules[serviceName] = rule
+		}
 
-		hostnames := make([]string, 0, len(ingressRules))
-		for _, rule := range ingressRules {
+		hostnames := make([]string, 0, len(parsedRules))
+		for _, rule := range parsedRules {
 			if rule.Hostname.Value != "" {
 				hostnames = append(hostnames, rule.Hostname.Value)
 			}
@@ -287,16 +302,22 @@ func (c *Controller) Sync(ctx context.Context) error {
 		}
 	}
 
+	// 验证所有规则
+	if err := c.ruleValidator.Validate(allParsedRules, nil); err != nil {
+		slog.Error("Invalid ingress rules during sync", "error", err)
+		return fmt.Errorf("invalid ingress rules during sync: %w", err)
+	}
+
 	// 更新内部状态
 	c.mu.Lock()
 	// 重新创建ingress规则map
 	c.ingressRules = make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
 
 	// 添加所有新规则
-	for _, rule := range allIngressRules {
+	for _, rule := range allParsedRules {
 		// 添加所有有主机名的规则
 		if rule.Hostname.Value != "" {
-			c.ingressRules[rule.Hostname.Value] = rule
+			c.ingressRules[rule.Hostname.Value] = *rule
 		}
 	}
 

@@ -14,7 +14,7 @@ type mockRuleValidator struct {
 	shouldError bool
 }
 
-func (m *mockRuleValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
+func (m *mockRuleValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, allRules map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	if m.shouldError {
 		return errors.New("validation error")
 	}
@@ -23,8 +23,8 @@ func (m *mockRuleValidator) Validate(rules map[string]*zero_trust.TunnelCloudfla
 
 func TestParseLabelsToIngress_NoContainerInfo(t *testing.T) {
 	// 测试containerInfo为nil的情况
-	rules, err := parseLabelsToIngress(nil, &mockRuleValidator{})
-
+	rules, err := parseLabelsToIngress(nil)
+	
 	// 现在应该返回错误，因为没有有效的规则
 	if err == nil {
 		t.Error("Expected error for no valid rules, got none")
@@ -38,8 +38,8 @@ func TestParseLabelsToIngress_NoContainerInfo(t *testing.T) {
 func TestParseLabelsToIngress_NoConfig(t *testing.T) {
 	// 测试containerInfo.Config为nil的情况
 	containerInfo := &container.InspectResponse{}
-	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
-
+	rules, err := parseLabelsToIngress(containerInfo)
+	
 	// 现在应该返回错误，因为没有有效的规则
 	if err == nil {
 		t.Error("Expected error for no valid rules, got none")
@@ -55,8 +55,8 @@ func TestParseLabelsToIngress_NoLabels(t *testing.T) {
 	containerInfo := &container.InspectResponse{
 		Config: &container.Config{},
 	}
-	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
-
+	rules, err := parseLabelsToIngress(containerInfo)
+	
 	// 现在应该返回错误，因为没有有效的规则
 	if err == nil {
 		t.Error("Expected error for no valid rules, got none")
@@ -68,14 +68,14 @@ func TestParseLabelsToIngress_NoLabels(t *testing.T) {
 }
 
 func TestParseLabelsToIngress_EmptyLabels(t *testing.T) {
-	// 测试空标签的情况
+	// 测试containerInfo.Config.Labels为空的情况
 	containerInfo := &container.InspectResponse{
 		Config: &container.Config{
 			Labels: map[string]string{},
 		},
 	}
-	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
-
+	rules, err := parseLabelsToIngress(containerInfo)
+	
 	// 现在应该返回错误，因为没有有效的规则
 	if err == nil {
 		t.Error("Expected error for no valid rules, got none")
@@ -87,13 +87,8 @@ func TestParseLabelsToIngress_EmptyLabels(t *testing.T) {
 }
 
 func TestParseLabelsToIngress_ServiceLabel(t *testing.T) {
-	// 测试使用service标签的情况
+	// 测试仅使用service标签的情况
 	containerInfo := &container.InspectResponse{
-		ContainerJSONBase: &container.ContainerJSONBase{
-			HostConfig: &container.HostConfig{
-				NetworkMode: "default",
-			},
-		},
 		Config: &container.Config{
 			Labels: map[string]string{
 				"docktunnel.enable":       "true",
@@ -102,32 +97,31 @@ func TestParseLabelsToIngress_ServiceLabel(t *testing.T) {
 			},
 		},
 	}
-	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
-
+	rules, err := parseLabelsToIngress(containerInfo)
+	
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
-
+	
 	// 应该有1个规则：1个服务规则（不再添加默认的catch-all规则）
 	if len(rules) != 1 {
 		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
-
+	
 	// 查找web服务规则
 	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
 		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
-			r := rule // 创建本地副本以避免循环变量问题
-			webRule = &r
+			webRule = rule
 			break
 		}
 	}
-
+	
 	if webRule == nil {
 		t.Error("Expected to find web service rule")
 		return
 	}
-
+	
 	if !webRule.Service.Present || webRule.Service.Value != "http://localhost:8080" {
 		t.Errorf("Expected service to be 'http://localhost:8080', got '%s'", webRule.Service.Value)
 	}
@@ -144,9 +138,9 @@ func TestParseLabelsToIngress_PortProtoLabels(t *testing.T) {
 		Config: &container.Config{
 			Labels: map[string]string{
 				"docktunnel.enable":       "true",
-				"docktunnel.api.hostname": "api.example.com",
-				"docktunnel.api.port":     "8080",
-				"docktunnel.api.proto":    "https",
+				"docktunnel.web.hostname": "example.com",
+				"docktunnel.web.port":     "8080",
+				"docktunnel.web.proto":    "https",
 			},
 		},
 		NetworkSettings: &container.NetworkSettings{
@@ -157,38 +151,39 @@ func TestParseLabelsToIngress_PortProtoLabels(t *testing.T) {
 			},
 		},
 	}
-	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
-
+	rules, err := parseLabelsToIngress(containerInfo)
+	
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
-
+	
 	// 应该有1个规则：1个服务规则（不再添加默认的catch-all规则）
 	if len(rules) != 1 {
 		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
-
-	// 查找api服务规则
-	var apiRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
+	
+	// 查找web服务规则
+	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
-		if rule.Hostname.Present && rule.Hostname.Value == "api.example.com" {
-			apiRule = &rule
+		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
+			webRule = rule
 			break
 		}
 	}
 
-	if apiRule == nil {
-		t.Error("Expected to find api service rule")
+	if webRule == nil {
+		t.Error("Expected to find web service rule")
 		return
 	}
 
-	if !apiRule.Service.Present || apiRule.Service.Value != "https://172.17.0.2:8080" {
-		t.Errorf("Expected service to be 'https://172.17.0.2:8080', got '%s'", apiRule.Service.Value)
+	// 默认协议应该是https
+	if !webRule.Service.Present || webRule.Service.Value != "https://172.17.0.2:8080" {
+		t.Errorf("Expected service to be 'https://172.17.0.2:8080', got '%s'", webRule.Service.Value)
 	}
 }
 
 func TestParseLabelsToIngress_PortOnlyLabel(t *testing.T) {
-	// 测试只使用port标签的情况
+	// 测试仅使用port标签的情况（默认使用http协议）
 	containerInfo := &container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{
 			HostConfig: &container.HostConfig{
@@ -210,22 +205,22 @@ func TestParseLabelsToIngress_PortOnlyLabel(t *testing.T) {
 			},
 		},
 	}
-	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
-
+	rules, err := parseLabelsToIngress(containerInfo)
+	
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
-
+	
 	// 应该有1个规则：1个服务规则（不再添加默认的catch-all规则）
 	if len(rules) != 1 {
 		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
-
+	
 	// 查找web服务规则
 	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
 		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
-			webRule = &rule
+			webRule = rule
 			break
 		}
 	}
@@ -266,7 +261,7 @@ func TestParseLabelsToIngress_ServiceOverridesPort(t *testing.T) {
 			},
 		},
 	}
-	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
+	rules, err := parseLabelsToIngress(containerInfo)
 	
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
@@ -281,16 +276,16 @@ func TestParseLabelsToIngress_ServiceOverridesPort(t *testing.T) {
 	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
 		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
-			webRule = &rule
+			webRule = rule
 			break
 		}
 	}
-	
+
 	if webRule == nil {
 		t.Error("Expected to find web service rule")
 		return
 	}
-	
+
 	// service标签应该覆盖port和proto标签
 	if !webRule.Service.Present || webRule.Service.Value != "http://external-service:3000" {
 		t.Errorf("Expected service to be 'http://external-service:3000', got '%s'", webRule.Service.Value)
@@ -315,7 +310,7 @@ func TestParseLabelsToIngress_OriginRequestSettings(t *testing.T) {
 			},
 		},
 	}
-	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
+	rules, err := parseLabelsToIngress(containerInfo)
 	
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
@@ -330,7 +325,7 @@ func TestParseLabelsToIngress_OriginRequestSettings(t *testing.T) {
 	var apiRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
 		if rule.Hostname.Present && rule.Hostname.Value == "api.example.com" {
-			apiRule = &rule
+			apiRule = rule
 			break
 		}
 	}
