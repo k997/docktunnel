@@ -131,28 +131,28 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 	return nil
 }
 
+// isDocktunnelEnabled 检查容器是否启用了docktunnel
+func (c *Controller) isDocktunnelEnabled(event events.Event) bool {
+	// 检查容器信息是否存在
+	if event.ContainerInfo == nil || event.ContainerInfo.Config == nil || event.ContainerInfo.Config.Labels == nil {
+		return false
+	}
+
+	// 检查docktunnel.enable标签是否设置为true
+	return event.ContainerInfo.Config.Labels["docktunnel.enable"] == "true"
+}
+
 // handleContainerStart 处理容器启动事件
 func (c *Controller) handleContainerStart(ctx context.Context, event events.Event) error {
+	// 检查容器是否启用了docktunnel
+	if !c.isDocktunnelEnabled(event) {
+		return nil
+	}
 	slog.Info("Handling container start event", "containerID", event.ContainerID)
 
 	// 检查容器是否处于抖动状态
 	if c.isFlapping(event.ContainerID) {
 		slog.Warn("Container is flapping, ignoring start event", "containerID", event.ContainerID)
-		return nil
-	}
-
-	// 检查是否有容器信息
-	if event.ContainerInfo == nil {
-		slog.Warn("Container info is nil for start event", "containerID", event.ContainerID)
-		return nil
-	}
-
-	// 检查容器是否启用了docktunnel
-	if event.ContainerInfo.Config == nil || event.ContainerInfo.Config.Labels == nil {
-		return nil
-	}
-
-	if event.ContainerInfo.Config.Labels["docktunnel.enable"] != "true" {
 		return nil
 	}
 
@@ -195,6 +195,10 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 
 // handleContainerStop 处理容器停止事件
 func (c *Controller) handleContainerStop(ctx context.Context, event events.Event) error {
+	// 检查容器是否启用了docktunnel
+	if !c.isDocktunnelEnabled(event) {
+		return nil
+	}
 	slog.Info("Handling container stop event", "containerID", event.ContainerID)
 
 	// 检查容器是否处于抖动状态
@@ -256,28 +260,29 @@ func (c *Controller) Sync(ctx context.Context) error {
 	containerHostnames := make(map[string][]string) // containerID -> hostnames
 
 	for _, event := range eventsList {
-		if event.ContainerInfo != nil &&
-			event.ContainerInfo.Config != nil &&
-			event.ContainerInfo.Config.Labels != nil {
+		// 检查容器是否启用了docktunnel
+		if !c.isDocktunnelEnabled(event) {
+			continue
+		}
 
-			// 解析标签获取主机名
-			ingressRules, err := parseLabelsToIngress(event.ContainerInfo, c.ruleValidator)
-			if err != nil {
-				slog.Error("Failed to parse container labels during sync", "containerID", event.ContainerID, "error", err)
-				continue
+		// 解析标签获取主机名
+		ingressRules, err := parseLabelsToIngress(event.ContainerInfo, c.ruleValidator)
+		if err != nil {
+			slog.Error("Failed to parse container labels during sync", "containerID", event.ContainerID, "error", err)
+			continue
+		}
+
+		// 收集规则和主机名
+		allIngressRules = append(allIngressRules, ingressRules...)
+
+		hostnames := make([]string, 0, len(ingressRules))
+		for _, rule := range ingressRules {
+			if rule.Hostname.Value != "" {
+				hostnames = append(hostnames, rule.Hostname.Value)
 			}
+		}
 
-			// 收集规则
-			allIngressRules = append(allIngressRules, ingressRules...)
-
-			// 收集主机名
-			hostnames := make([]string, 0)
-			for _, rule := range ingressRules {
-				// 收集所有主机名
-				if rule.Hostname.Value != "" {
-					hostnames = append(hostnames, rule.Hostname.Value)
-				}
-			}
+		if len(hostnames) > 0 {
 			containerHostnames[event.ContainerID] = hostnames
 		}
 	}
