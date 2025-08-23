@@ -121,7 +121,7 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 	c.mu.Unlock()
 
 	// 调用syncToCloudflare同步空的规则集（这将删除所有DNS记录）
-	if err := c.syncToCloudflare(ctx); err != nil {
+	if err := c.performSync(ctx); err != nil {
 		return err
 	}
 
