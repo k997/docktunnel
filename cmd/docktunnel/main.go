@@ -8,13 +8,14 @@ import (
 	"sync"
 	"syscall"
 
+	"log/slog"
+
 	"docktunnel/internal/cloudflareManager"
 	"docktunnel/internal/config"
 	"docktunnel/internal/controller"
 	"docktunnel/internal/docker"
 	"docktunnel/internal/events"
 	"docktunnel/internal/logger"
-	"log/slog"
 )
 
 func main() {
@@ -28,7 +29,7 @@ func main() {
 
 	// 初始化日志记录器
 	var appLogger *slog.Logger = logger.New(cfg.Log.Level, cfg.Log.Format)
-	appLogger.Info("Configuration loaded successfully")
+	appLogger.Info("Configuration loaded successfully", "log_level", cfg.Log.Level, "log_format", cfg.Log.Format)
 
 	// 创建上下文用于优雅关闭
 	ctx, cancel := context.WithCancel(context.Background())
@@ -42,22 +43,17 @@ func main() {
 	}
 	defer dockerManager.Close()
 
-	// 初始化Cloudflare管理器
-	cfManager, err := cloudflareManager.NewManager(
-		cfg.Cloudflare.AccountID,
-		cfg.Cloudflare.APIToken,
-		cfg.Cloudflare.TunnelID,
-		cfg.Cloudflare.TunnelName,
-	)
+	// 创建Cloudflare Manager
+	cfManager, err := cloudflareManager.NewManager(cfg.GetCloudflareOptions())
 	if err != nil {
-		appLogger.Error("Failed to create Cloudflare manager", "error", err)
+		slog.Error("Failed to create Cloudflare manager", "error", err)
 		os.Exit(1)
 	}
 
 	appLogger.Info("Using tunnel", "tunnel", cfManager.GetTunnel().ID)
 
-	// 初始化控制器
-	controller := controller.NewController(dockerManager, cfManager, cfg.Cloudflare.CatchAll)
+	// 创建Controller
+	controller := controller.NewController(dockerManager, cfManager, cfg.GetControllerOptions())
 
 	// 创建事件通道
 	eventChan := make(chan events.Event, 10)

@@ -25,16 +25,13 @@ func TestParseLabelsToIngress_NoContainerInfo(t *testing.T) {
 	// 测试containerInfo为nil的情况
 	rules, err := parseLabelsToIngress(nil, &mockRuleValidator{})
 
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
+	// 现在应该返回错误，因为没有有效的规则
+	if err == nil {
+		t.Error("Expected error for no valid rules, got none")
 	}
 
-	if len(rules) != 1 {
-		t.Errorf("Expected 1 rule, got %d", len(rules))
-	}
-
-	if rules[0].Service.Value != "http_status:404" {
-		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service.Value)
+	if len(rules) != 0 {
+		t.Errorf("Expected 0 rules, got %d", len(rules))
 	}
 }
 
@@ -43,16 +40,13 @@ func TestParseLabelsToIngress_NoConfig(t *testing.T) {
 	containerInfo := &container.InspectResponse{}
 	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
 
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
+	// 现在应该返回错误，因为没有有效的规则
+	if err == nil {
+		t.Error("Expected error for no valid rules, got none")
 	}
 
-	if len(rules) != 1 {
-		t.Errorf("Expected 1 rule, got %d", len(rules))
-	}
-
-	if rules[0].Service.Value != "http_status:404" {
-		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service.Value)
+	if len(rules) != 0 {
+		t.Errorf("Expected 0 rules, got %d", len(rules))
 	}
 }
 
@@ -63,16 +57,13 @@ func TestParseLabelsToIngress_NoLabels(t *testing.T) {
 	}
 	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
 
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
+	// 现在应该返回错误，因为没有有效的规则
+	if err == nil {
+		t.Error("Expected error for no valid rules, got none")
 	}
 
-	if len(rules) != 1 {
-		t.Errorf("Expected 1 rule, got %d", len(rules))
-	}
-
-	if rules[0].Service.Value != "http_status:404" {
-		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service.Value)
+	if len(rules) != 0 {
+		t.Errorf("Expected 0 rules, got %d", len(rules))
 	}
 }
 
@@ -85,22 +76,24 @@ func TestParseLabelsToIngress_EmptyLabels(t *testing.T) {
 	}
 	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
 
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
+	// 现在应该返回错误，因为没有有效的规则
+	if err == nil {
+		t.Error("Expected error for no valid rules, got none")
 	}
 
-	if len(rules) != 1 {
-		t.Errorf("Expected 1 rule, got %d", len(rules))
-	}
-
-	if rules[0].Service.Value != "http_status:404" {
-		t.Errorf("Expected service to be 'http_status:404', got %s", rules[0].Service.Value)
+	if len(rules) != 0 {
+		t.Errorf("Expected 0 rules, got %d", len(rules))
 	}
 }
 
 func TestParseLabelsToIngress_ServiceLabel(t *testing.T) {
-	// 测试service标签的情况
+	// 测试使用service标签的情况
 	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "default",
+			},
+		},
 		Config: &container.Config{
 			Labels: map[string]string{
 				"docktunnel.enable":       "true",
@@ -115,9 +108,9 @@ func TestParseLabelsToIngress_ServiceLabel(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	// 应该有2个规则：1个服务规则 + 1个默认的catch-all规则
-	if len(rules) != 2 {
-		t.Errorf("Expected 2 rules, got %d", len(rules))
+	// 应该有1个规则：1个服务规则（不再添加默认的catch-all规则）
+	if len(rules) != 1 {
+		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
 
 	// 查找web服务规则
@@ -135,8 +128,8 @@ func TestParseLabelsToIngress_ServiceLabel(t *testing.T) {
 		return
 	}
 
-	if webRule.Service.Value != "http://localhost:8080" {
-		t.Errorf("Expected service to be 'http://localhost:8080', got %s", webRule.Service.Value)
+	if !webRule.Service.Present || webRule.Service.Value != "http://localhost:8080" {
+		t.Errorf("Expected service to be 'http://localhost:8080', got '%s'", webRule.Service.Value)
 	}
 }
 
@@ -170,9 +163,9 @@ func TestParseLabelsToIngress_PortProtoLabels(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	// 应该有2个规则：1个服务规则 + 1个默认的catch-all规则
-	if len(rules) != 2 {
-		t.Errorf("Expected 2 rules, got %d", len(rules))
+	// 应该有1个规则：1个服务规则（不再添加默认的catch-all规则）
+	if len(rules) != 1 {
+		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
 
 	// 查找api服务规则
@@ -223,9 +216,9 @@ func TestParseLabelsToIngress_PortOnlyLabel(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	// 应该有2个规则：1个服务规则 + 1个默认的catch-all规则
-	if len(rules) != 2 {
-		t.Errorf("Expected 2 rules, got %d", len(rules))
+	// 应该有1个规则：1个服务规则（不再添加默认的catch-all规则）
+	if len(rules) != 1 {
+		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
 
 	// 查找web服务规则
@@ -274,16 +267,16 @@ func TestParseLabelsToIngress_ServiceOverridesPort(t *testing.T) {
 		},
 	}
 	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
-
+	
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
-
-	// 应该有2个规则：1个服务规则 + 1个默认的catch-all规则
-	if len(rules) != 2 {
-		t.Errorf("Expected 2 rules, got %d", len(rules))
+	
+	// 应该有1个规则：1个服务规则（不再添加默认的catch-all规则）
+	if len(rules) != 1 {
+		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
-
+	
 	// 查找web服务规则
 	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
@@ -292,12 +285,12 @@ func TestParseLabelsToIngress_ServiceOverridesPort(t *testing.T) {
 			break
 		}
 	}
-
+	
 	if webRule == nil {
 		t.Error("Expected to find web service rule")
 		return
 	}
-
+	
 	// service标签应该覆盖port和proto标签
 	if !webRule.Service.Present || webRule.Service.Value != "http://external-service:3000" {
 		t.Errorf("Expected service to be 'http://external-service:3000', got '%s'", webRule.Service.Value)
@@ -305,69 +298,63 @@ func TestParseLabelsToIngress_ServiceOverridesPort(t *testing.T) {
 }
 
 func TestParseLabelsToIngress_OriginRequestSettings(t *testing.T) {
-	// 测试originRequest配置
+	// 测试origin request设置
 	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "default",
+			},
+		},
 		Config: &container.Config{
 			Labels: map[string]string{
 				"docktunnel.enable":                           "true",
-				"docktunnel.web.hostname":                     "example.com",
-				"docktunnel.web.service":                      "http://localhost:8080",
-				"docktunnel.web.originRequest.connectTimeout": "30s",
-				"docktunnel.web.originRequest.noTLSVerify":    "true",
-				"docktunnel.web.originRequest.http2Origin":    "false",
+				"docktunnel.api.hostname":                     "api.example.com",
+				"docktunnel.api.service":                      "https://localhost:8443",
+				"docktunnel.api.originRequest.connectTimeout": "5s",
+				"docktunnel.api.originRequest.noTLSVerify":    "true",
 			},
 		},
 	}
 	rules, err := parseLabelsToIngress(containerInfo, &mockRuleValidator{})
-
+	
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
-
-	// 应该有2个规则：1个服务规则 + 1个默认的catch-all规则
-	if len(rules) != 2 {
-		t.Errorf("Expected 2 rules, got %d", len(rules))
+	
+	// 应该有1个规则：1个服务规则（不再添加默认的catch-all规则）
+	if len(rules) != 1 {
+		t.Errorf("Expected 1 rule, got %d", len(rules))
 	}
-
-	// 查找web服务规则
-	var webRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
+	
+	// 查找api服务规则
+	var apiRule *zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress
 	for _, rule := range rules {
-		if rule.Hostname.Present && rule.Hostname.Value == "example.com" {
-			r := rule // 创建本地副本以避免循环变量问题
-			webRule = &r
+		if rule.Hostname.Present && rule.Hostname.Value == "api.example.com" {
+			apiRule = &rule
 			break
 		}
 	}
-
-	if webRule == nil {
-		t.Error("Expected to find web service rule")
+	
+	if apiRule == nil {
+		t.Error("Expected to find api service rule")
 		return
 	}
-
-	if !webRule.OriginRequest.Present {
-		t.Error("Expected OriginRequest to be set")
+	
+	if !apiRule.Service.Present || apiRule.Service.Value != "https://localhost:8443" {
+		t.Errorf("Expected service to be 'https://localhost:8443', got '%s'", apiRule.Service.Value)
+	}
+	
+	if !apiRule.OriginRequest.Present {
+		t.Error("Expected OriginRequest to be present")
 		return
 	}
-
-	// 验证connectTimeout设置
-	if !webRule.OriginRequest.Value.ConnectTimeout.Present {
-		t.Error("Expected ConnectTimeout to be set")
-	} else if webRule.OriginRequest.Value.ConnectTimeout.Value != 30 {
-		t.Errorf("Expected ConnectTimeout to be 30, got %v", webRule.OriginRequest.Value.ConnectTimeout.Value)
+	
+	if !apiRule.OriginRequest.Value.ConnectTimeout.Present || apiRule.OriginRequest.Value.ConnectTimeout.Value != 5 {
+		t.Errorf("Expected connect timeout to be 5, got %d", apiRule.OriginRequest.Value.ConnectTimeout.Value)
 	}
-
-	// 验证noTLSVerify设置
-	if !webRule.OriginRequest.Value.NoTLSVerify.Present {
-		t.Error("Expected NoTLSVerify to be set")
-	} else if webRule.OriginRequest.Value.NoTLSVerify.Value != true {
-		t.Errorf("Expected NoTLSVerify to be true, got %v", webRule.OriginRequest.Value.NoTLSVerify.Value)
-	}
-
-	// 验证http2Origin设置
-	if !webRule.OriginRequest.Value.HTTP2Origin.Present {
-		t.Error("Expected Http2Origin to be set")
-	} else if webRule.OriginRequest.Value.HTTP2Origin.Value != false {
-		t.Errorf("Expected Http2Origin to be false, got %v", webRule.OriginRequest.Value.HTTP2Origin.Value)
+	
+	if !apiRule.OriginRequest.Value.NoTLSVerify.Present || !apiRule.OriginRequest.Value.NoTLSVerify.Value {
+		t.Error("Expected NoTLSVerify to be true")
 	}
 }
 

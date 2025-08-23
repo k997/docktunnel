@@ -2,7 +2,11 @@ package config
 
 import (
 	"strings"
+	"time"
 	"github.com/spf13/viper"
+	
+	"docktunnel/internal/cloudflareManager"
+	"docktunnel/internal/controller"
 )
 
 // Config 定义了应用的完整配置项
@@ -12,15 +16,54 @@ type Config struct {
 		Format string `mapstructure:"format"`
 	} `mapstructure:"log"`
 	Cloudflare struct {
-		AccountID  string `mapstructure:"accountId"`
-		APIToken   string `mapstructure:"apiToken"`
-		TunnelID   string `mapstructure:"tunnelId"`
-		TunnelName string `mapstructure:"tunnelName"`
-		CatchAll   string `mapstructure:"catchAll"`
+		AccountID       string        `mapstructure:"accountId"`
+		APIToken        string        `mapstructure:"apiToken"`
+		TunnelID        string        `mapstructure:"tunnelId"`
+		TunnelName      string        `mapstructure:"tunnelName"`
+		CatchAll        string        `mapstructure:"catchAll"`
+		// API调用相关配置
+		RateLimit       int           `mapstructure:"rateLimit"`
+		MaxRetries      int           `mapstructure:"maxRetries"`
+		RetryDelay      time.Duration `mapstructure:"retryDelay"`
+		MaxRetryDelay   time.Duration `mapstructure:"maxRetryDelay"`
 	} `mapstructure:"cloudflare"`
+	Controller struct {
+		// 容器抖动检测配置
+		FlappingWindow    time.Duration `mapstructure:"flappingWindow"`
+		FlappingThreshold int           `mapstructure:"flappingThreshold"`
+		CoolingPeriod     time.Duration `mapstructure:"coolingPeriod"`
+		MaxCoolingPeriod  time.Duration `mapstructure:"maxCoolingPeriod"`
+		DebounceDuration  time.Duration `mapstructure:"debounceDuration"`
+	} `mapstructure:"controller"`
 	Cleanup struct {
 		OnExit bool `mapstructure:"onExit"`
 	} `mapstructure:"cleanup"`
+}
+
+// GetCloudflareOptions 从配置中获取Cloudflare选项
+func (c *Config) GetCloudflareOptions() cloudflareManager.ManagerOptions {
+	return cloudflareManager.ManagerOptions{
+		AccountID:     c.Cloudflare.AccountID,
+		APIToken:      c.Cloudflare.APIToken,
+		TunnelID:      c.Cloudflare.TunnelID,
+		TunnelName:    c.Cloudflare.TunnelName,
+		RateLimit:     c.Cloudflare.RateLimit,
+		MaxRetries:    c.Cloudflare.MaxRetries,
+		RetryDelay:    c.Cloudflare.RetryDelay,
+		MaxRetryDelay: c.Cloudflare.MaxRetryDelay,
+	}
+}
+
+// GetControllerOptions 从配置中获取Controller选项
+func (c *Config) GetControllerOptions() controller.ControllerOptions {
+	return controller.ControllerOptions{
+		CatchAllService:   c.Cloudflare.CatchAll,
+		FlappingWindow:    c.Controller.FlappingWindow,
+		FlappingThreshold: c.Controller.FlappingThreshold,
+		CoolingPeriod:     c.Controller.CoolingPeriod,
+		MaxCoolingPeriod:  c.Controller.MaxCoolingPeriod,
+		DebounceDuration:  c.Controller.DebounceDuration,
+	}
 }
 
 // New 初始化并返回一个配置实例
@@ -32,6 +75,15 @@ func New() (*Config, error) {
 	v.SetDefault("log.format", "text")
 	v.SetDefault("cloudflare.tunnelName", "DockTunnel") // 默认通道名称
 	v.SetDefault("cloudflare.catchAll", "http_status:404") // 默认catch-all规则
+	v.SetDefault("cloudflare.rateLimit", 10) // 默认每秒10个请求的速率限制
+	v.SetDefault("cloudflare.maxRetries", 3) // 默认最大重试次数
+	v.SetDefault("cloudflare.retryDelay", 1*time.Second) // 默认初始重试延迟1秒
+	v.SetDefault("cloudflare.maxRetryDelay", 30*time.Second) // 默认最大重试延迟30秒
+	v.SetDefault("controller.flappingWindow", 60*time.Second) // 默认抖动检测窗口60秒
+	v.SetDefault("controller.flappingThreshold", 5) // 默认抖动阈值5次重启
+	v.SetDefault("controller.coolingPeriod", 300*time.Second) // 默认冷却期300秒(5分钟)
+	v.SetDefault("controller.maxCoolingPeriod", 1800*time.Second) // 默认最大冷却期1800秒(30分钟)
+	v.SetDefault("controller.debounceDuration", 2*time.Second) // 默认防抖延迟2秒
 	v.SetDefault("cleanup.onExit", true)
 
 	// 2. 设置配置文件

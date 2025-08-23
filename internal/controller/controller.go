@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudflare/cloudflare-go/v5"
 	"github.com/cloudflare/cloudflare-go/v5/dns"
@@ -17,31 +18,81 @@ import (
 	"docktunnel/internal/events"
 )
 
+// ControllerOptions 用于配置Controller的选项
+type ControllerOptions struct {
+	CatchAllService string
+	// 容器抖动检测配置
+	FlappingWindow    time.Duration // 检测窗口期
+	FlappingThreshold int           // 窗口期内重启阈值
+	CoolingPeriod     time.Duration // 基础冷却期
+	MaxCoolingPeriod  time.Duration // 最大冷却期
+	// 防抖配置
+	DebounceDuration time.Duration // 防抖持续时间
+}
+
+// ContainerHealth 记录容器的健康状态信息
+type ContainerHealth struct {
+	RestartCount int       // 重启次数
+	LastRestart  time.Time // 上次重启时间
+	IsFlapping   bool      // 是否处于抖动状态
+	CoolingUntil time.Time // 冷却期结束时间
+}
+
 // Controller 负责协调Docker和Cloudflare模块的工作
 type Controller struct {
 	dockerManager     *docker.Manager
 	cloudflareManager *cloudflareManager.Manager
 	ingressRules      map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress // hostname -> rule map
 	containerRules    map[string][]string                                                           // containerID -> hostnames map
+	containerHealth   map[string]*ContainerHealth                                                   // containerID -> health info
 	ruleValidator     RuleValidator
 	mu                sync.RWMutex
+
+	// 熔断器配置
+	flappingWindow    time.Duration // 检测窗口期
+	flappingThreshold int           // 窗口期内重启阈值
+	coolingPeriod     time.Duration // 基础冷却期
+	maxCoolingPeriod  time.Duration // 最大冷却期
+
+	// 防抖配置
+	debounceTimer    *time.Timer   // 防抖计时器
+	debounceDuration time.Duration // 防抖持续时间
+	pendingUpdates   bool          // 是否有待处理的更新
 }
 
 // NewController 创建一个新的控制器实例
-func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareManager.Manager, catchAllService string) *Controller {
+func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareManager.Manager, opts ControllerOptions) *Controller {
 	controller := &Controller{
 		dockerManager:     dockerManager,
 		cloudflareManager: cloudflareManager,
 		ingressRules:      make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress),
 		containerRules:    make(map[string][]string),
+		containerHealth:   make(map[string]*ContainerHealth),
 		ruleValidator:     NewCompositeValidator(),
+		flappingWindow:    opts.FlappingWindow,
+		flappingThreshold: opts.FlappingThreshold,
+		coolingPeriod:     opts.CoolingPeriod,
+		maxCoolingPeriod:  opts.MaxCoolingPeriod,
+		debounceDuration:  opts.DebounceDuration,
+		pendingUpdates:    false,
 	}
 
-	// 初始化默认的catch-all规则
-	catchAllRule := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-		Service: cloudflare.F(catchAllService),
+	// 如果没有提供配置参数，则使用默认值
+	if controller.flappingWindow == 0 {
+		controller.flappingWindow = 1 * time.Minute
 	}
-	controller.ingressRules["CATCH_ALL"] = catchAllRule
+	if controller.flappingThreshold == 0 {
+		controller.flappingThreshold = 5
+	}
+	if controller.coolingPeriod == 0 {
+		controller.coolingPeriod = 5 * time.Minute
+	}
+	if controller.maxCoolingPeriod == 0 {
+		controller.maxCoolingPeriod = 30 * time.Minute
+	}
+	if controller.debounceDuration == 0 {
+		controller.debounceDuration = 2 * time.Second
+	}
 
 	return controller
 }
@@ -64,17 +115,9 @@ func (c *Controller) Dispatch(ctx context.Context, event events.Event) error {
 // CleanupResources 清理创建的DNS记录
 func (c *Controller) CleanupResources(ctx context.Context) error {
 	c.mu.Lock()
-	// 保存现有的catch-all规则
-	catchAllRule, catchAllExists := c.ingressRules["CATCH_ALL"]
-
 	// 清空ingressRules和containerRules
 	c.ingressRules = make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
 	c.containerRules = make(map[string][]string)
-
-	// 恢复catch-all规则
-	if catchAllExists {
-		c.ingressRules["CATCH_ALL"] = catchAllRule
-	}
 	c.mu.Unlock()
 
 	// 调用syncToCloudflare同步空的规则集（这将删除所有DNS记录）
@@ -91,6 +134,12 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 // handleContainerStart 处理容器启动事件
 func (c *Controller) handleContainerStart(ctx context.Context, event events.Event) error {
 	slog.Info("Handling container start event", "containerID", event.ContainerID)
+
+	// 检查容器是否处于抖动状态
+	if c.isFlapping(event.ContainerID) {
+		slog.Warn("Container is flapping, ignoring start event", "containerID", event.ContainerID)
+		return nil
+	}
 
 	// 检查是否有容器信息
 	if event.ContainerInfo == nil {
@@ -117,7 +166,7 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	// 收集主机名列表
 	hostnames := make([]string, 0)
 	for _, rule := range ingressRules {
-		// 跳过没有主机名的规则（catch-all规则）
+		// 收集所有主机名
 		if rule.Hostname.Value != "" {
 			hostnames = append(hostnames, rule.Hostname.Value)
 		}
@@ -127,15 +176,17 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	c.mu.Lock()
 	// 添加规则
 	for _, rule := range ingressRules {
-		// 跳过没有主机名的规则（catch-all规则）
-		if rule.Hostname.Value == "" {
-			continue
+		// 添加所有有主机名的规则
+		if rule.Hostname.Value != "" {
+			c.ingressRules[rule.Hostname.Value] = rule
 		}
-		c.ingressRules[rule.Hostname.Value] = rule
 	}
 
 	// 记录容器与主机名的关联关系
 	c.containerRules[event.ContainerID] = hostnames
+
+	// 更新容器健康状态
+	c.updateContainerHealth(event.ContainerID, true)
 	c.mu.Unlock()
 
 	// 同步到Cloudflare
@@ -145,6 +196,12 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 // handleContainerStop 处理容器停止事件
 func (c *Controller) handleContainerStop(ctx context.Context, event events.Event) error {
 	slog.Info("Handling container stop event", "containerID", event.ContainerID)
+
+	// 检查容器是否处于抖动状态
+	if c.isFlapping(event.ContainerID) {
+		slog.Warn("Container is flapping, ignoring stop event", "containerID", event.ContainerID)
+		return nil
+	}
 
 	// 获取要删除的规则
 	c.mu.Lock()
@@ -162,6 +219,9 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 	for _, hostname := range hostnamesToRemove {
 		delete(c.ingressRules, hostname)
 	}
+
+	// 更新容器健康状态
+	c.updateContainerHealth(event.ContainerID, false)
 	c.mu.Unlock()
 
 	// 同步更新后的规则到Cloudflare
@@ -213,7 +273,7 @@ func (c *Controller) Sync(ctx context.Context) error {
 			// 收集主机名
 			hostnames := make([]string, 0)
 			for _, rule := range ingressRules {
-				// 跳过没有主机名的规则（catch-all规则）
+				// 收集所有主机名
 				if rule.Hostname.Value != "" {
 					hostnames = append(hostnames, rule.Hostname.Value)
 				}
@@ -224,24 +284,15 @@ func (c *Controller) Sync(ctx context.Context) error {
 
 	// 更新内部状态
 	c.mu.Lock()
-	// 保存现有的catch-all规则
-	catchAllRule, catchAllExists := c.ingressRules["CATCH_ALL"]
-
 	// 重新创建ingress规则map
 	c.ingressRules = make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
 
 	// 添加所有新规则
 	for _, rule := range allIngressRules {
-		// 跳过没有主机名的规则（catch-all规则）
-		if rule.Hostname.Value == "" {
-			continue
+		// 添加所有有主机名的规则
+		if rule.Hostname.Value != "" {
+			c.ingressRules[rule.Hostname.Value] = rule
 		}
-		c.ingressRules[rule.Hostname.Value] = rule
-	}
-
-	// 恢复catch-all规则
-	if catchAllExists {
-		c.ingressRules["CATCH_ALL"] = catchAllRule
 	}
 
 	// 更新容器与主机名的关联关系
@@ -254,12 +305,41 @@ func (c *Controller) Sync(ctx context.Context) error {
 
 // syncToCloudflare 将当前规则同步到Cloudflare
 func (c *Controller) syncToCloudflare(ctx context.Context) error {
+	c.mu.Lock()
+
+	// 标记有待处理的更新
+	c.pendingUpdates = true
+
+	// 如果防抖计时器已经存在，停止它并重新开始计时
+	if c.debounceTimer != nil {
+		c.debounceTimer.Stop()
+	}
+
+	// 创建新的防抖计时器
+	c.debounceTimer = time.AfterFunc(c.debounceDuration, func() {
+		c.mu.Lock()
+		c.pendingUpdates = false
+		c.mu.Unlock()
+
+		// 在单独的goroutine中执行实际的同步操作
+		go c.performSync(context.Background())
+	})
+
+	c.mu.Unlock()
+
+	// 立即返回，不等待同步完成
+	return nil
+}
+
+// performSync 执行实际的Cloudflare同步操作
+func (c *Controller) performSync(ctx context.Context) error {
 	// 构建规则列表
 	ingressRules := c.GetIngressRules()
 
 	// 从cloudflareManager获取tunnel信息
 	tunnel := c.cloudflareManager.GetTunnel()
 	if tunnel == nil {
+		slog.Error("Tunnel is not available")
 		return fmt.Errorf("tunnel is not available")
 	}
 
@@ -267,6 +347,7 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 
 	// 更新配置（保持原始的ingress规则，不需要修改Service字段）
 	if err := c.cloudflareManager.UpdateConfiguration(ctx, ingressRules); err != nil {
+		slog.Error("Failed to update tunnel configuration", "error", err)
 		return fmt.Errorf("failed to update tunnel configuration: %w", err)
 	}
 
@@ -274,6 +355,7 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 
 	// 同步DNS记录
 	if err := c.syncDNSRecords(ctx); err != nil {
+		slog.Error("Failed to sync DNS records", "error", err)
 		return fmt.Errorf("failed to sync DNS records: %w", err)
 	}
 
@@ -367,26 +449,86 @@ func (c *Controller) GetIngressRules() []zero_trust.TunnelCloudflaredConfigurati
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// 创建规则切片，为所有规则加上catch-all规则预留空间
-	rules := make([]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, 0, len(c.ingressRules))
+	// 创建规则切片
+	rules := make([]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, 0, len(c.ingressRules)+1)
 
-	// 添加所有非catch-all规则
-	for hostname, rule := range c.ingressRules {
-		// 跳过catch-all规则，稍后专门添加
-		if hostname != "CATCH_ALL" {
-			rules = append(rules, rule)
-		}
+	// 添加所有规则
+	for _, rule := range c.ingressRules {
+		rules = append(rules, rule)
 	}
 
-	// 添加catch-all规则
-	if catchAllRule, exists := c.ingressRules["CATCH_ALL"]; exists {
-		rules = append(rules, catchAllRule)
-	} else {
-		// 如果由于某种原因catch-all规则不存在，则使用默认值
-		rules = append(rules, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-			Service: cloudflare.F("http_status:404"),
-		})
-	}
+	// 总是添加catch-all规则作为最后一个规则
+	rules = append(rules, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Service: cloudflare.F("http_status:404"),
+	})
 
 	return rules
+}
+
+// isFlapping 检查容器是否处于抖动状态
+func (c *Controller) isFlapping(containerID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	health, exists := c.containerHealth[containerID]
+	if !exists {
+		return false
+	}
+
+	// 检查是否在冷却期内
+	if health.IsFlapping && time.Now().Before(health.CoolingUntil) {
+		return true
+	}
+
+	return false
+}
+
+// updateContainerHealth 更新容器健康状态
+func (c *Controller) updateContainerHealth(containerID string, isStartEvent bool) {
+	now := time.Now()
+
+	health, exists := c.containerHealth[containerID]
+	if !exists {
+		health = &ContainerHealth{}
+		c.containerHealth[containerID] = health
+	}
+
+	if isStartEvent {
+		// 如果是启动事件，检查是否在窗口期内
+		if now.Sub(health.LastRestart) <= c.flappingWindow {
+			health.RestartCount++
+
+			// 如果重启次数超过阈值，标记为抖动状态
+			if health.RestartCount >= c.flappingThreshold {
+				health.IsFlapping = true
+				// 计算冷却期（指数退避，但不超过最大冷却期）
+				coolingMultiplier := 1 << uint(health.RestartCount-c.flappingThreshold)
+				coolingDuration := time.Duration(coolingMultiplier) * c.coolingPeriod
+				if coolingDuration > c.maxCoolingPeriod {
+					coolingDuration = c.maxCoolingPeriod
+				}
+				health.CoolingUntil = now.Add(coolingDuration)
+
+				slog.Warn("Container marked as flapping",
+					"containerID", containerID,
+					"restartCount", health.RestartCount,
+					"coolingUntil", health.CoolingUntil)
+			}
+		} else {
+			// 重置重启计数
+			health.RestartCount = 1
+		}
+
+		health.LastRestart = now
+	} else {
+		// 如果是停止事件，不更新重启计数，但可以记录日志
+		slog.Debug("Container stopped", "containerID", containerID)
+	}
+
+	// 检查是否已经过了冷却期
+	if health.IsFlapping && now.After(health.CoolingUntil) {
+		health.IsFlapping = false
+		health.RestartCount = 0
+		slog.Info("Container cooling period ended, flapping status reset", "containerID", containerID)
+	}
 }

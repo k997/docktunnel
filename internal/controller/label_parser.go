@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -13,17 +14,12 @@ import (
 
 // parseLabelsToIngress 解析容器标签并生成Ingress规则，适配cloudflare-go/v5
 func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidator RuleValidator) ([]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, error) {
-	// 检查containerInfo和Config是否存在
+	// 检查containerInfo是否为nil
 	if containerInfo == nil || containerInfo.Config == nil || containerInfo.Config.Labels == nil {
-		// 返回空规则列表而不是错误，因为没有标签是有效的情况
-		return []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-			{
-				Service: cloudflare.F("http_status:404"),
-			},
-		}, nil
+		// 返回错误而不是默认规则，因为没有容器信息是无效配置
+		return nil, fmt.Errorf("no valid ingress rules found")
 	}
 
-	// 获取容器标签
 	labels := containerInfo.Config.Labels
 
 	// 创建临时存储，键是服务名称，值是该服务对应的Ingress规则
@@ -255,10 +251,10 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse, ruleValidato
 		ingressRules = append(ingressRules, *rule)
 	}
 
-	// 添加默认的catch-all规则
-	ingressRules = append(ingressRules, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-		Service: cloudflare.F("http_status:404"),
-	})
+	// 如果没有规则，返回错误
+	if len(ingressRules) == 0 {
+		return nil, fmt.Errorf("no valid ingress rules found")
+	}
 
 	return ingressRules, nil
 }

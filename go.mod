@@ -6,6 +6,7 @@ require (
 	github.com/cloudflare/cloudflare-go/v5 v5.1.0
 	github.com/docker/docker v28.3.3+incompatible
 	github.com/spf13/viper v1.20.1
+	golang.org/x/time v0.9.0
 )
 
 require (
@@ -50,7 +51,6 @@ require (
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/text v0.26.0 // indirect
-	golang.org/x/time v0.9.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 )

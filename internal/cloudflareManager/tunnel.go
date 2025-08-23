@@ -6,8 +6,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand"
 	"strings"
 	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/cloudflare/cloudflare-go/v5"
 	"github.com/cloudflare/cloudflare-go/v5/dns"
@@ -31,6 +35,20 @@ func generateTunnelSecret() (string, error) {
 	return hex.EncodeToString(secret), nil
 }
 
+// ManagerOptions 用于配置Manager的选项
+type ManagerOptions struct {
+	AccountID       string
+	APIToken        string
+	TunnelID        string
+	TunnelName      string
+	// 速率限制配置 (每秒请求数，0表示无限制)
+	RateLimit       int
+	// 重试配置
+	MaxRetries      int
+	RetryDelay      time.Duration
+	MaxRetryDelay   time.Duration
+}
+
 // Manager 封装了所有Cloudflare Tunnel相关的操作
 type Manager struct {
 	client  *cloudflare.Client
@@ -39,38 +57,151 @@ type Manager struct {
 	// hostname到zoneID的缓存映射
 	zoneCache map[string]string
 	cacheMu   sync.RWMutex
+	
+	// 速率限制器
+	rateLimiter *rate.Limiter
+	
+	// 重试配置
+	maxRetries    int
+	retryDelay    time.Duration
+	maxRetryDelay time.Duration
 }
 
 // NewManager 创建一个新的Cloudflare Manager实例
-func NewManager(accountID, apiToken, tunnelID, tunnelName string) (*Manager, error) {
+func NewManager(opts ManagerOptions) (*Manager, error) {
 	// 验证必要参数
-	if accountID == "" {
+	if opts.AccountID == "" {
 		return nil, fmt.Errorf("accountID cannot be empty")
 	}
 
-	if apiToken == "" {
+	if opts.APIToken == "" {
 		return nil, fmt.Errorf("apiToken cannot be empty")
 	}
 
 	// 创建Cloudflare API客户端
 	client := cloudflare.NewClient(
-		option.WithAPIToken(apiToken),
+		option.WithAPIToken(opts.APIToken),
 	)
 
 	manager := &Manager{
-		client:    client,
-		account:   accountID,
-		zoneCache: make(map[string]string),
+		client:        client,
+		account:       opts.AccountID,
+		zoneCache:     make(map[string]string),
+		maxRetries:    opts.MaxRetries,
+		retryDelay:    opts.RetryDelay,
+		maxRetryDelay: opts.MaxRetryDelay,
+	}
+
+	// 设置默认重试配置
+	if manager.maxRetries == 0 {
+		manager.maxRetries = 3
+	}
+	if manager.retryDelay == 0 {
+		manager.retryDelay = 1 * time.Second
+	}
+	if manager.maxRetryDelay == 0 {
+		manager.maxRetryDelay = 30 * time.Second
+	}
+
+	// 设置速率限制器
+	if opts.RateLimit > 0 {
+		// 使用令牌桶算法，桶大小为速率限制值，补充速率为每秒令牌数
+		manager.rateLimiter = rate.NewLimiter(rate.Limit(opts.RateLimit), opts.RateLimit)
+	} else {
+		// 默认不限制速率
+		manager.rateLimiter = rate.NewLimiter(rate.Inf, 0)
 	}
 
 	// 获取或创建Tunnel
-	tunnel, err := manager.getOrCreateTunnel(context.Background(), tunnelID, tunnelName)
+	tunnel, err := manager.getOrCreateTunnel(context.Background(), opts.TunnelID, opts.TunnelName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get or create tunnel: %w", err)
 	}
 	manager.tunnel = tunnel
 
 	return manager, nil
+}
+
+// callWithRetry 使用指数退避和重试机制执行API调用
+func (m *Manager) callWithRetry(ctx context.Context, operation func() error) error {
+	var lastErr error
+	
+	// 等待获取令牌
+	if err := m.rateLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limiter error: %w", err)
+	}
+	
+	for i := 0; i <= m.maxRetries; i++ {
+		err := operation()
+		if err == nil {
+			// 成功执行
+			return nil
+		}
+		
+		lastErr = err
+		
+		// 如果是上下文取消或超时错误，直接返回
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		
+		// 检查是否是可重试的错误
+		if !m.isRetriableError(err) {
+			return err
+		}
+		
+		// 如果不是最后一次重试，等待一段时间后重试
+		if i < m.maxRetries {
+			// 计算退避时间（指数退避加抖动）
+			backoff := m.retryDelay * time.Duration(1<<uint(i))
+			if backoff > m.maxRetryDelay {
+				backoff = m.maxRetryDelay
+			}
+			
+			// 添加随机抖动（±10%）
+			jitter := time.Duration(float64(backoff) * 0.1 * (0.5 - mathrand.Float64()))
+			delay := backoff + jitter
+			
+			slog.Warn("Cloudflare API call failed, retrying", 
+				"attempt", i+1, 
+				"maxRetries", m.maxRetries, 
+				"delay", delay, 
+				"error", err)
+			
+			select {
+			case <-time.After(delay):
+				// 继续重试
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	
+	return fmt.Errorf("operation failed after %d retries: %w", m.maxRetries, lastErr)
+}
+
+// isRetriableError 检查错误是否应该重试
+func (m *Manager) isRetriableError(err error) bool {
+	// 检查是否包含特定的错误信息
+	errStr := err.Error()
+	
+	// 速率限制错误
+	if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate limit") {
+		return true
+	}
+	
+	// 服务器错误（5xx）
+	if strings.Contains(errStr, "500") || strings.Contains(errStr, "502") || 
+	   strings.Contains(errStr, "503") || strings.Contains(errStr, "504") {
+		return true
+	}
+	
+	// 网络超时或连接错误
+	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "connection") {
+		return true
+	}
+	
+	return false
 }
 
 // getOrCreateTunnel 获取或创建Cloudflare Tunnel
@@ -165,8 +296,12 @@ func (m *Manager) UpdateConfiguration(ctx context.Context, ingressRules []zero_t
 		}),
 	}
 
-	// 更新配置
-	_, err := m.client.ZeroTrust.Tunnels.Cloudflared.Configurations.Update(ctx, m.tunnel.ID, configParams)
+	// 使用重试机制执行更新操作
+	err := m.callWithRetry(ctx, func() error {
+		_, err := m.client.ZeroTrust.Tunnels.Cloudflared.Configurations.Update(ctx, m.tunnel.ID, configParams)
+		return err
+	})
+	
 	if err != nil {
 		return fmt.Errorf("failed to update tunnel configuration: %w", err)
 	}
@@ -193,20 +328,29 @@ func (m *Manager) getZoneIDForHostname(ctx context.Context, hostname string) (st
 		domain = strings.Join(parts[len(parts)-2:], ".")
 	}
 
-	// 查询Cloudflare API获取zone信息
-	zonesList, err := m.client.Zones.List(ctx, zones.ZoneListParams{
-		Name: cloudflare.F(domain),
+	var zoneID string
+	// 使用重试机制执行zone查询操作
+	err := m.callWithRetry(ctx, func() error {
+		// 查询Cloudflare API获取zone信息
+		zonesList, err := m.client.Zones.List(ctx, zones.ZoneListParams{
+			Name: cloudflare.F(domain),
+		})
+		if err != nil {
+			return err
+		}
+
+		if len(zonesList.Result) == 0 {
+			return fmt.Errorf("no zone found for domain: %s", domain)
+		}
+
+		// 使用第一个匹配的zone
+		zoneID = zonesList.Result[0].ID
+		return nil
 	})
+	
 	if err != nil {
-		return "", fmt.Errorf("failed to list zones: %w", err)
+		return "", fmt.Errorf("failed to get zone ID for hostname %s: %w", hostname, err)
 	}
-
-	if len(zonesList.Result) == 0 {
-		return "", fmt.Errorf("no zone found for domain: %s", domain)
-	}
-
-	// 使用第一个匹配的zone
-	zoneID := zonesList.Result[0].ID
 
 	// 缓存结果
 	m.cacheMu.Lock()
@@ -224,35 +368,46 @@ func (m *Manager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, err
 		return nil, fmt.Errorf("tunnel is not available")
 	}
 
-	// 获取所有zone
-	zonesList, err := m.client.Zones.List(ctx, zones.ZoneListParams{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list zones: %w", err)
-	}
-
-	// 收集所有与当前隧道相关的DNS记录
 	var allTunnelRecords []dns.RecordResponse
 	expectedContent := fmt.Sprintf("%s.cfargotunnel.com", m.tunnel.ID)
 
-	// 遍历所有zone
-	for _, z := range zonesList.Result {
-		// 列出zone中的所有CNAME记录
-		records, err := m.client.DNS.Records.List(ctx, dns.RecordListParams{
-			ZoneID: cloudflare.F(z.ID),
-			Type:   cloudflare.F(dns.RecordListParamsTypeCNAME),
-		})
+	// 使用重试机制执行操作
+	err := m.callWithRetry(ctx, func() error {
+		// 获取所有zone
+		zonesList, err := m.client.Zones.List(ctx, zones.ZoneListParams{})
 		if err != nil {
-			// 如果某个zone访问失败，记录错误但继续处理其他zone
-			slog.Warn("Failed to list DNS records for zone", "zone", z.Name, "error", err)
-			continue
+			return err
 		}
 
-		// 过滤出指向当前隧道的记录
-		for _, record := range records.Result {
-			if record.Content == expectedContent {
-				allTunnelRecords = append(allTunnelRecords, record)
+		// 收集所有与当前隧道相关的DNS记录
+		allTunnelRecords = []dns.RecordResponse{}
+
+		// 遍历所有zone
+		for _, z := range zonesList.Result {
+			// 列出zone中的所有CNAME记录
+			records, err := m.client.DNS.Records.List(ctx, dns.RecordListParams{
+				ZoneID: cloudflare.F(z.ID),
+				Type:   cloudflare.F(dns.RecordListParamsTypeCNAME),
+			})
+			if err != nil {
+				// 如果某个zone访问失败，记录错误但继续处理其他zone
+				slog.Warn("Failed to list DNS records for zone", "zone", z.Name, "error", err)
+				continue
+			}
+
+			// 过滤出指向当前隧道的记录
+			for _, record := range records.Result {
+				if record.Content == expectedContent {
+					allTunnelRecords = append(allTunnelRecords, record)
+				}
 			}
 		}
+		
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to list DNS records: %w", err)
 	}
 
 	return allTunnelRecords, nil
@@ -294,13 +449,16 @@ func (m *Manager) UpsertDNSRecords(ctx context.Context, hostnames []string) erro
 			})
 		}
 
-		// 执行批量创建
+		// 使用重试机制执行批量创建
 		batchParams := dns.RecordBatchParams{
 			ZoneID: cloudflare.F(zoneID),
 			Posts:  cloudflare.F(posts),
 		}
-
-		_, err := m.client.DNS.Records.Batch(ctx, batchParams)
+		
+		err := m.callWithRetry(ctx, func() error {
+			_, err := m.client.DNS.Records.Batch(ctx, batchParams)
+			return err
+		})
 
 		if err != nil {
 			return fmt.Errorf("failed to batch upsert DNS records for zone %s: %w", zoneID, err)
@@ -334,20 +492,28 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) erro
 
 		for _, hostname := range zoneHosts {
 			nameParam.Exact = cloudflare.F(hostname)
-			records, err := m.client.DNS.Records.List(ctx, dns.RecordListParams{
-				ZoneID: cloudflare.F(zoneID),
-				Name:   cloudflare.F(nameParam),
-				Type:   cloudflare.F(dns.RecordListParamsTypeCNAME),
+			// 使用重试机制获取记录
+			err := m.callWithRetry(ctx, func() error {
+				records, err := m.client.DNS.Records.List(ctx, dns.RecordListParams{
+					ZoneID: cloudflare.F(zoneID),
+					Name:   cloudflare.F(nameParam),
+					Type:   cloudflare.F(dns.RecordListParamsTypeCNAME),
+				})
+				if err != nil {
+					return err
+				}
+
+				// 收集记录ID用于删除
+				for _, record := range records.Result {
+					deletes = append(deletes, dns.RecordBatchParamsDelete{
+						ID: cloudflare.F(record.ID),
+					})
+				}
+				return nil
 			})
+			
 			if err != nil {
 				return fmt.Errorf("failed to list DNS records for hostname %s: %w", hostname, err)
-			}
-
-			// 收集记录ID用于删除
-			for _, record := range records.Result {
-				deletes = append(deletes, dns.RecordBatchParamsDelete{
-					ID: cloudflare.F(record.ID),
-				})
 			}
 		}
 
@@ -358,7 +524,11 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) erro
 				Deletes: cloudflare.F(deletes),
 			}
 
-			_, err := m.client.DNS.Records.Batch(ctx, batchParams)
+			// 使用重试机制执行批量删除
+			err := m.callWithRetry(ctx, func() error {
+				_, err := m.client.DNS.Records.Batch(ctx, batchParams)
+				return err
+			})
 
 			if err != nil {
 				return fmt.Errorf("failed to batch delete DNS records for zone %s: %w", zoneID, err)
