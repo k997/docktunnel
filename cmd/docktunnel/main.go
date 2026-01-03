@@ -17,6 +17,7 @@ import (
 	"docktunnel/internal/docker"
 	"docktunnel/internal/events"
 	"docktunnel/internal/logger"
+	"docktunnel/internal/state"
 )
 
 func main() {
@@ -55,6 +56,23 @@ func main() {
 
 	// 创建Controller
 	controller := controller.NewController(dockerManager, cfManager, cfg.GetControllerOptions())
+
+	// Register gob types for state persistence (T073)
+	state.RegisterGobTypes()
+
+	// Load persisted state at startup (T073, T075)
+	statePath := cfg.Cleanup.StateFile
+	if statePath == "" {
+		statePath = state.StateFileDefault
+	}
+	controller.SetStatePath(statePath)
+
+	appLogger.Info("Loading persisted state", "path", statePath)
+	if err := controller.LoadState(); err != nil {
+		appLogger.Warn("Failed to load persisted state, starting with clean state",
+			"error", err)
+		// Continue anyway - don't fail startup (T075)
+	}
 
 	// 创建事件通道
 	eventChan := make(chan events.Event, 10)

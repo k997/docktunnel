@@ -263,6 +263,21 @@ func (c *Controller) getContainerRetentionPolicy(event events.Event) types.Reten
 	return policy
 }
 
+// SetStatePath sets the path for state persistence
+func (c *Controller) SetStatePath(path string) {
+	c.stateManager.SetStatePath(path)
+}
+
+// LoadState loads persisted state from disk (T073, T075)
+func (c *Controller) LoadState() error {
+	return c.stateManager.Load("")
+}
+
+// SaveState saves the current state to disk
+func (c *Controller) SaveState() error {
+	return c.stateManager.Save("")
+}
+
 // handleContainerStop 处理容器停止事件
 func (c *Controller) handleContainerStop(ctx context.Context, event events.Event) error {
 	// 检查容器是否启用了docktunnel

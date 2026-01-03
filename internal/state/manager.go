@@ -18,6 +18,8 @@ const (
 	CoolingPeriod = 300 * time.Second
 	// MaxCoolingPeriod is the maximum cooling period
 	MaxCoolingPeriod = 1800 * time.Second
+	// SaveInterval is the minimum time between state saves
+	SaveInterval = 30 * time.Second
 )
 
 // Manager manages the state of all tunnel entries
@@ -27,7 +29,10 @@ type Manager struct {
 	pendingDeletes    map[string]*types.TunnelEntry     // key: containerID
 	flappingContainers map[string]types.FlappingState   // key: containerID
 
-	logger *slog.Logger
+	logger      *slog.Logger
+	statePath   string
+	lastSaved   time.Time
+	dirty       bool // true if state has changed since last save
 }
 
 // NewManager creates a new state manager
@@ -37,7 +42,66 @@ func NewManager(logger *slog.Logger) *Manager {
 		pendingDeletes:     make(map[string]*types.TunnelEntry),
 		flappingContainers: make(map[string]types.FlappingState),
 		logger:             logger,
+		statePath:          "",
+		lastSaved:          time.Time{},
+		dirty:              false,
 	}
+}
+
+// SetStatePath sets the state file path for persistence
+func (sm *Manager) SetStatePath(path string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.statePath = path
+}
+
+// markDirty marks the state as changed and potentially saves
+func (sm *Manager) markDirty() {
+	sm.mu.Lock()
+	sm.dirty = true
+	sm.mu.Unlock()
+}
+
+// SaveIfDirty saves the state if it has changed and enough time has passed (T072)
+func (sm *Manager) SaveIfDirty() error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if !sm.dirty {
+		return nil
+	}
+
+	// Check if enough time has passed since last save
+	if !sm.lastSaved.IsZero() && time.Since(sm.lastSaved) < SaveInterval {
+		return nil
+	}
+
+	// Save the state
+	if sm.statePath != "" {
+		if err := sm.Save(sm.statePath); err != nil {
+			return err
+		}
+		sm.lastSaved = time.Now()
+		sm.dirty = false
+	}
+
+	return nil
+}
+
+// ForceSave forces an immediate state save regardless of dirty flag or timing
+func (sm *Manager) ForceSave() error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if sm.statePath != "" {
+		if err := sm.Save(sm.statePath); err != nil {
+			return err
+		}
+		sm.lastSaved = time.Now()
+		sm.dirty = false
+		return nil
+	}
+	return nil
 }
 
 // AddActiveTunnel adds a tunnel to the active tunnels map
@@ -46,6 +110,7 @@ func (sm *Manager) AddActiveTunnel(entry *types.TunnelEntry) {
 	defer sm.mu.Unlock()
 
 	sm.activeTunnels[entry.ContainerID] = entry
+	sm.markDirty()
 	sm.logger.Debug("Added active tunnel",
 		"container_id", entry.ContainerID,
 		"service_name", entry.ServiceName,
@@ -60,6 +125,7 @@ func (sm *Manager) RemoveActiveTunnel(containerID string) {
 
 	if _, exists := sm.activeTunnels[containerID]; exists {
 		delete(sm.activeTunnels, containerID)
+		sm.markDirty()
 		sm.logger.Debug("Removed active tunnel", "container_id", containerID)
 	}
 }
@@ -95,6 +161,7 @@ func (sm *Manager) AddPendingDeletion(entry *types.TunnelEntry) {
 
 	// Add to pending deletions
 	sm.pendingDeletes[entry.ContainerID] = entry
+	sm.markDirty()
 	sm.logger.Info("Moved tunnel to pending deletion",
 		"container_id", entry.ContainerID,
 		"service_name", entry.ServiceName,
@@ -109,6 +176,7 @@ func (sm *Manager) RemovePendingDeletion(containerID string) {
 
 	if _, exists := sm.pendingDeletes[containerID]; exists {
 		delete(sm.pendingDeletes, containerID)
+		sm.markDirty()
 		sm.logger.Debug("Removed pending deletion", "container_id", containerID)
 	}
 }
@@ -149,6 +217,7 @@ func (sm *Manager) RestoreActiveTunnel(containerID string) error {
 	entry.Status = types.StatusActive
 	entry.DeletedAt = nil
 	sm.activeTunnels[containerID] = entry
+	sm.markDirty()
 
 	sm.logger.Info("Restored tunnel to active",
 		"container_id", containerID,
@@ -354,6 +423,7 @@ func (sm *Manager) RunGC(ctx context.Context) ([]string, error) {
 				"retention_type", entry.RetentionPolicy.Type,
 			)
 			delete(sm.pendingDeletes, containerID)
+			sm.markDirty()
 		}
 	}
 

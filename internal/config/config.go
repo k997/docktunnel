@@ -36,7 +36,8 @@ type Config struct {
 		DebounceDuration  time.Duration `mapstructure:"debounceDuration"`
 	} `mapstructure:"controller"`
 	Cleanup struct {
-		OnExit bool `mapstructure:"onExit"`
+		OnExit    bool   `mapstructure:"onExit"`
+		StateFile string `mapstructure:"stateFile"`
 	} `mapstructure:"cleanup"`
 	Defaults struct {
 		Scheme string `mapstructure:"scheme"`
