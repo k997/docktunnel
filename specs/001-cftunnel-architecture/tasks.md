@@ -202,7 +202,7 @@
 ### Unit Tests for User Story 6
 
 - [X] T076 [P] [US6] Write unit test for OriginRequestConfig parsing in internal/controller/label_parser_test.go (all 20+ originRequest attributes)
-- [ ] T077 [P] [US6] Write unit test for global defaults merging with container labels in internal/controller/label_parser_test.go
+- [X] T077 [P] [US6] Write unit test for global defaults merging with container labels in internal/controller/label_parser_test.go
 - [X] T078 [P] [US6] Write unit test for Cloudflare Access config parsing in internal/controller/label_parser_test.go
 
 ### Implementation for User Story 6

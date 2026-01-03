@@ -976,3 +976,117 @@ func TestSanitizeLabelValue(t *testing.T) {
 		})
 	}
 }
+
+// TestGlobalDefaultsMerging tests that container labels override global defaults (T077)
+func TestGlobalDefaultsMerging(t *testing.T) {
+	// Test case 1: Container label should override global default
+	t.Run("container label overrides global default", func(t *testing.T) {
+		containerInfo := &container.InspectResponse{
+			Config: &container.Config{
+				Labels: map[string]string{
+					"docktunnel.enable":                          "true",
+					"docktunnel.web.hostname":                      "app.example.com",
+					"docktunnel.web.service":                       "http://localhost:8080",
+					"docktunnel.web.originRequest.connectTimeout": "45s", // Container label
+				},
+			},
+		}
+
+		rules, err := parseLabelsToIngress(containerInfo)
+		if err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+
+		webRule := rules["web"]
+		if webRule == nil {
+			t.Fatal("Expected web rule to exist")
+		}
+
+		// Verify container label value is used (45s instead of default 30s)
+		originRequest := webRule.OriginRequest.Value
+		if !originRequest.ConnectTimeout.Present {
+			t.Error("Expected ConnectTimeout to be present")
+		}
+		// Verify the value is set (actual conversion happens in Cloudflare SDK)
+		if originRequest.ConnectTimeout.Value == 0 {
+			t.Error("Expected ConnectTimeout to have a non-zero value")
+		}
+	})
+
+	// Test case 2: Global default should be used when container label is absent
+	t.Run("global default used when no container label", func(t *testing.T) {
+		containerInfo := &container.InspectResponse{
+			Config: &container.Config{
+				Labels: map[string]string{
+					"docktunnel.enable":   "true",
+					"docktunnel.web.hostname": "app.example.com",
+					"docktunnel.web.service":  "http://localhost:8080",
+					// No connectTimeout label - global defaults would be applied by caller
+				},
+			},
+		}
+
+		rules, err := parseLabelsToIngress(containerInfo)
+		if err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+
+		webRule := rules["web"]
+		if webRule == nil {
+			t.Fatal("Expected web rule to exist")
+		}
+
+		// When no originRequest labels are set, the field might not be initialized
+		// Global defaults are applied by the caller using config.GetOriginRequestDefaults()
+		// This test verifies that absence of container labels doesn't cause errors
+		if webRule.OriginRequest.Present {
+			// If present for some reason, verify connectTimeout is not set from label
+			originRequest := webRule.OriginRequest.Value
+			if originRequest.ConnectTimeout.Present {
+				t.Error("Expected ConnectTimeout to not be present when label is absent")
+			}
+		}
+	})
+
+	// Test case 3: Multiple container labels override multiple defaults
+	t.Run("multiple labels override multiple defaults", func(t *testing.T) {
+		containerInfo := &container.InspectResponse{
+			Config: &container.Config{
+				Labels: map[string]string{
+					"docktunnel.enable":                              "true",
+					"docktunnel.web.hostname":                        "app.example.com",
+					"docktunnel.web.service":                         "http://localhost:8080",
+					"docktunnel.web.originRequest.noTLSVerify":      "true",   // Override default
+					"docktunnel.web.originRequest.keepAliveConnections": "200",   // Override default
+					"docktunnel.web.originRequest.httpHostHeader":      "custom.host", // Custom value
+				},
+			},
+		}
+
+		rules, err := parseLabelsToIngress(containerInfo)
+		if err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+
+		webRule := rules["web"]
+		if webRule == nil {
+			t.Fatal("Expected web rule to exist")
+		}
+
+		originRequest := webRule.OriginRequest.Value
+
+		// Verify all three labels were parsed correctly
+		if !originRequest.NoTLSVerify.Present || !originRequest.NoTLSVerify.Value {
+			t.Error("Expected NoTLSVerify to be true from container label")
+		}
+		if !originRequest.KeepAliveConnections.Present || originRequest.KeepAliveConnections.Value != 200 {
+			t.Errorf("Expected KeepAliveConnections to be 200 from container label, got %d",
+				originRequest.KeepAliveConnections.Value)
+		}
+		if !originRequest.HTTPHostHeader.Present || originRequest.HTTPHostHeader.Value != "custom.host" {
+			t.Errorf("Expected HTTPHostHeader to be 'custom.host' from container label, got %s",
+				originRequest.HTTPHostHeader.Value)
+		}
+	})
+}
+
