@@ -72,7 +72,7 @@
 - [X] T021 [P] [US1] Implement Cloudflare API client wrapper in internal/cloudflareManager/tunnel.go (GetTunnelConfig, UpdateTunnelConfig, FindTunnelByName)
 - [X] T022 [P] [US1] Implement Cloudflare API rate limiter in internal/cloudflareManager/rate_limiter.go (token bucket, 10 req/s)
 - [X] T023 [P] [US1] Implement retry logic with exponential backoff in internal/cloudflareManager/retry.go (max 3 retries, jitter)
-- [ ] T024 [P] [US1] Implement in-memory state manager in internal/state/manager.go (active tunnels map, add/remove operations)
+- [X] T024 [P] [US1] Implement in-memory state manager in internal/state/manager.go (active tunnels map, add/remove operations)
 - [X] T025 [US1] Implement controller event orchestration in internal/controller/controller.go (handle start/stop events, trigger Cloudflare sync)
 - [X] T026 [US1] Implement Cloudflare tunnel configuration sync in internal/cloudflareManager/tunnel.go (fetch config, calculate diff, apply updates)
 - [X] T027 [US1] Implement debouncer in internal/events/dispatcher.go (2-second window to batch rapid events)
@@ -122,19 +122,19 @@
 
 ### Unit Tests for User Story 2
 
-- [ ] T045 [P] [US2] Write unit test for Traefik Host() regex extraction in internal/controller/label_parser_test.go (single and multiple hostnames)
-- [ ] T046 [P] [US2] Write unit test for Traefik Path/PathPrefix extraction in internal/controller/label_parser_test.go
-- [ ] T047 [P] [US2] Write unit test for Traefik service name linking in internal/controller/label_parser_test.go (router references service by name)
-- [ ] T048 [P] [US2] Write unit test for DockTunnel label precedence over Traefik in internal/controller/label_parser_test.go
+- [X] T045 [P] [US2] Write unit test for Traefik Host() regex extraction in internal/controller/label_parser_test.go (single and multiple hostnames)
+- [X] T046 [P] [US2] Write unit test for Traefik Path/PathPrefix extraction in internal/controller/label_parser_test.go
+- [X] T047 [P] [US2] Write unit test for Traefik service name linking in internal/controller/label_parser_test.go (router references service by name)
+- [X] T048 [P] [US2] Write unit test for DockTunnel label precedence over Traefik in internal/controller/label_parser_test.go
 
 ### Implementation for User Story 2
 
-- [ ] T049 [US2] Implement Traefik router rule parser in internal/controller/label_parser.go (parse traefik.http.routers.<name>.rule with regex for Host() and Path())
-- [ ] T050 [US2] Implement Traefik service config parser in internal/controller/label_parser.go (parse traefik.http.services.<name>.loadbalancer.server.* fields)
-- [ ] T051 [US2] Implement service name matching logic in internal/controller/label_parser.go (link router service name to service configuration)
-- [ ] T052 [US2] Add support for extracting multiple hostnames from single Traefik rule in internal/controller/label_parser.go (Host(`a.com`, `b.com`) → multiple routes)
-- [ ] T053 [US2] Add logging for unsupported Traefik features at INFO level in internal/controller/label_parser.go (middleware, TLS configs not supported)
-- [ ] T054 [US2] Extend 4-layer priority resolver to prioritize DockTunnel labels over Traefik in internal/controller/label_parser.go
+- [X] T049 [US2] Implement Traefik router rule parser in internal/controller/label_parser.go (parse traefik.http.routers.<name>.rule with regex for Host() and Path())
+- [X] T050 [US2] Implement Traefik service config parser in internal/controller/label_parser.go (parse traefik.http.services.<name>.loadbalancer.server.* fields)
+- [X] T051 [US2] Implement service name matching logic in internal/controller/label_parser.go (link router service name to service configuration)
+- [X] T052 [US2] Add support for extracting multiple hostnames from single Traefik rule in internal/controller/label_parser.go (Host(`a.com`, `b.com`) → multiple routes)
+- [X] T053 [US2] Add logging for unsupported Traefik features at INFO level in internal/controller/label_parser.go (middleware, TLS configs not supported)
+- [X] T054 [US2] Extend 4-layer priority resolver to prioritize DockTunnel labels over Traefik in internal/controller/label_parser.go
 
 **Checkpoint**: At this point, User Stories 1, 2, AND 4 should all work - Traefik users can migrate without label changes
 

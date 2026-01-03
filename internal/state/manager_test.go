@@ -1,0 +1,414 @@
+package state
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"log/slog"
+
+	"docktunnel/pkg/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestNewManager(t *testing.T) {
+	logger := slog.Default()
+	sm := NewManager(logger)
+
+	assert.NotNil(t, sm)
+	assert.NotNil(t, sm.activeTunnels)
+	assert.NotNil(t, sm.pendingDeletes)
+	assert.NotNil(t, sm.flappingContainers)
+}
+
+func TestAddActiveTunnel(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	entry := &types.TunnelEntry{
+		ContainerID: "test-container-1",
+		TunnelID:    "tunnel-123",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		LastSyncAt:  time.Now().UTC(),
+		Config: types.TunnelConfiguration{
+			Hostname:   "test.example.com",
+			ServiceURL: "http://localhost:8080",
+		},
+	}
+
+	sm.AddActiveTunnel(entry)
+
+	retrieved, ok := sm.GetActiveTunnel("test-container-1")
+	assert.True(t, ok)
+	assert.Equal(t, entry.ContainerID, retrieved.ContainerID)
+	assert.Equal(t, entry.ServiceName, retrieved.ServiceName)
+	assert.Equal(t, types.StatusActive, retrieved.Status)
+}
+
+func TestRemoveActiveTunnel(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	entry := &types.TunnelEntry{
+		ContainerID: "test-container-1",
+		Status:      types.StatusActive,
+	}
+
+	sm.AddActiveTunnel(entry)
+	sm.RemoveActiveTunnel("test-container-1")
+
+	_, ok := sm.GetActiveTunnel("test-container-1")
+	assert.False(t, ok)
+}
+
+func TestGetAllActiveTunnels(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add multiple tunnels
+	for i := 1; i <= 3; i++ {
+		entry := &types.TunnelEntry{
+			ContainerID: "test-container-" + string(rune('0'+i)),
+			Status:      types.StatusActive,
+		}
+		sm.AddActiveTunnel(entry)
+	}
+
+	all := sm.GetAllActiveTunnels()
+	assert.Len(t, all, 3)
+}
+
+func TestAddPendingDeletion(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+	entry := &types.TunnelEntry{
+		ContainerID: "test-container-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+
+	sm.AddPendingDeletion(entry)
+
+	// Should not be in active tunnels
+	_, ok := sm.GetActiveTunnel("test-container-1")
+	assert.False(t, ok)
+
+	// Should be in pending deletions
+	retrieved, ok := sm.GetPendingDeletion("test-container-1")
+	assert.True(t, ok)
+	assert.Equal(t, entry.ContainerID, retrieved.ContainerID)
+	assert.Equal(t, types.StatusPendingDelete, retrieved.Status)
+}
+
+func TestRestoreActiveTunnel(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+	entry := &types.TunnelEntry{
+		ContainerID: "test-container-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+	}
+
+	sm.AddPendingDeletion(entry)
+	err := sm.RestoreActiveTunnel("test-container-1")
+
+	require.NoError(t, err)
+
+	// Should be back in active tunnels
+	retrieved, ok := sm.GetActiveTunnel("test-container-1")
+	assert.True(t, ok)
+	assert.Equal(t, types.StatusActive, retrieved.Status)
+	assert.Nil(t, retrieved.DeletedAt)
+
+	// Should not be in pending deletions
+	_, ok = sm.GetPendingDeletion("test-container-1")
+	assert.False(t, ok)
+}
+
+func TestFlappingDetection(t *testing.T) {
+	sm := NewManager(slog.Default())
+	containerID := "test-flapping-container"
+
+	// Record transitions below threshold
+	for i := 0; i < 4; i++ {
+		sm.RecordTransition(containerID)
+	}
+
+	// Should not be flapping yet
+	isFlapping := sm.CheckFlapping(containerID)
+	assert.False(t, isFlapping, "Should not be flapping with 4 transitions")
+
+	// Add one more transition to exceed threshold
+	sm.RecordTransition(containerID)
+
+	// Should now be flapping
+	isFlapping = sm.CheckFlapping(containerID)
+	assert.True(t, isFlapping, "Should be flapping with 5 transitions")
+
+	// Check flapping state
+	state, ok := sm.GetFlappingState(containerID)
+	assert.True(t, ok, "Flapping state should exist")
+	assert.True(t, state.LastFlapped.Before(time.Now()), "LastFlapped should be in the past")
+	assert.True(t, state.CoolingUntil.After(time.Now()), "CoolingUntil should be in the future")
+}
+
+func TestFlappingExpiration(t *testing.T) {
+	sm := NewManager(slog.Default())
+	containerID := "test-expiring-container"
+
+	// Manually mark as flapping with short cooling period
+	sm.MarkAsFlapping(containerID, 100*time.Millisecond)
+
+	// Should be flapping
+	assert.True(t, sm.CheckFlapping(containerID))
+
+	// Wait for cooling period to expire
+	time.Sleep(150 * time.Millisecond)
+
+	// Should no longer be flapping
+	assert.False(t, sm.CheckFlapping(containerID))
+}
+
+func TestGetSnapshot(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add active tunnel
+	activeEntry := &types.TunnelEntry{
+		ContainerID: "active-1",
+		Status:      types.StatusActive,
+	}
+	sm.AddActiveTunnel(activeEntry)
+
+	// Add pending deletion
+	now := time.Now()
+	pendingEntry := &types.TunnelEntry{
+		ContainerID: "pending-1",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+	}
+	sm.AddPendingDeletion(pendingEntry)
+
+	// Get snapshot
+	snapshot := sm.GetSnapshot()
+
+	assert.NotNil(t, snapshot)
+	assert.Equal(t, 1, snapshot.Version)
+	assert.Len(t, snapshot.ActiveTunnels, 1)
+	assert.Len(t, snapshot.PendingDeletions, 1)
+	assert.Contains(t, snapshot.ActiveTunnels, "active-1")
+	assert.Contains(t, snapshot.PendingDeletions, "pending-1")
+}
+
+func TestLoadFromSnapshot(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Create a snapshot
+	now := time.Now()
+	snapshot := &types.StateSnapshot{
+		Version:   1,
+		Timestamp: now,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"active-1": {
+				ContainerID: "active-1",
+				Status:      types.StatusActive,
+			},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{
+			"pending-1": {
+				ContainerID: "pending-1",
+				Status:      types.StatusPendingDelete,
+				DeletedAt:   &now,
+			},
+		},
+		FlappingContainers: map[string]types.FlappingState{
+			"flapping-1": {
+				CoolingUntil: now.Add(1 * time.Hour),
+			},
+		},
+	}
+
+	// Load snapshot
+	sm.LoadFromSnapshot(snapshot)
+
+	// Verify loaded state
+	entry, ok := sm.GetActiveTunnel("active-1")
+	assert.True(t, ok)
+	assert.Equal(t, "active-1", entry.ContainerID)
+
+	pending, ok := sm.GetPendingDeletion("pending-1")
+	assert.True(t, ok)
+	assert.Equal(t, "pending-1", pending.ContainerID)
+
+	flapping, ok := sm.GetFlappingState("flapping-1")
+	assert.True(t, ok)
+	assert.True(t, flapping.CoolingUntil.After(now))
+}
+
+func TestRunGC_ImmediatePolicy(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+	entry := &types.TunnelEntry{
+		ContainerID: "immediate-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		RetentionPolicy: types.RetentionPolicy{
+			Type: types.Immediate,
+		},
+	}
+	sm.AddPendingDeletion(entry)
+
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, expired, "immediate-1")
+
+	// Should be removed
+	_, ok := sm.GetPendingDeletion("immediate-1")
+	assert.False(t, ok)
+}
+
+func TestRunGC_TimedPolicy(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Create entry with expired retention
+	past := time.Now().Add(-1 * time.Hour)
+	entry := &types.TunnelEntry{
+		ContainerID: "timed-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &past,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm.AddPendingDeletion(entry)
+
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, expired, "timed-1")
+
+	// Should be removed
+	_, ok := sm.GetPendingDeletion("timed-1")
+	assert.False(t, ok)
+}
+
+func TestRunGC_TimedPolicyNotExpired(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Create entry with unexpired retention
+	recent := time.Now().Add(-5 * time.Minute)
+	entry := &types.TunnelEntry{
+		ContainerID: "timed-not-expired",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &recent,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm.AddPendingDeletion(entry)
+
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, expired, "timed-not-expired")
+
+	// Should still be present
+	_, ok := sm.GetPendingDeletion("timed-not-expired")
+	assert.True(t, ok)
+}
+
+func TestRunGC_ForeverPolicy(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+	entry := &types.TunnelEntry{
+		ContainerID: "forever-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		RetentionPolicy: types.RetentionPolicy{
+			Type: types.Forever,
+		},
+	}
+	sm.AddPendingDeletion(entry)
+
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, expired, "forever-1")
+
+	// Should still be present (forever policy)
+	_, ok := sm.GetPendingDeletion("forever-1")
+	assert.True(t, ok)
+}
+
+func TestGetStats(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add active tunnels
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "active-1", Status: types.StatusActive})
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "active-2", Status: types.StatusActive})
+
+	// Add pending deletion
+	now := time.Now()
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID: "pending-1",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+	})
+
+	// Mark flapping
+	sm.MarkAsFlapping("flapping-1", 5*time.Minute)
+
+	stats := sm.GetStats()
+	assert.Equal(t, 2, stats["active_tunnels"])
+	assert.Equal(t, 1, stats["pending_deletions"])
+	assert.Equal(t, 1, stats["flapping_containers"])
+}
+
+func TestFlappingWindowCleanup(t *testing.T) {
+	sm := NewManager(slog.Default())
+	containerID := "test-window-cleanup"
+
+	// Record old transitions outside window
+	oldTime := time.Now().Add(-2 * time.Minute)
+	for i := 0; i < 3; i++ {
+		sm.RecordTransition(containerID)
+	}
+
+	// Manually set old transitions to simulate expired ones
+	sm.mu.Lock()
+	if state, exists := sm.flappingContainers[containerID]; exists {
+		for i := range state.Transitions {
+			state.Transitions[i] = oldTime
+		}
+	}
+	sm.mu.Unlock()
+
+	// Record new transition within window (should trigger cleanup of old ones)
+	sm.RecordTransition(containerID)
+
+	// Verify old transitions were cleaned up by checking transition count
+	state, ok := sm.GetFlappingState(containerID)
+	assert.True(t, ok, "Flapping state should exist")
+	assert.Len(t, state.Transitions, 1, "Old transitions should be cleaned up, leaving only the new one")
+
+	// Add enough new transitions to trigger flapping
+	for i := 0; i < 4; i++ {
+		sm.RecordTransition(containerID)
+	}
+
+	// Now should be flapping (1 old + 4 new = 5 total)
+	isFlapping := sm.CheckFlapping(containerID)
+	assert.True(t, isFlapping, "Should be flapping after 5 transitions within window")
+}

@@ -306,6 +306,7 @@ func getContainerIP(containerInfo *container.InspectResponse) string {
 // parseTraefikLabels parses Traefik v2 labels as fallback
 // Supports: traefik.http.routers.<name>.rule with Host() patterns
 //          traefik.http.services.<name>.loadbalancer.server.port
+// Unsupported (logged at INFO): middlewares, TLS, entryPoints, etc.
 func parseTraefikLabels(labels map[string]string, containerInfo *container.InspectResponse) map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress {
 	rules := make(map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
 
@@ -315,6 +316,16 @@ func parseTraefikLabels(labels map[string]string, containerInfo *container.Inspe
 
 	for label, value := range labels {
 		if !strings.HasPrefix(label, "traefik.http.routers.") {
+			continue
+		}
+
+		// Log unsupported Traefik features
+		if strings.HasSuffix(label, ".middlewares") ||
+		   strings.HasSuffix(label, ".tls") ||
+		   strings.HasSuffix(label, ".entryPoints") ||
+		   strings.HasSuffix(label, ".priority") ||
+		   strings.HasSuffix(label, ".rule") && !strings.Contains(value, "Host(") {
+			slog.Info("Ignoring unsupported Traefik feature", "label", label, "value", value)
 			continue
 		}
 
