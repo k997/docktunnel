@@ -175,8 +175,8 @@
 
 ### Unit Tests for User Story 5
 
-- [ ] T066 [P] [US5] Write unit test for state snapshot serialization in internal/state/persistence_test.go (gob encoding)
-- [ ] T067 [P] [US5] Write unit test for state snapshot deserialization in internal/state/persistence_test.go (handle corrupted files)
+- [X] T066 [P] [US5] Write unit test for state snapshot serialization in internal/state/persistence_test.go (gob encoding)
+- [X] T067 [P] [US5] Write unit test for state snapshot deserialization in internal/state/persistence_test.go (handle corrupted files)
 - [ ] T068 [P] [US5] Write unit test for startup reconciliation with persisted state in internal/controller/controller_test.go
 
 ### Implementation for User Story 5
