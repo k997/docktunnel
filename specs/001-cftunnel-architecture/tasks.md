@@ -181,13 +181,13 @@
 
 ### Implementation for User Story 5
 
-- [ ] T069 [P] [US5] Define StateSnapshot structure in pkg/types/tunnel.go (active tunnels map, pending deletions map, flapping state, version, timestamp)
-- [ ] T070 [US5] Implement state persistence to file in internal/state/persistence.go (gob encoding, atomic write with tmp file + rename)
-- [ ] T071 [US5] Implement state loading from file in internal/state/persistence.go (gob decode, fallback to JSON, handle corruption)
-- [ ] T072 [US5] Add periodic state snapshot saves in internal/state/manager.go (save after every state change or every 30s)
-- [ ] T073 [US5] Implement startup state loading in cmd/docktunnel/main.go (load persisted state before event processing)
+- [X] T069 [P] [US5] Define StateSnapshot structure in pkg/types/tunnel.go (active tunnels map, pending deletions map, flapping state, version, timestamp)
+- [X] T070 [US5] Implement state persistence to file in internal/state/persistence.go (gob encoding, atomic write with tmp file + rename)
+- [X] T071 [US5] Implement state loading from file in internal/state/persistence.go (gob decode, fallback to JSON, handle corruption)
+- [X] T072 [US5] Add periodic state snapshot saves in internal/state/manager.go (save after every state change or every 30s)
+- [X] T073 [US5] Implement startup state loading in cmd/docktunnel/main.go (load persisted state before event processing)
 - [ ] T074 [US5] Implement startup container scan reconciliation in internal/controller/controller.go (scan running containers, reconcile with persisted state, detect containers started during downtime)
-- [ ] T075 [US5] Add error handling for corrupted state file in internal/state/persistence.go (log error, fall back to full container scan, don't fail startup)
+- [X] T075 [US5] Add error handling for corrupted state file in internal/state/persistence.go (log error, fall back to full container scan, don't fail startup)
 
 **Checkpoint**: At this point, all user stories except US6 should work - controller can recover from restarts without losing retention state
 
