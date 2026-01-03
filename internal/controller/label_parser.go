@@ -15,6 +15,23 @@ import (
 	"github.com/docker/docker/api/types/container"
 )
 
+// dangerousChars contains characters that could be used for injection attacks
+var dangerousChars = regexp.MustCompile("[;&|`$']")
+
+// sanitizeLabelValue sanitizes label values to prevent injection attacks (T102)
+// Returns false if the value contains dangerous characters
+func sanitizeLabelValue(key, value string) bool {
+	if dangerousChars.MatchString(value) {
+		slog.Warn("Rejected label value with dangerous characters",
+			"label", key,
+			"value", value,
+			"reason", "potential injection attack",
+		)
+		return false
+	}
+	return true
+}
+
 // parseLabelsToIngress 解析容器标签并生成Ingress规则，适配cloudflare-go/v5
 func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, error) {
 	// 检查containerInfo是否为nil
@@ -49,6 +66,12 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]
 
 		serviceName := parts[1]
 		attribute := strings.Join(parts[2:], ".") // 处理多级属性如 originRequest.noTLSVerify
+
+		// Sanitize label value to prevent injection attacks (T102)
+		if !sanitizeLabelValue(label, value) {
+			slog.Warn("Skipping label with dangerous characters", "label", label, "value", value)
+			continue
+		}
 
 		// 获取或创建该服务的规则
 		rule, exists := rawRules[serviceName]

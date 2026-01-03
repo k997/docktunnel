@@ -908,3 +908,71 @@ func TestParseLabelsToIngress_AllOriginRequestAttributes(t *testing.T) {
 
 	t.Log("All originRequest attributes parsed successfully")
 }
+
+// TestSanitizeLabelValue tests label value sanitization for injection prevention (T102)
+func TestSanitizeLabelValue(t *testing.T) {
+	testCases := []struct {
+		name      string
+		label     string
+		value     string
+		wantValid bool
+	}{
+		{
+			name:      "valid hostname",
+			label:     "docktunnel.web.hostname",
+			value:     "example.com",
+			wantValid: true,
+		},
+		{
+			name:      "valid service URL",
+			label:     "docktunnel.web.service",
+			value:     "http://localhost:8080",
+			wantValid: true,
+		},
+		{
+			name:      "semicolon injection",
+			label:     "docktunnel.web.hostname",
+			value:     "example.com; rm -rf /",
+			wantValid: false,
+		},
+		{
+			name:      "ampersand injection",
+			label:     "docktunnel.web.hostname",
+			value:     "example.com & malicious",
+			wantValid: false,
+		},
+		{
+			name:      "pipe injection",
+			label:     "docktunnel.web.hostname",
+			value:     "example.com | cat",
+			wantValid: false,
+		},
+		{
+			name:      "backtick injection",
+			label:     "docktunnel.web.hostname",
+			value:     "example.com`whoami`",
+			wantValid: false,
+		},
+		{
+			name:      "dollar sign injection",
+			label:     "docktunnel.web.hostname",
+			value:     "example.com$(malicious)",
+			wantValid: false,
+		},
+		{
+			name:      "single quote injection",
+			label:     "docktunnel.web.hostname",
+			value:     "example.com' OR '1'='1",
+			wantValid: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := sanitizeLabelValue(tc.label, tc.value)
+			if result != tc.wantValid {
+				t.Errorf("sanitizeLabelValue() = %v, want %v", result, tc.wantValid)
+			}
+		})
+	}
+}
