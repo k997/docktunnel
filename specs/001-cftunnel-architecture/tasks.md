@@ -157,11 +157,11 @@
 - [X] T058 [P] [US3] Extend RetentionPolicy type with PolicyType enum in pkg/types/tunnel.go (Immediate, Timed, Forever)
 - [X] T059 [P] [US3] Add retention policy parsing to label parser in internal/controller/label_parser.go (parse "0"/"immediate", "30m"/"1h", "forever"/"keep")
 - [X] T060 [US3] Extend TunnelEntry with DeletedAt timestamp field in pkg/types/tunnel.go
-- [ ] T061 [US3] Implement container stop handler with retention logic in internal/controller/controller.go (mark as PENDING_DELETE or DELETED based on policy)
-- [ ] T062 [US3] Implement garbage collection ticker in internal/state/manager.go (run every 60 seconds)
-- [ ] T063 [US3] Implement GC scan logic in internal/state/manager.go (find expired PENDING_DELETE entries, remove from Cloudflare)
-- [ ] T064 [US3] Implement container restart detection during retention in internal/controller/controller.go (cancel retention timer, restore ACTIVE status)
-- [ ] T065 [US3] Update Cloudflare sync to exclude pending deletion entries from ingress rules in internal/cloudflareManager/tunnel.go (keep route active until retention expires)
+- [X] T061 [US3] Implement container stop handler with retention logic in internal/controller/controller.go (mark as PENDING_DELETE or DELETED based on policy)
+- [X] T062 [US3] Implement garbage collection ticker in internal/state/manager.go (run every 60 seconds)
+- [X] T063 [US3] Implement GC scan logic in internal/state/manager.go (find expired PENDING_DELETE entries, remove from Cloudflare)
+- [X] T064 [US3] Implement container restart detection during retention in internal/controller/controller.go (cancel retention timer, restore ACTIVE status)
+- [X] T065 [US3] Update Cloudflare sync to exclude pending deletion entries from ingress rules in internal/cloudflareManager/tunnel.go (keep route active until retention expires)
 
 **Checkpoint**: At this point, User Stories 1, 2, 3, AND 4 should all work - retention policies prevent config churn during deployments
 
