@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"log/slog"
 
@@ -94,6 +95,29 @@ func main() {
 	} else {
 		appLogger.Info("Initial synchronization completed successfully")
 	}
+
+	// 启动垃圾回收定时器 (T062) - 每60秒运行一次
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		appLogger.Info("Starting garbage collection ticker", "interval", "60s")
+
+		for {
+			select {
+			case <-ticker.C:
+				appLogger.Debug("Running garbage collection for expired retention policies")
+				if err := controller.RunGarbageCollection(ctx); err != nil {
+					appLogger.Error("Garbage collection failed", "error", err)
+				}
+			case <-ctx.Done():
+				appLogger.Info("Garbage collection ticker stopped")
+				return
+			}
+		}
+	}()
 
 	// 设置系统信号处理
 	sigChan := make(chan os.Signal, 1)

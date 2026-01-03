@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"docktunnel/internal/state"
+	"docktunnel/pkg/types"
+
 	"github.com/cloudflare/cloudflare-go/v5"
 	"github.com/cloudflare/cloudflare-go/v5/dns"
 	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
@@ -42,6 +45,7 @@ type ContainerHealth struct {
 type Controller struct {
 	dockerManager     *docker.Manager
 	cloudflareManager *cloudflareManager.Manager
+	stateManager      *state.Manager // State manager for retention policies
 	ingressRules      map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress // hostname -> rule map
 	containerRules    map[string][]string                                                           // containerID -> hostnames map
 	containerHealth   map[string]*ContainerHealth                                                   // containerID -> health info
@@ -65,6 +69,7 @@ func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareM
 	controller := &Controller{
 		dockerManager:     dockerManager,
 		cloudflareManager: cloudflareManager,
+		stateManager:      state.NewManager(slog.Default()),
 		ingressRules:      make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress),
 		containerRules:    make(map[string][]string),
 		containerHealth:   make(map[string]*ContainerHealth),
@@ -155,6 +160,22 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	}
 	slog.Info("Handling container start event", "containerID", event.ContainerID)
 
+	// Check if container is restarting from pending deletion (T064)
+	if _, pending := c.stateManager.GetPendingDeletion(event.ContainerID); pending {
+		slog.Info("Container restarting during retention period, canceling retention timer",
+			"containerID", event.ContainerID)
+
+		// Restore to active state
+		if err := c.stateManager.RestoreActiveTunnel(event.ContainerID); err != nil {
+			slog.Warn("Failed to restore active tunnel for container",
+				"containerID", event.ContainerID,
+				"error", err)
+		}
+
+		// Container will continue through normal start flow
+		// to recreate containerRules and ingressRules entries
+	}
+
 	// 检查容器是否处于抖动状态
 	if c.isFlapping(event.ContainerID) {
 		slog.Warn("Container is flapping, ignoring start event", "containerID", event.ContainerID)
@@ -207,6 +228,41 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	return c.syncToCloudflare(ctx)
 }
 
+// getContainerRetentionPolicy parses the retention policy from container labels
+// Defaults to Immediate deletion if not specified
+func (c *Controller) getContainerRetentionPolicy(event events.Event) types.RetentionPolicy {
+	labels := event.ContainerInfo.Config.Labels
+
+	// Check for retention label
+	retentionLabel, exists := labels["docktunnel.retention"]
+	if !exists {
+		// Try per-service retention labels (use first service)
+		for key, value := range labels {
+			if strings.HasPrefix(key, "docktunnel.") && strings.HasSuffix(key, ".retention") {
+				retentionLabel = value
+				exists = true
+				break
+			}
+		}
+	}
+
+	if !exists {
+		// Default to immediate deletion
+		return types.RetentionPolicy{Type: types.Immediate}
+	}
+
+	policy, err := ParseRetentionPolicy(retentionLabel)
+	if err != nil {
+		slog.Warn("Invalid retention policy, defaulting to immediate",
+			"containerID", event.ContainerID,
+			"retention", retentionLabel,
+			"error", err)
+		return types.RetentionPolicy{Type: types.Immediate}
+	}
+
+	return policy
+}
+
 // handleContainerStop 处理容器停止事件
 func (c *Controller) handleContainerStop(ctx context.Context, event events.Event) error {
 	// 检查容器是否启用了docktunnel
@@ -230,12 +286,66 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 		return nil
 	}
 
-	// 从容器规则映射中删除
-	delete(c.containerRules, event.ContainerID)
+	// Get retention policy
+	policy := c.getContainerRetentionPolicy(event)
+	slog.Info("Container retention policy",
+		"containerID", event.ContainerID,
+		"policyType", policy.Type,
+		"duration", policy.Duration)
 
-	// 从ingress规则中删除对应的规则
-	for _, hostname := range hostnamesToRemove {
-		delete(c.ingressRules, hostname)
+	now := time.Now()
+
+	// Handle based on retention policy
+	if policy.Type == types.Immediate {
+		// Immediate deletion - existing behavior
+		slog.Info("Immediate deletion for container", "containerID", event.ContainerID)
+
+		// 从容器规则映射中删除
+		delete(c.containerRules, event.ContainerID)
+
+		// 从ingress规则中删除对应的规则
+		for _, hostname := range hostnamesToRemove {
+			delete(c.ingressRules, hostname)
+		}
+	} else {
+		// Timed or Forever - move to pending deletions
+		slog.Info("Moving container to pending deletions",
+			"containerID", event.ContainerID,
+			"policy", policy.Type,
+			"duration", policy.Duration)
+
+		// Create tunnel entries for state manager
+		parsedRules, err := parseLabelsToIngress(event.ContainerInfo)
+		if err != nil {
+			c.mu.Unlock()
+			return fmt.Errorf("failed to parse labels for pending deletion: %w", err)
+		}
+
+		// Add each service to state manager with pending deletion status
+		for serviceName, rule := range parsedRules {
+			entry := &types.TunnelEntry{
+				ContainerID: event.ContainerID,
+				TunnelID:    c.cloudflareManager.GetTunnel().ID,
+				ServiceName: serviceName,
+				Config: types.TunnelConfiguration{
+					Hostname:  rule.Hostname.Value,
+					ServiceURL: rule.Service.Value,
+				},
+				RetentionPolicy: policy,
+				Status:          types.StatusPendingDelete,
+				CreatedAt:       now, // Should use actual creation time, but using now for simplicity
+				DeletedAt:       &now,
+				LastSyncAt:      now,
+			}
+			c.stateManager.AddPendingDeletion(entry)
+		}
+
+		// Remove from containerRules but keep in ingressRules (route still active)
+		delete(c.containerRules, event.ContainerID)
+		slog.Info("Routes kept active during retention period",
+			"containerID", event.ContainerID,
+			"hostnames", hostnamesToRemove,
+			"retention", policy.Duration)
 	}
 
 	// 更新容器健康状态
@@ -574,4 +684,61 @@ func (c *Controller) updateContainerHealth(containerID string, isStartEvent bool
 		health.RestartCount = 0
 		slog.Info("Container cooling period ended, flapping status reset", "containerID", containerID)
 	}
+}
+
+// RunGarbageCollection runs garbage collection for expired retention policies (T062, T063)
+// This should be called periodically (every 60 seconds) to clean up expired entries
+func (c *Controller) RunGarbageCollection(ctx context.Context) error {
+	// Run GC on state manager
+	expiredContainers, err := c.stateManager.RunGC(ctx)
+	if err != nil {
+		return fmt.Errorf("state manager GC failed: %w", err)
+	}
+
+	// If no expired containers, return early
+	if len(expiredContainers) == 0 {
+		return nil
+	}
+
+	slog.Info("Garbage collection found expired containers", "count", len(expiredContainers))
+
+	// Remove expired entries from ingress rules and sync to Cloudflare
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, containerID := range expiredContainers {
+		slog.Info("Removing expired retention entries",
+			"containerID", containerID)
+
+		// Get all pending deletions for this container to find hostnames
+		pendingEntry, exists := c.stateManager.GetPendingDeletion(containerID)
+		if !exists {
+			// Already removed from state manager, skip
+			continue
+		}
+
+		// Remove from ingress rules using hostname from config
+		hostname := pendingEntry.Config.Hostname
+		if hostname != "" {
+			if _, exists := c.ingressRules[hostname]; exists {
+				delete(c.ingressRules, hostname)
+				slog.Info("Removed expired route from ingress rules",
+					"containerID", containerID,
+					"hostname", hostname)
+			}
+		}
+
+		// Remove from state manager pending deletions (should already be removed by RunGC)
+		c.stateManager.RemovePendingDeletion(containerID)
+	}
+
+	// Sync updated rules to Cloudflare
+	if err := c.syncToCloudflare(ctx); err != nil {
+		return fmt.Errorf("failed to sync after GC: %w", err)
+	}
+
+	slog.Info("Garbage collection completed successfully",
+		"expired_count", len(expiredContainers))
+
+	return nil
 }
