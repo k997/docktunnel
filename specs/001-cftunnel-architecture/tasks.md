@@ -92,23 +92,23 @@
 
 ### Unit Tests for User Story 4
 
-- [ ] T031 [P] [US4] Write unit test for 4-layer priority parsing in internal/controller/label_parser_test.go (DockTunnel → Traefik → Auto-detect → Defaults)
-- [ ] T032 [P] [US4] Write unit test for IP address detection in internal/controller/label_parser_test.go (host vs bridge networking)
-- [ ] T033 [P] [US4] Write unit test for port auto-detection in internal/controller/label_parser_test.go (exposed ports, Traefik labels)
-- [ ] T034 [P] [US4] Write unit test for service URL construction in internal/controller/label_parser_test.go (protocol, IP, port combination)
+- [X] T031 [P] [US4] Write unit test for 4-layer priority parsing in internal/controller/label_parser_test.go (DockTunnel → Traefik → Auto-detect → Defaults)
+- [X] T032 [P] [US4] Write unit test for IP address detection in internal/controller/label_parser_test.go (host vs bridge networking)
+- [X] T033 [P] [US4] Write unit test for port auto-detection in internal/controller/label_parser_test.go (exposed ports, Traefik labels)
+- [X] T034 [P] [US4] Write unit test for service URL construction in internal/controller/label_parser_test.go (protocol, IP, port combination)
 
 ### Implementation for User Story 4
 
-- [ ] T035 [US4] Extend label parser with Traefik compatibility in internal/controller/label_parser.go (parse traefik.http.routers.*.rule for Host() patterns)
-- [ ] T036 [US4] Implement Traefik hostname extraction in internal/controller/label_parser.go (regex parsing of Host(`example.com`) patterns)
-- [ ] T037 [US4] Implement Traefik service port extraction in internal/controller/label_parser.go (parse traefik.http.services.*.loadbalancer.server.port)
-- [ ] T038 [US4] Implement network mode detection in internal/controller/label_parser.go (host vs bridge, detect from ContainerJSON)
-- [ ] T039 [US4] Implement IP address auto-detection in internal/controller/label_parser.go (localhost for host networking, bridge IP for bridge)
-- [ ] T040 [US4] Implement port auto-detection in internal/controller/label_parser.go (first exposed Docker port, fallback to port 80)
-- [ ] T041 [US4] Implement protocol/scheme detection in internal/controller/label_parser.go (detect from labels, default to http)
-- [ ] T042 [US4] Implement service URL construction in internal/controller/label_parser.go (combine scheme, IP, port into http://ip:port format)
-- [ ] T043 [US4] Implement global defaults application in internal/controller/label_parser.go (apply defaults from config.yaml when labels missing)
-- [ ] T044 [US4] Add logging for configuration fallback decisions in internal/controller/label_parser.go (log which priority layer provided each value)
+- [X] T035 [US4] Extend label parser with Traefik compatibility in internal/controller/label_parser.go (parse traefik.http.routers.*.rule for Host() patterns)
+- [X] T036 [US4] Implement Traefik hostname extraction in internal/controller/label_parser.go (regex parsing of Host(`example.com`) patterns)
+- [X] T037 [US4] Implement Traefik service port extraction in internal/controller/label_parser.go (parse traefik.http.services.*.loadbalancer.server.port)
+- [X] T038 [US4] Implement network mode detection in internal/controller/label_parser.go (host vs bridge, detect from ContainerJSON)
+- [X] T039 [US4] Implement IP address auto-detection in internal/controller/label_parser.go (localhost for host networking, bridge IP for bridge)
+- [X] T040 [US4] Implement port auto-detection in internal/controller/label_parser.go (first exposed Docker port, fallback to port 80)
+- [X] T041 [US4] Implement protocol/scheme detection in internal/controller/label_parser.go (detect from labels, default to http)
+- [X] T042 [US4] Implement service URL construction in internal/controller/label_parser.go (combine scheme, IP, port into http://ip:port format)
+- [X] T043 [US4] Implement global defaults application in internal/config/config.go (apply defaults from config.yaml when labels missing)
+- [X] T044 [US4] Add logging for configuration fallback decisions in internal/controller/label_parser.go (log which priority layer provided each value)
 
 **Checkpoint**: At this point, User Stories 1 AND 4 should both work - containers can be configured with minimal labels and system auto-detects missing values
 

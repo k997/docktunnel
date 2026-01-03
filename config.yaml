@@ -37,3 +37,9 @@ cleanup:
   # 程序退出时是否清理资源 (true/false)
   # 默认值为true，即默认清理资源
   onExit: true
+# 全局默认配置 (当容器标签未指定时使用)
+# 4层优先级: DockTunnel标签 > Traefik标签 > 自动检测 > 全局默认
+defaults:
+  scheme: http    # 默认scheme (http, https, tcp) - 与Traefik保持一致
+  port: 80        # 默认端口
+  path: ""        # 默认路径 (留空表示根路径)

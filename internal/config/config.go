@@ -38,6 +38,11 @@ type Config struct {
 	Cleanup struct {
 		OnExit bool `mapstructure:"onExit"`
 	} `mapstructure:"cleanup"`
+	Defaults struct {
+		Scheme string `mapstructure:"scheme"`
+		Port   int    `mapstructure:"port"`
+		Path   string `mapstructure:"path"`
+	} `mapstructure:"defaults"`
 }
 
 // GetCloudflareOptions 从配置中获取Cloudflare选项
@@ -85,6 +90,10 @@ func New() (*Config, error) {
 	v.SetDefault("controller.maxCoolingPeriod", 1800*time.Second) // 默认最大冷却期1800秒(30分钟)
 	v.SetDefault("controller.debounceDuration", 2*time.Second) // 默认防抖延迟2秒
 	v.SetDefault("cleanup.onExit", true)
+	// Global defaults for label auto-detection fallback
+	v.SetDefault("defaults.scheme", "http") // 默认scheme (http, https, tcp)
+	v.SetDefault("defaults.port", 80)       // 默认端口
+	v.SetDefault("defaults.path", "")       // 默认路径
 
 	// 2. 设置配置文件
 	v.SetConfigName("config")

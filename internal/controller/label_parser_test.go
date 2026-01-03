@@ -449,3 +449,229 @@ func TestGetContainerIP(t *testing.T) {
 		t.Errorf("Expected empty IP, got %s", ip)
 	}
 }
+
+func TestParseTraefikLabels_SingleHostname(t *testing.T) {
+	labels := map[string]string{
+		"traefik.http.routers.web.rule":       "Host(`example.com`)",
+		"traefik.http.routers.web.service":    "web-svc",
+		"traefik.http.services.web-svc.loadbalancer.server.port": "8080",
+	}
+
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "bridge",
+			},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {
+					IPAddress: "172.17.0.2",
+				},
+			},
+		},
+	}
+
+	rules := parseTraefikLabels(labels, containerInfo)
+
+	if len(rules) != 1 {
+		t.Fatalf("Expected 1 rule, got %d", len(rules))
+	}
+
+	rule, exists := rules["example.com"]
+	if !exists {
+		t.Fatalf("Expected rule for hostname 'example.com', not found")
+	}
+
+	if rule.Hostname.Value != "example.com" {
+		t.Errorf("Expected hostname 'example.com', got '%s'", rule.Hostname.Value)
+	}
+
+	expectedService := "http://172.17.0.2:8080"
+	if rule.Service.Value != expectedService {
+		t.Errorf("Expected service '%s', got '%s'", expectedService, rule.Service.Value)
+	}
+}
+
+func TestParseTraefikLabels_MultipleHostnames(t *testing.T) {
+	labels := map[string]string{
+		"traefik.http.routers.web.rule":       "Host(`a.com`, `b.com`, `c.com`)",
+		"traefik.http.routers.web.service":    "web-svc",
+		"traefik.http.services.web-svc.loadbalancer.server.port": "8080",
+	}
+
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "bridge",
+			},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {
+					IPAddress: "172.17.0.2",
+				},
+			},
+		},
+	}
+
+	rules := parseTraefikLabels(labels, containerInfo)
+
+	if len(rules) != 3 {
+		t.Fatalf("Expected 3 rules, got %d", len(rules))
+	}
+
+	expectedHostnames := []string{"a.com", "b.com", "c.com"}
+	for _, hostname := range expectedHostnames {
+		if _, exists := rules[hostname]; !exists {
+			t.Errorf("Expected rule for hostname '%s', not found", hostname)
+		}
+	}
+}
+
+func TestParseTraefikLabels_WithComplexRule(t *testing.T) {
+	labels := map[string]string{
+		"traefik.http.routers.api.rule":       "Host(`api.example.com`) && Path(`/api`)",
+		"traefik.http.routers.api.service":    "api-svc",
+		"traefik.http.services.api-svc.loadbalancer.server.port": "9000",
+	}
+
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "bridge",
+			},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {
+					IPAddress: "172.17.0.3",
+				},
+			},
+		},
+	}
+
+	rules := parseTraefikLabels(labels, containerInfo)
+
+	if len(rules) != 1 {
+		t.Fatalf("Expected 1 rule, got %d", len(rules))
+	}
+
+	rule, exists := rules["api.example.com"]
+	if !exists {
+		t.Fatalf("Expected rule for hostname 'api.example.com', not found")
+	}
+
+	if rule.Hostname.Value != "api.example.com" {
+		t.Errorf("Expected hostname 'api.example.com', got '%s'", rule.Hostname.Value)
+	}
+
+	expectedService := "http://172.17.0.3:9000"
+	if rule.Service.Value != expectedService {
+		t.Errorf("Expected service '%s', got '%s'", expectedService, rule.Service.Value)
+	}
+}
+
+func TestParseTraefikLabels_NoServiceName(t *testing.T) {
+	labels := map[string]string{
+		"traefik.http.routers.web.rule": "Host(`example.com`)",
+		// No service label - should use router name as service name
+		"traefik.http.services.web.loadbalancer.server.port": "8080",
+	}
+
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "bridge",
+			},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {
+					IPAddress: "172.17.0.2",
+				},
+			},
+		},
+	}
+
+	rules := parseTraefikLabels(labels, containerInfo)
+
+	if len(rules) != 1 {
+		t.Fatalf("Expected 1 rule, got %d", len(rules))
+	}
+
+	// Should still work because router name "web" matches service name "web"
+	rule, exists := rules["example.com"]
+	if !exists {
+		t.Fatalf("Expected rule for hostname 'example.com', not found")
+	}
+
+	if rule.Service.Value != "http://172.17.0.2:8080" {
+		t.Errorf("Expected service 'http://172.17.0.2:8080', got '%s'", rule.Service.Value)
+	}
+}
+
+func TestParseTraefikLabels_DockTunnelTakesPrecedence(t *testing.T) {
+	labels := map[string]string{
+		// DockTunnel labels (highest priority)
+		"docktunnel.enable":                        "true",
+		"docktunnel.web.hostname":                  "docktunnel-example.com",
+		"docktunnel.web.port":                      "8080",
+		// Traefik labels (should be ignored when DockTunnel labels exist)
+		"traefik.http.routers.web.rule":            "Host(`traefik-example.com`)",
+		"traefik.http.services.web.loadbalancer.server.port": "9000",
+	}
+
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "bridge",
+			},
+		},
+		Config: &container.Config{
+			Labels: labels,
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {
+					IPAddress: "172.17.0.2",
+				},
+			},
+		},
+	}
+
+	rules, err := parseLabelsToIngress(containerInfo)
+	if err != nil {
+		t.Fatalf("parseLabelsToIngress failed: %v", err)
+	}
+
+	// Should only have DockTunnel rule, not Traefik rule
+	if len(rules) != 1 {
+		t.Fatalf("Expected 1 rule (from DockTunnel), got %d", len(rules))
+	}
+
+	// The rule key is the service name "web", not the hostname
+	// Check that it's the DockTunnel hostname
+	rule, exists := rules["web"]
+	if !exists {
+		t.Fatalf("Expected service name 'web', not found. Available keys: %v", getKeys(rules))
+	}
+
+	if rule.Hostname.Value != "docktunnel-example.com" {
+		t.Errorf("Expected hostname 'docktunnel-example.com', got '%s'", rule.Hostname.Value)
+	}
+
+	// Verify the service URL is built from DockTunnel labels (port 8080, not 9000)
+	expectedService := "http://172.17.0.2:8080"
+	if rule.Service.Value != expectedService {
+		t.Errorf("Expected service '%s', got '%s'", expectedService, rule.Service.Value)
+	}
+}
+
+func getKeys(m map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
