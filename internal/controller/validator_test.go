@@ -153,3 +153,144 @@ func TestCompositeValidator(t *testing.T) {
 		t.Error("Expected error for duplicate hostname, got nil")
 	}
 }
+
+func TestServiceURLValidator(t *testing.T) {
+	validator := &ServiceURLValidator{}
+
+	// Test valid URLs
+	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"service1": {
+			Hostname: cloudflare.F("example1.com"),
+			Service:  cloudflare.F("http://localhost:8080"),
+		},
+		"service2": {
+			Hostname: cloudflare.F("example2.com"),
+			Service:  cloudflare.F("https://example.com:443"),
+		},
+		"service3": {
+			Hostname: cloudflare.F("example3.com"),
+			Service:  cloudflare.F("tcp://192.168.1.1:22"),
+		},
+	}
+
+	err := validator.Validate(rules, nil)
+	if err != nil {
+		t.Errorf("Expected no error for valid URLs, got %v", err)
+	}
+
+	// Test malformed URL
+	rules["service4"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example4.com"),
+		Service:  cloudflare.F("://invalid-url"),
+	}
+
+	err = validator.Validate(rules, nil)
+	if err == nil {
+		t.Error("Expected error for malformed URL, got none")
+	}
+
+	// Test missing scheme
+	rules["service5"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example5.com"),
+		Service:  cloudflare.F("localhost:8080"), // Missing scheme
+	}
+
+	err = validator.Validate(rules, nil)
+	if err == nil {
+		t.Error("Expected error for missing scheme, got none")
+	}
+
+	// Test unsupported scheme
+	rules["service6"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example6.com"),
+		Service:  cloudflare.F("ftp://example.com:21"),
+	}
+
+	err = validator.Validate(rules, nil)
+	if err == nil {
+		t.Error("Expected error for unsupported scheme, got none")
+	}
+
+	// Test missing host
+	rules["service7"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example7.com"),
+		Service:  cloudflare.F("http://"),
+	}
+
+	err = validator.Validate(rules, nil)
+	if err == nil {
+		t.Error("Expected error for missing host, got none")
+	}
+
+	// Test invalid port
+	rules["service8"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example8.com"),
+		Service:  cloudflare.F("http://localhost:99999"),
+	}
+
+	err = validator.Validate(rules, nil)
+	if err == nil {
+		t.Error("Expected error for invalid port, got none")
+	}
+
+	// Test special service URL (http_status)
+	rules["service9"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example9.com"),
+		Service:  cloudflare.F("http_status:404"),
+	}
+
+	// Clear previous errors and test with only valid + special URL
+	rules = map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"service9": {
+			Hostname: cloudflare.F("example9.com"),
+			Service:  cloudflare.F("http_status:404"),
+		},
+	}
+	err = validator.Validate(rules, nil)
+	if err != nil {
+		t.Errorf("Expected no error for special service URL, got %v", err)
+	}
+}
+
+func TestExposedPortValidator(t *testing.T) {
+	validator := &ExposedPortValidator{}
+
+	// Test service URLs with ports
+	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"service1": {
+			Hostname: cloudflare.F("example1.com"),
+			Service:  cloudflare.F("http://localhost:8080"),
+		},
+		"service2": {
+			Hostname: cloudflare.F("example2.com"),
+			Service:  cloudflare.F("https://example.com:443"),
+		},
+	}
+
+	err := validator.Validate(rules, nil)
+	if err != nil {
+		t.Errorf("Expected no error for service URLs with ports, got %v", err)
+	}
+
+	// Test service URLs without ports (should still pass)
+	rules["service3"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example3.com"),
+		Service:  cloudflare.F("http://localhost"), // No explicit port
+	}
+
+	err = validator.Validate(rules, nil)
+	if err != nil {
+		t.Errorf("Expected no error for service URL without explicit port, got %v", err)
+	}
+
+	// Test special service URL
+	rules["service4"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example4.com"),
+		Service:  cloudflare.F("http_status:404"),
+	}
+
+	err = validator.Validate(rules, nil)
+	if err != nil {
+		t.Errorf("Expected no error for special service URL, got %v", err)
+	}
+}

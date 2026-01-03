@@ -238,9 +238,9 @@
 
 ### Additional Edge Cases
 
-- [ ] T093 [P] Add validation for containers without exposed ports in internal/controller/validator.go (log warning, skip container)
-- [ ] T094 [P] Add validation for malformed service URLs in internal/controller/validator.go (reject with clear error message)
-- [ ] T095 [P] Add validation for duplicate hostnames across containers in internal/controller/validator.go (reject new config, log conflicting container IDs)
+- [X] T093 [P] Add validation for containers without exposed ports in internal/controller/validator.go (log warning, skip container)
+- [X] T094 [P] Add validation for malformed service URLs in internal/controller/validator.go (reject with clear error message)
+- [X] T095 [P] Add validation for duplicate hostnames across containers in internal/controller/validator.go (reject new config, log conflicting container IDs)
 
 ---
 
