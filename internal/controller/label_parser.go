@@ -322,6 +322,72 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]
 		return nil, fmt.Errorf("no valid ingress rules found")
 	}
 
+	// Log originRequest configuration applied for each service (T085)
+	for serviceName, rule := range rawRules {
+		if rule.OriginRequest.Present {
+			appliedSettings := make([]string, 0)
+
+			// Collect all applied settings
+			if rule.OriginRequest.Value.NoTLSVerify.Present {
+				appliedSettings = append(appliedSettings, "noTLSVerify")
+			}
+			if rule.OriginRequest.Value.ConnectTimeout.Present {
+				appliedSettings = append(appliedSettings, "connectTimeout")
+			}
+			if rule.OriginRequest.Value.TLSTimeout.Present {
+				appliedSettings = append(appliedSettings, "tlsTimeout")
+			}
+			if rule.OriginRequest.Value.TCPKeepAlive.Present {
+				appliedSettings = append(appliedSettings, "tcpKeepAlive")
+			}
+			if rule.OriginRequest.Value.KeepAliveConnections.Present {
+				appliedSettings = append(appliedSettings, "keepAliveConnections")
+			}
+			if rule.OriginRequest.Value.KeepAliveTimeout.Present {
+				appliedSettings = append(appliedSettings, "keepAliveTimeout")
+			}
+			if rule.OriginRequest.Value.NoHappyEyeballs.Present {
+				appliedSettings = append(appliedSettings, "noHappyEyeballs")
+			}
+			if rule.OriginRequest.Value.ProxyType.Present {
+				appliedSettings = append(appliedSettings, "proxyType")
+			}
+			if rule.OriginRequest.Value.HTTPHostHeader.Present {
+				appliedSettings = append(appliedSettings, "httpHostHeader")
+			}
+			if rule.OriginRequest.Value.OriginServerName.Present {
+				appliedSettings = append(appliedSettings, "originServerName")
+			}
+			if rule.OriginRequest.Value.CAPool.Present {
+				appliedSettings = append(appliedSettings, "caPool")
+			}
+			if rule.OriginRequest.Value.HTTP2Origin.Present {
+				appliedSettings = append(appliedSettings, "http2Origin")
+			}
+			if rule.OriginRequest.Value.DisableChunkedEncoding.Present {
+				appliedSettings = append(appliedSettings, "disableChunkedEncoding")
+			}
+			if rule.OriginRequest.Value.Access.Present {
+				if rule.OriginRequest.Value.Access.Value.Required.Present {
+					appliedSettings = append(appliedSettings, "access.required")
+				}
+				if rule.OriginRequest.Value.Access.Value.TeamName.Present {
+					appliedSettings = append(appliedSettings, "access.teamName")
+				}
+				if rule.OriginRequest.Value.Access.Value.AUDTag.Present {
+					appliedSettings = append(appliedSettings, "access.audTag")
+				}
+			}
+
+			if len(appliedSettings) > 0 {
+				slog.Info("Applied originRequest configuration from labels",
+					"service", serviceName,
+					"settings", appliedSettings,
+					"source", "container_labels")
+			}
+		}
+	}
+
 	return rawRules, nil
 }
 

@@ -26,6 +26,26 @@ type Config struct {
 		MaxRetries      int           `mapstructure:"maxRetries"`
 		RetryDelay      time.Duration `mapstructure:"retryDelay"`
 		MaxRetryDelay   time.Duration `mapstructure:"maxRetryDelay"`
+		// OriginRequest默认配置 (T082)
+		OriginRequest   struct {
+			NoTLSVerify           bool          `mapstructure:"noTLSVerify"`
+			ConnectTimeout        time.Duration `mapstructure:"connectTimeout"`
+			TLSTimeout            time.Duration `mapstructure:"tlsTimeout"`
+			TCPKeepAlive          time.Duration `mapstructure:"tcpKeepAlive"`
+			KeepAliveConnections  int           `mapstructure:"keepAliveConnections"`
+			KeepAliveTimeout      time.Duration `mapstructure:"keepAliveTimeout"`
+			NoHappyEyeballs       bool          `mapstructure:"noHappyEyeballs"`
+			ProxyType             string        `mapstructure:"proxyType"`
+			HTTPHostHeader        string        `mapstructure:"httpHostHeader"`
+			OriginServerName      string        `mapstructure:"originServerName"`
+			CAPool                string        `mapstructure:"caPool"`
+			HTTP2Origin           bool          `mapstructure:"http2Origin"`
+			DisableChunkedEncoding bool         `mapstructure:"disableChunkedEncoding"`
+			// Access defaults
+			AccessRequired        bool          `mapstructure:"accessRequired"`
+			AccessTeamName        string        `mapstructure:"accessTeamName"`
+			AccessAudTag          string        `mapstructure:"accessAudTag"`
+		} `mapstructure:"originRequest"`
 	} `mapstructure:"cloudflare"`
 	Controller struct {
 		// 容器抖动检测配置
@@ -70,6 +90,63 @@ func (c *Config) GetControllerOptions() controller.ControllerOptions {
 		MaxCoolingPeriod:  c.Controller.MaxCoolingPeriod,
 		DebounceDuration:  c.Controller.DebounceDuration,
 	}
+}
+
+// GetOriginRequestDefaults 获取OriginRequest默认配置 (T082)
+func (c *Config) GetOriginRequestDefaults() map[string]interface{} {
+	defaults := make(map[string]interface{})
+
+	// Only include non-zero/non-empty values
+	if c.Cloudflare.OriginRequest.NoTLSVerify {
+		defaults["noTLSVerify"] = true
+	}
+	if c.Cloudflare.OriginRequest.ConnectTimeout > 0 {
+		defaults["connectTimeout"] = c.Cloudflare.OriginRequest.ConnectTimeout.String()
+	}
+	if c.Cloudflare.OriginRequest.TLSTimeout > 0 {
+		defaults["tlsTimeout"] = c.Cloudflare.OriginRequest.TLSTimeout.String()
+	}
+	if c.Cloudflare.OriginRequest.TCPKeepAlive > 0 {
+		defaults["tcpKeepAlive"] = c.Cloudflare.OriginRequest.TCPKeepAlive.String()
+	}
+	if c.Cloudflare.OriginRequest.KeepAliveConnections > 0 {
+		defaults["keepAliveConnections"] = c.Cloudflare.OriginRequest.KeepAliveConnections
+	}
+	if c.Cloudflare.OriginRequest.KeepAliveTimeout > 0 {
+		defaults["keepAliveTimeout"] = c.Cloudflare.OriginRequest.KeepAliveTimeout.String()
+	}
+	if c.Cloudflare.OriginRequest.NoHappyEyeballs {
+		defaults["noHappyEyeballs"] = true
+	}
+	if c.Cloudflare.OriginRequest.ProxyType != "" {
+		defaults["proxyType"] = c.Cloudflare.OriginRequest.ProxyType
+	}
+	if c.Cloudflare.OriginRequest.HTTPHostHeader != "" {
+		defaults["httpHostHeader"] = c.Cloudflare.OriginRequest.HTTPHostHeader
+	}
+	if c.Cloudflare.OriginRequest.OriginServerName != "" {
+		defaults["originServerName"] = c.Cloudflare.OriginRequest.OriginServerName
+	}
+	if c.Cloudflare.OriginRequest.CAPool != "" {
+		defaults["caPool"] = c.Cloudflare.OriginRequest.CAPool
+	}
+	if c.Cloudflare.OriginRequest.HTTP2Origin {
+		defaults["http2Origin"] = true
+	}
+	if c.Cloudflare.OriginRequest.DisableChunkedEncoding {
+		defaults["disableChunkedEncoding"] = true
+	}
+	if c.Cloudflare.OriginRequest.AccessRequired {
+		defaults["access.required"] = true
+	}
+	if c.Cloudflare.OriginRequest.AccessTeamName != "" {
+		defaults["access.teamName"] = c.Cloudflare.OriginRequest.AccessTeamName
+	}
+	if c.Cloudflare.OriginRequest.AccessAudTag != "" {
+		defaults["access.audTag"] = c.Cloudflare.OriginRequest.AccessAudTag
+	}
+
+	return defaults
 }
 
 // New 初始化并返回一个配置实例
