@@ -64,24 +64,32 @@ func (sm *Manager) markDirty() {
 // SaveIfDirty saves the state if it has changed and enough time has passed (T072)
 func (sm *Manager) SaveIfDirty() error {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
-	if !sm.dirty {
+	// Release lock before calling Save (which calls GetSnapshot that needs RLock)
+	dirty := sm.dirty
+	enoughTimePassed := sm.lastSaved.IsZero() || time.Since(sm.lastSaved) >= SaveInterval
+	statePath := sm.statePath
+
+	sm.mu.Unlock()
+
+	if !dirty {
 		return nil
 	}
 
 	// Check if enough time has passed since last save
-	if !sm.lastSaved.IsZero() && time.Since(sm.lastSaved) < SaveInterval {
+	if !enoughTimePassed {
 		return nil
 	}
 
-	// Save the state
-	if sm.statePath != "" {
-		if err := sm.Save(sm.statePath); err != nil {
+	// Save the state (Save will acquire its own locks)
+	if statePath != "" {
+		if err := sm.Save(statePath); err != nil {
 			return err
 		}
+		sm.mu.Lock()
 		sm.lastSaved = time.Now()
 		sm.dirty = false
+		sm.mu.Unlock()
 	}
 
 	return nil
@@ -90,14 +98,17 @@ func (sm *Manager) SaveIfDirty() error {
 // ForceSave forces an immediate state save regardless of dirty flag or timing
 func (sm *Manager) ForceSave() error {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	statePath := sm.statePath
+	sm.mu.Unlock()
 
-	if sm.statePath != "" {
-		if err := sm.Save(sm.statePath); err != nil {
+	if statePath != "" {
+		if err := sm.Save(statePath); err != nil {
 			return err
 		}
+		sm.mu.Lock()
 		sm.lastSaved = time.Now()
 		sm.dirty = false
+		sm.mu.Unlock()
 		return nil
 	}
 	return nil

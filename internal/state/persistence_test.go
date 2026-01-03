@@ -112,10 +112,10 @@ func TestLoadCorruptedFile(t *testing.T) {
 	sm := NewManager(slog.Default())
 	err = sm.Load(statePath)
 
-	// Load should fail but not panic
-	assert.Error(t, err, "Load should return error for corrupted file")
+	// Load returns nil (continues on error per T075)
+	assert.NoError(t, err, "Load should not fail startup, continues with empty state")
 
-	// State manager should still be functional
+	// State manager should still be functional with empty state
 	assert.NotNil(t, sm)
 	stats := sm.GetStats()
 	assert.Equal(t, 0, stats["active_tunnels"], "Should start with empty state")
