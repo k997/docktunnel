@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"docktunnel/pkg/types"
+
 	"github.com/cloudflare/cloudflare-go/v5"
 	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 	"github.com/docker/docker/api/types/container"
@@ -301,6 +303,59 @@ func getContainerIP(containerInfo *container.InspectResponse) string {
 	}
 
 	return ""
+}
+
+// ParseRetentionPolicy parses a retention policy from a label value
+// Supported formats:
+// - "0", "immediate" → Immediate
+// - "forever", "keep" → Forever
+// - "30m", "1h", "7d" → Timed (parsed by time.ParseDuration with day support)
+func ParseRetentionPolicy(value string) (types.RetentionPolicy, error) {
+	policy := types.RetentionPolicy{}
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+
+	// Parse the value
+	switch trimmed {
+	case "0", "immediate":
+		policy.Type = types.Immediate
+		return policy, nil
+	case "forever", "keep":
+		policy.Type = types.Forever
+		return policy, nil
+	}
+
+	// Try to parse as duration
+	// First, check if it contains 'd' for days (not supported by time.ParseDuration)
+	if strings.HasSuffix(trimmed, "d") {
+		// Parse days manually
+		daysStr := strings.TrimSuffix(trimmed, "d")
+		days, err := strconv.Atoi(daysStr)
+		if err != nil || days <= 0 {
+			return policy, fmt.Errorf("invalid retention policy format: %s (expected positive number of days, e.g., '7d')", value)
+		}
+		policy.Type = types.Timed
+		policy.Duration = time.Duration(days) * 24 * time.Hour
+		slog.Info("Parsed timed retention policy", "duration", policy.Duration)
+		return policy, nil
+	}
+
+	// Try standard duration parsing
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		// Invalid format
+		return policy, fmt.Errorf("invalid retention policy format: %s (expected: 'immediate', 'forever', or duration like '30m', '1h', '7d')", value)
+	}
+
+	// Validate that duration is positive
+	if duration <= 0 {
+		return policy, fmt.Errorf("retention duration must be positive, got: %s", value)
+	}
+
+	policy.Type = types.Timed
+	policy.Duration = duration
+	slog.Info("Parsed timed retention policy", "duration", duration)
+
+	return policy, nil
 }
 
 // parseTraefikLabels parses Traefik v2 labels as fallback

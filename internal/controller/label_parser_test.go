@@ -3,6 +3,9 @@ package controller
 import (
 	"errors"
 	"testing"
+	"time"
+
+	"docktunnel/pkg/types"
 
 	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 	"github.com/docker/docker/api/types/container"
@@ -674,4 +677,75 @@ func getKeys(m map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParams
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// TestParseRetentionPolicy_Immediate tests parsing of immediate retention policy
+func TestParseRetentionPolicy_Immediate(t *testing.T) {
+	testCases := []string{"0", "immediate", "Immediate", " IMMEDIATE "}
+
+	for _, tc := range testCases {
+		policy, err := ParseRetentionPolicy(tc)
+		if err != nil {
+			t.Errorf("Expected no error for '%s', got: %v", tc, err)
+			continue
+		}
+		if policy.Type != types.Immediate {
+			t.Errorf("Expected Immediate type for '%s', got: %v", tc, policy.Type)
+		}
+	}
+}
+
+// TestParseRetentionPolicy_Forever tests parsing of forever retention policy
+func TestParseRetentionPolicy_Forever(t *testing.T) {
+	testCases := []string{"forever", "keep", "Keep", " FOREVER "}
+
+	for _, tc := range testCases {
+		policy, err := ParseRetentionPolicy(tc)
+		if err != nil {
+			t.Errorf("Expected no error for '%s', got: %v", tc, err)
+			continue
+		}
+		if policy.Type != types.Forever {
+			t.Errorf("Expected Forever type for '%s', got: %v", tc, policy.Type)
+		}
+	}
+}
+
+// TestParseRetentionPolicy_Timed tests parsing of timed retention policies
+func TestParseRetentionPolicy_Timed(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected time.Duration
+	}{
+		{"30m", 30 * time.Minute},
+		{"1h", 1 * time.Hour},
+		{"7d", 7 * 24 * time.Hour},
+		{"1h30m", 90 * time.Minute},
+	}
+
+	for _, tc := range testCases {
+		policy, err := ParseRetentionPolicy(tc.input)
+		if err != nil {
+			t.Errorf("Expected no error for '%s', got: %v", tc.input, err)
+			continue
+		}
+		if policy.Type != types.Timed {
+			t.Errorf("Expected Timed type for '%s', got: %v", tc.input, policy.Type)
+		}
+		if policy.Duration != tc.expected {
+			t.Errorf("Expected duration %v for '%s', got: %v", tc.expected, tc.input, policy.Duration)
+		}
+	}
+}
+
+// TestParseRetentionPolicy_Invalid tests parsing of invalid retention policy formats
+func TestParseRetentionPolicy_Invalid(t *testing.T) {
+	testCases := []string{"invalid", "xyz", "123", "-5m"}
+
+	for _, tc := range testCases {
+		_, err := ParseRetentionPolicy(tc)
+		if err == nil {
+			t.Errorf("Expected error for invalid value '%s', got nil", tc)
+		}
+	}
 }

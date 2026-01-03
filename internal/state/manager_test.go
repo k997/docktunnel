@@ -412,3 +412,142 @@ func TestFlappingWindowCleanup(t *testing.T) {
 	isFlapping := sm.CheckFlapping(containerID)
 	assert.True(t, isFlapping, "Should be flapping after 5 transitions within window")
 }
+
+// TestContainerRestartCancelsRetention tests that a container restart
+// cancels the retention timer and restores ACTIVE status (T057)
+func TestContainerRestartCancelsRetention(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add a tunnel to active tunnels
+	entry := &types.TunnelEntry{
+		ContainerID: "restart-test",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		Config: types.TunnelConfiguration{
+			Hostname: "test.example.com",
+		},
+	}
+	sm.AddActiveTunnel(entry)
+
+	// Simulate container stop - move to pending deletion
+	now := time.Now()
+	entry.DeletedAt = &now
+	entry.Status = types.StatusPendingDelete
+	entry.RetentionPolicy = types.RetentionPolicy{
+		Type:     types.Timed,
+		Duration: 30 * time.Minute,
+	}
+	sm.AddPendingDeletion(entry)
+
+	// Verify it's in pending deletions
+	_, ok := sm.GetPendingDeletion("restart-test")
+	assert.True(t, ok, "Should be in pending deletions")
+
+	// Simulate container restart - restore to active
+	err := sm.RestoreActiveTunnel("restart-test")
+	require.NoError(t, err)
+
+	// Verify it's back in active tunnels
+	retrieved, ok := sm.GetActiveTunnel("restart-test")
+	assert.True(t, ok, "Should be back in active tunnels")
+	assert.Equal(t, types.StatusActive, retrieved.Status, "Status should be Active")
+	assert.Nil(t, retrieved.DeletedAt, "DeletedAt should be cleared")
+
+	// Verify it's no longer in pending deletions
+	_, ok = sm.GetPendingDeletion("restart-test")
+	assert.False(t, ok, "Should not be in pending deletions anymore")
+}
+
+// TestGC_PreservesForeverEntries tests that Forever retention policy
+// entries are preserved during garbage collection (T056)
+func TestGC_PreservesForeverEntries(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add entries with different retention policies
+	now := time.Now()
+
+	// Forever entry
+	foreverEntry := &types.TunnelEntry{
+		ContainerID: "forever-entry",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		RetentionPolicy: types.RetentionPolicy{
+			Type: types.Forever,
+		},
+	}
+	sm.AddPendingDeletion(foreverEntry)
+
+	// Run GC
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+
+	// Forever entry should NOT be expired
+	assert.NotContains(t, expired, "forever-entry", "Forever entries should not be garbage collected")
+
+	// Should still be in pending deletions
+	_, ok := sm.GetPendingDeletion("forever-entry")
+	assert.True(t, ok, "Forever entry should still be in pending deletions")
+}
+
+// TestGC_ExpireTimedEntries tests that timed retention policy entries
+// are expired when their timer elapses (T056)
+func TestGC_ExpireTimedEntries(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add a timed entry that expired long ago
+	oldTime := time.Now().Add(-2 * time.Hour)
+	expiredEntry := &types.TunnelEntry{
+		ContainerID: "expired-timed",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &oldTime,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm.AddPendingDeletion(expiredEntry)
+
+	// Run GC
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+
+	// Should be expired
+	assert.Contains(t, expired, "expired-timed", "Expired timed entry should be garbage collected")
+
+	// Should no longer be in pending deletions
+	_, ok := sm.GetPendingDeletion("expired-timed")
+	assert.False(t, ok, "Expired entry should be removed from pending deletions")
+}
+
+// TestGC_PreserveUnexpiredTimedEntries tests that unexpired timed
+// retention policy entries are preserved (T056)
+func TestGC_PreserveUnexpiredTimedEntries(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add a timed entry that hasn't expired yet
+	recentTime := time.Now().Add(-5 * time.Minute)
+	unexpiredEntry := &types.TunnelEntry{
+		ContainerID: "unexpired-timed",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &recentTime,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm.AddPendingDeletion(unexpiredEntry)
+
+	// Run GC
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+
+	// Should NOT be expired
+	assert.NotContains(t, expired, "unexpired-timed", "Unexpired timed entry should not be garbage collected")
+
+	// Should still be in pending deletions
+	_, ok := sm.GetPendingDeletion("unexpired-timed")
+	assert.True(t, ok, "Unexpired entry should still be in pending deletions")
+}
