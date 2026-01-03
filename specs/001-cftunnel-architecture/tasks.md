@@ -258,7 +258,7 @@
 
 - [ ] T099 Run performance test with 100 containers to validate < 100MB memory footprint (use go tool pprof)
 - [ ] T100 Validate 5-second event processing SLA with timing benchmarks in controller event handler
-- [ ] T101 Add memory profiling support to cmd/docktunnel/main.go (optional --cpuprofile and --memprofile flags)
+- [X] T101 Add memory profiling support to cmd/docktunnel/main.go (optional --cpuprofile and --memprofile flags)
 
 ### Security Hardening
 

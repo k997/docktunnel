@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/pprof"
 	"sync"
 	"syscall"
 	"time"
@@ -20,7 +23,27 @@ import (
 	"docktunnel/internal/state"
 )
 
+var (
+	cpuprofile  = flag.String("cpuprofile", "", "write cpu profile to `file`")
+	memprofile  = flag.String("memprofile", "", "write memory profile to `file`")
+)
+
 func main() {
+	flag.Parse()
+
+	// Start CPU profiling if requested (T101)
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatalf("Could not create CPU profile: %v", err)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatalf("Could not start CPU profile: %v", err)
+		}
+		defer pprof.StopCPUProfile()
+	}
+
 	log.Println("DockTunnel starting...")
 
 	// 加载配置
@@ -173,5 +196,21 @@ shutdown:
 	// 等待所有goroutine完成
 	wg.Wait()
 
+	// Write memory profile if requested (T101)
+	if *memprofile != "" {
+		f, err := os.Create(*memprofile)
+		if err != nil {
+			log.Fatalf("Could not create memory profile: %v", err)
+		}
+		defer f.Close()
+		runtime.ReadMemStats(&memStats)
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			log.Fatalf("Could not write memory profile: %v", err)
+		}
+		log.Printf("Memory profile written to %s", *memprofile)
+	}
+
 	appLogger.Info("DockTunnel shutdown complete")
 }
+
+var memStats runtime.MemStats
