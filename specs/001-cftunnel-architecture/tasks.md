@@ -201,15 +201,15 @@
 
 ### Unit Tests for User Story 6
 
-- [ ] T076 [P] [US6] Write unit test for OriginRequestConfig parsing in internal/controller/label_parser_test.go (all 20+ originRequest attributes)
+- [X] T076 [P] [US6] Write unit test for OriginRequestConfig parsing in internal/controller/label_parser_test.go (all 20+ originRequest attributes)
 - [ ] T077 [P] [US6] Write unit test for global defaults merging with container labels in internal/controller/label_parser_test.go
-- [ ] T078 [P] [US6] Write unit test for Cloudflare Access config parsing in internal/controller/label_parser_test.go
+- [X] T078 [P] [US6] Write unit test for Cloudflare Access config parsing in internal/controller/label_parser_test.go
 
 ### Implementation for User Story 6
 
-- [ ] T079 [P] [US6] Extend OriginRequestConfig type with all 20+ attributes in pkg/types/tunnel.go (noTLSVerify, connectTimeout, tlsTimeout, tcpKeepAlive, keepAliveConnections, keepAliveTimeout, noHappyEyeballs, proxyType, proxyAddress, proxyPort, httpHostHeader, originServerName, matchSniToHost, caPool, http2Origin, disableChunkedEncoding)
-- [ ] T080 [US6] Add AccessConfig sub-structure to OriginRequestConfig in pkg/types/tunnel.go (required, teamName, audTag)
-- [ ] T081 [US6] Implement comprehensive originRequest attribute parser in internal/controller/label_parser.go (parse all docktunnel.<name>.originRequest.* labels)
+- [X] T079 [P] [US6] Extend OriginRequestConfig type with all 20+ attributes in pkg/types/tunnel.go (noTLSVerify, connectTimeout, tlsTimeout, tcpKeepAlive, keepAliveConnections, keepAliveTimeout, noHappyEyeballs, proxyType, proxyAddress, proxyPort, httpHostHeader, originServerName, matchSniToHost, caPool, http2Origin, disableChunkedEncoding)
+- [X] T080 [US6] Add AccessConfig sub-structure to OriginRequestConfig in pkg/types/tunnel.go (required, teamName, audTag)
+- [X] T081 [US6] Implement comprehensive originRequest attribute parser in internal/controller/label_parser.go (parse all docktunnel.<name>.originRequest.* labels)
 - [ ] T082 [US6] Implement global defaults for OriginRequestConfig in internal/config/config.go (populate from cloudflare section of config.yaml)
 - [ ] T083 [US6] Implement merge strategy for originRequest settings in internal/controller/label_parser.go (start with global defaults, override with container labels)
 - [ ] T084 [US6] Implement duration to nanoseconds conversion for Cloudflare API in internal/cloudflareManager/tunnel.go (Cloudflare expects nanoseconds for timeouts)

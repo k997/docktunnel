@@ -249,6 +249,57 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]
 			} else if value == "false" {
 				rule.OriginRequest.Value.HTTP2Origin = cloudflare.F(false)
 			}
+		case "originRequest.access.required":
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
+			}
+
+			// Initialize Access if not present
+			if !rule.OriginRequest.Value.Access.Present {
+				access := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequestAccess{}
+				rule.OriginRequest.Value.Access = cloudflare.F(access)
+			}
+
+			if value == "true" {
+				rule.OriginRequest.Value.Access.Value.Required = cloudflare.F(true)
+			} else if value == "false" {
+				rule.OriginRequest.Value.Access.Value.Required = cloudflare.F(false)
+			}
+		case "originRequest.access.teamName":
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
+			}
+
+			// Initialize Access if not present
+			if !rule.OriginRequest.Value.Access.Present {
+				access := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequestAccess{}
+				rule.OriginRequest.Value.Access = cloudflare.F(access)
+			}
+
+			rule.OriginRequest.Value.Access.Value.TeamName = cloudflare.F(value)
+		case "originRequest.access.audTag":
+			// 初始化OriginRequest字段
+			if !rule.OriginRequest.Present {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{}
+				rule.OriginRequest = cloudflare.F(originRequest)
+			}
+
+			// Initialize Access if not present
+			if !rule.OriginRequest.Value.Access.Present {
+				access := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequestAccess{}
+				rule.OriginRequest.Value.Access = cloudflare.F(access)
+			}
+
+			// Parse as comma-separated list
+			tags := strings.Split(value, ",")
+			for i, tag := range tags {
+				tags[i] = strings.TrimSpace(tag)
+			}
+			rule.OriginRequest.Value.Access.Value.AUDTag = cloudflare.F(tags)
 		}
 
 		// 更新规则

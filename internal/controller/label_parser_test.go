@@ -749,3 +749,162 @@ func TestParseRetentionPolicy_Invalid(t *testing.T) {
 		}
 	}
 }
+
+// TestParseLabelsToIngress_AccessConfig tests Cloudflare Access configuration parsing (T076, T078)
+func TestParseLabelsToIngress_AccessConfig(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "default",
+			},
+		},
+		Config: &container.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":                      "true",
+				"docktunnel.api.hostname":                "api.example.com",
+				"docktunnel.api.service":                 "https://localhost:8443",
+				"docktunnel.api.originRequest.access.required": "true",
+				"docktunnel.api.originRequest.access.teamName":  "my-team",
+				"docktunnel.api.originRequest.access.audTag":    "tag1, tag2, tag3",
+			},
+		},
+	}
+
+	rules, err := parseLabelsToIngress(containerInfo)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if len(rules) != 1 {
+		t.Fatalf("Expected 1 rule, got %d", len(rules))
+	}
+
+	apiRule := rules["api"]
+	if apiRule == nil {
+		t.Fatal("Expected api rule to exist")
+	}
+
+	// Verify Access config is present and correctly parsed
+	if !apiRule.OriginRequest.Present {
+		t.Fatal("Expected OriginRequest to be present")
+	}
+
+	if !apiRule.OriginRequest.Value.Access.Present {
+		t.Fatal("Expected Access config to be present")
+	}
+
+	access := apiRule.OriginRequest.Value.Access.Value
+
+	// Verify required flag
+	if !access.Required.Present || !access.Required.Value {
+		t.Error("Expected Access.Required to be true")
+	}
+
+	// Verify team name
+	if !access.TeamName.Present || access.TeamName.Value != "my-team" {
+		t.Errorf("Expected TeamName to be 'my-team', got '%s'", access.TeamName.Value)
+	}
+
+	// Verify audience tags
+	if !access.AUDTag.Present {
+		t.Fatal("Expected AUDTag to be present")
+	}
+
+	expectedTags := []string{"tag1", "tag2", "tag3"}
+	if len(access.AUDTag.Value) != len(expectedTags) {
+		t.Fatalf("Expected %d tags, got %d", len(expectedTags), len(access.AUDTag.Value))
+	}
+
+	for i, tag := range access.AUDTag.Value {
+		if tag != expectedTags[i] {
+			t.Errorf("Expected tag[%d] to be '%s', got '%s'", i, expectedTags[i], tag)
+		}
+	}
+}
+
+// TestParseLabelsToIngress_AllOriginRequestAttributes tests all supported originRequest attributes (T076)
+func TestParseLabelsToIngress_AllOriginRequestAttributes(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{
+				NetworkMode: "default",
+			},
+		},
+		Config: &container.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":                                "true",
+				"docktunnel.web.hostname":                          "web.example.com",
+				"docktunnel.web.service":                           "http://localhost:8080",
+				"docktunnel.web.originRequest.noTLSVerify":         "true",
+				"docktunnel.web.originRequest.connectTimeout":      "30s",
+				"docktunnel.web.originRequest.tlsTimeout":          "10s",
+				"docktunnel.web.originRequest.tcpKeepAlive":        "60s",
+				"docktunnel.web.originRequest.keepAliveConnections": "100",
+				"docktunnel.web.originRequest.keepAliveTimeout":    "90s",
+				"docktunnel.web.originRequest.noHappyEyeballs":     "true",
+				"docktunnel.web.originRequest.proxyType":           "socks",
+				"docktunnel.web.originRequest.httpHostHeader":      "custom.host",
+				"docktunnel.web.originRequest.originServerName":    "origin.example.com",
+				"docktunnel.web.originRequest.caPool":              "/path/to/ca.pem",
+				"docktunnel.web.originRequest.http2Origin":         "true",
+				"docktunnel.web.originRequest.disableChunkedEncoding": "false",
+			},
+		},
+	}
+
+	rules, err := parseLabelsToIngress(containerInfo)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if len(rules) != 1 {
+		t.Fatalf("Expected 1 rule, got %d", len(rules))
+	}
+
+	webRule := rules["web"]
+	if webRule == nil {
+		t.Fatal("Expected web rule to exist")
+	}
+
+	// Verify OriginRequest config is present
+	if !webRule.OriginRequest.Present {
+		t.Fatal("Expected OriginRequest to be present")
+	}
+
+	originRequest := webRule.OriginRequest.Value
+
+	// Verify all boolean attributes
+	if !originRequest.NoTLSVerify.Present || !originRequest.NoTLSVerify.Value {
+		t.Error("Expected NoTLSVerify to be true")
+	}
+	if !originRequest.NoHappyEyeballs.Present || !originRequest.NoHappyEyeballs.Value {
+		t.Error("Expected NoHappyEyeballs to be true")
+	}
+	if !originRequest.HTTP2Origin.Present || !originRequest.HTTP2Origin.Value {
+		t.Error("Expected HTTP2Origin to be true")
+	}
+	if !originRequest.DisableChunkedEncoding.Present || originRequest.DisableChunkedEncoding.Value {
+		t.Error("Expected DisableChunkedEncoding to be false")
+	}
+
+	// Verify all string attributes
+	if !originRequest.ProxyType.Present || originRequest.ProxyType.Value != "socks" {
+		t.Errorf("Expected ProxyType to be 'socks', got '%s'", originRequest.ProxyType.Value)
+	}
+	if !originRequest.HTTPHostHeader.Present || originRequest.HTTPHostHeader.Value != "custom.host" {
+		t.Errorf("Expected HTTPHostHeader to be 'custom.host', got '%s'", originRequest.HTTPHostHeader.Value)
+	}
+	if !originRequest.OriginServerName.Present || originRequest.OriginServerName.Value != "origin.example.com" {
+		t.Errorf("Expected OriginServerName to be 'origin.example.com', got '%s'", originRequest.OriginServerName.Value)
+	}
+	if !originRequest.CAPool.Present || originRequest.CAPool.Value != "/path/to/ca.pem" {
+		t.Errorf("Expected CAPool to be '/path/to/ca.pem', got '%s'", originRequest.CAPool.Value)
+	}
+
+	// Verify all integer attributes
+	if !originRequest.KeepAliveConnections.Present || originRequest.KeepAliveConnections.Value != 100 {
+		t.Errorf("Expected KeepAliveConnections to be 100, got %d", originRequest.KeepAliveConnections.Value)
+	}
+
+	t.Log("All originRequest attributes parsed successfully")
+}
