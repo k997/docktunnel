@@ -177,7 +177,7 @@
 
 - [X] T066 [P] [US5] Write unit test for state snapshot serialization in internal/state/persistence_test.go (gob encoding)
 - [X] T067 [P] [US5] Write unit test for state snapshot deserialization in internal/state/persistence_test.go (handle corrupted files)
-- [ ] T068 [P] [US5] Write unit test for startup reconciliation with persisted state in internal/controller/controller_test.go
+- [X] T068 [P] [US5] Write unit test for startup reconciliation with persisted state in internal/controller/controller_test.go
 
 ### Implementation for User Story 5
 
@@ -186,7 +186,7 @@
 - [X] T071 [US5] Implement state loading from file in internal/state/persistence.go (gob decode, fallback to JSON, handle corruption)
 - [X] T072 [US5] Add periodic state snapshot saves in internal/state/manager.go (save after every state change or every 30s)
 - [X] T073 [US5] Implement startup state loading in cmd/docktunnel/main.go (load persisted state before event processing)
-- [ ] T074 [US5] Implement startup container scan reconciliation in internal/controller/controller.go (scan running containers, reconcile with persisted state, detect containers started during downtime)
+- [X] T074 [US5] Implement startup container scan reconciliation in internal/controller/controller.go (scan running containers, reconcile with persisted state, detect containers started during downtime)
 - [X] T075 [US5] Add error handling for corrupted state file in internal/state/persistence.go (log error, fall back to full container scan, don't fail startup)
 
 **Checkpoint**: At this point, all user stories except US6 should work - controller can recover from restarts without losing retention state

@@ -394,6 +394,38 @@ func (c *Controller) Sync(ctx context.Context) error {
 
 	slog.Info("Found containers with docktunnel labels", "count", len(eventsList))
 
+	// Reconcile with persisted state (T074)
+	// Detect containers that started during downtime and restore them if needed
+	reconciledCount := 0
+	for _, event := range eventsList {
+		if !c.isDocktunnelEnabled(event) {
+			continue
+		}
+
+		containerID := event.ContainerID
+
+		// Check if container is in pending deletions (was stopped, now restarted)
+		if pendingEntry, exists := c.stateManager.GetPendingDeletion(containerID); exists {
+			slog.Info("Container restarted during downtime, restoring from pending deletion",
+				"containerID", containerID,
+				"service_name", pendingEntry.ServiceName,
+			)
+
+			// Restore to active state
+			if err := c.stateManager.RestoreActiveTunnel(containerID); err != nil {
+				slog.Warn("Failed to restore active tunnel for container",
+					"containerID", containerID,
+					"error", err)
+			} else {
+				reconciledCount++
+			}
+		}
+	}
+
+	if reconciledCount > 0 {
+		slog.Info("Reconciled containers from pending deletion state", "count", reconciledCount)
+	}
+
 	// 收集所有ingress规则
 	allParsedRules := make(map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
 	containerHostnames := make(map[string][]string) // containerID -> hostnames

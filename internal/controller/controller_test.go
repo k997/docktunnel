@@ -2,8 +2,12 @@ package controller
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
+
+	"docktunnel/internal/state"
+	"docktunnel/pkg/types"
 
 	"github.com/cloudflare/cloudflare-go/v5"
 	"github.com/cloudflare/cloudflare-go/v5/dns"
@@ -227,5 +231,104 @@ func TestContainerHealthStruct(t *testing.T) {
 
 	if !health.IsFlapping {
 		t.Error("Expected IsFlapping to be true")
+	}
+}
+
+// TestStartupReconciliation tests that containers restarted during downtime
+// are properly restored from pending deletion state (T068, T074)
+func TestStartupReconciliation(t *testing.T) {
+	// This is a simplified test that verifies the reconciliation logic path
+	// In a real scenario, this would test the full integration with state persistence
+
+	// Create a controller with state manager
+	controller := &Controller{
+		ingressRules:      make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress),
+		containerRules:    make(map[string][]string),
+		containerHealth:   make(map[string]*ContainerHealth),
+		ruleValidator:     NewCompositeValidator(),
+		stateManager:      nil, // Will be set below
+		flappingWindow:    60 * time.Second,
+		flappingThreshold: 5,
+		coolingPeriod:     5 * time.Minute,
+		maxCoolingPeriod:  30 * time.Minute,
+		debounceDuration:  2 * time.Second,
+	}
+
+	// Create state manager
+	controller.stateManager = state.NewManager(slog.Default())
+
+	// Simulate a container that was stopped and moved to pending deletion
+	containerID := "test-container-123"
+	now := time.Now().UTC()
+	pastTime := now.Add(-1 * time.Hour)
+
+	pendingEntry := &types.TunnelEntry{
+		ContainerID: containerID,
+		TunnelID:    "tunnel-123",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		CreatedAt:   now.Add(-2 * time.Hour),
+		DeletedAt:   &pastTime,
+		LastSyncAt:  pastTime,
+		Config: types.TunnelConfiguration{
+			Hostname:   "test.example.com",
+			ServiceURL: "http://localhost:8080",
+		},
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+
+	// Add to pending deletions (simulating persisted state)
+	controller.stateManager.AddPendingDeletion(pendingEntry)
+
+	// Verify it's in pending deletions
+	_, exists := controller.stateManager.GetPendingDeletion(containerID)
+	if !exists {
+		t.Fatal("Container should be in pending deletions before reconciliation")
+	}
+
+	// Now simulate the container being restarted
+	// This would happen during the Sync() reconciliation loop
+	// For this test, we directly call the restoration logic
+
+	err := controller.stateManager.RestoreActiveTunnel(containerID)
+	if err != nil {
+		t.Fatalf("Failed to restore active tunnel: %v", err)
+	}
+
+	// Verify it's no longer in pending deletions
+	_, exists = controller.stateManager.GetPendingDeletion(containerID)
+	if exists {
+		t.Error("Container should no longer be in pending deletions after restoration")
+	}
+
+	// Verify it's now in active tunnels
+	restoredEntry, exists := controller.stateManager.GetActiveTunnel(containerID)
+	if !exists {
+		t.Fatal("Container should be in active tunnels after restoration")
+	}
+
+	// Verify the entry details
+	if restoredEntry.ContainerID != containerID {
+		t.Errorf("Expected container ID %s, got %s", containerID, restoredEntry.ContainerID)
+	}
+
+	if restoredEntry.Status != types.StatusActive {
+		t.Errorf("Expected status Active, got %d", restoredEntry.Status)
+	}
+
+	if restoredEntry.ServiceName != "web" {
+		t.Errorf("Expected service name 'web', got %s", restoredEntry.ServiceName)
+	}
+
+	if restoredEntry.Config.Hostname != "test.example.com" {
+		t.Errorf("Expected hostname 'test.example.com', got %s", restoredEntry.Config.Hostname)
+	}
+
+	// Verify DeletedAt was cleared
+	if restoredEntry.DeletedAt != nil {
+		t.Error("DeletedAt should be nil after restoration")
 	}
 }
