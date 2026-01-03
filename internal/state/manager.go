@@ -56,10 +56,9 @@ func (sm *Manager) SetStatePath(path string) {
 }
 
 // markDirty marks the state as changed and potentially saves
+// Assumes mu is already held
 func (sm *Manager) markDirty() {
-	sm.mu.Lock()
 	sm.dirty = true
-	sm.mu.Unlock()
 }
 
 // SaveIfDirty saves the state if it has changed and enough time has passed (T072)

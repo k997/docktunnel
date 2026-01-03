@@ -30,6 +30,7 @@ func (sm *Manager) Save(statePath string) error {
 	}
 
 	// Get snapshot from state manager
+	// Note: GetSnapshot acquires its own lock, so we shouldn't hold sm.mu here
 	snapshot := sm.GetSnapshot()
 
 	// Ensure directory exists
