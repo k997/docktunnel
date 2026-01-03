@@ -148,15 +148,15 @@
 
 ### Unit Tests for User Story 3
 
-- [ ] T055 [P] [US3] Write unit test for retention policy parsing in internal/controller/label_parser_test.go (immediate, timed, forever formats)
-- [ ] T056 [P] [US3] Write unit test for garbage collection logic in internal/state/manager_test.go (expire timed entries, preserve forever entries)
-- [ ] T057 [P] [US3] Write unit test for container restart canceling retention timer in internal/state/manager_test.go
+- [X] T055 [P] [US3] Write unit test for retention policy parsing in internal/controller/label_parser_test.go (immediate, timed, forever formats)
+- [X] T056 [P] [US3] Write unit test for garbage collection logic in internal/state/manager_test.go (expire timed entries, preserve forever entries)
+- [X] T057 [P] [US3] Write unit test for container restart canceling retention timer in internal/state/manager_test.go
 
 ### Implementation for User Story 3
 
-- [ ] T058 [P] [US3] Extend RetentionPolicy type with PolicyType enum in pkg/types/tunnel.go (Immediate, Timed, Forever)
-- [ ] T059 [P] [US3] Add retention policy parsing to label parser in internal/controller/label_parser.go (parse "0"/"immediate", "30m"/"1h", "forever"/"keep")
-- [ ] T060 [US3] Extend TunnelEntry with DeletedAt timestamp field in pkg/types/tunnel.go
+- [X] T058 [P] [US3] Extend RetentionPolicy type with PolicyType enum in pkg/types/tunnel.go (Immediate, Timed, Forever)
+- [X] T059 [P] [US3] Add retention policy parsing to label parser in internal/controller/label_parser.go (parse "0"/"immediate", "30m"/"1h", "forever"/"keep")
+- [X] T060 [US3] Extend TunnelEntry with DeletedAt timestamp field in pkg/types/tunnel.go
 - [ ] T061 [US3] Implement container stop handler with retention logic in internal/controller/controller.go (mark as PENDING_DELETE or DELETED based on policy)
 - [ ] T062 [US3] Implement garbage collection ticker in internal/state/manager.go (run every 60 seconds)
 - [ ] T063 [US3] Implement GC scan logic in internal/state/manager.go (find expired PENDING_DELETE entries, remove from Cloudflare)
