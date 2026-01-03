@@ -66,7 +66,7 @@ func main() {
 		for {
 			select {
 			case event := <-eventChan:
-				appLogger.Info("Processing Docker event", "type", event.Type, "containerID", event.ContainerID)
+				appLogger.Debug("Processing Docker event", "type", event.Type, "containerID", event.ContainerID)
 				if err := controller.Dispatch(ctx, event); err != nil {
 					appLogger.Error("Failed to dispatch event", "error", err)
 				}

@@ -120,10 +120,15 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 	c.containerRules = make(map[string][]string)
 	c.mu.Unlock()
 
-	// 调用syncToCloudflare同步空的规则集（这将删除所有DNS记录）
+	slog.Info("Cleaning up resources: cleared internal rules")
+
+	// 调用performSync同步空的规则集（这将删除所有DNS记录）
 	if err := c.performSync(ctx); err != nil {
+		slog.Error("Failed to perform cleanup sync", "error", err)
 		return err
 	}
+
+	slog.Info("Resource cleanup completed successfully")
 
 	// 注意：我们不删除tunnel本身，因为这可能会影响其他服务
 	// 如果需要删除tunnel，用户可以手动删除或通过Cloudflare仪表板操作
@@ -362,6 +367,8 @@ func (c *Controller) performSync(ctx context.Context) error {
 	// 构建规则列表
 	ingressRules := c.GetIngressRules()
 
+	slog.Info("Performing sync with rules", "ruleCount", len(ingressRules))
+
 	// 从cloudflareManager获取tunnel信息
 	tunnel := c.cloudflareManager.GetTunnel()
 	if tunnel == nil {
@@ -385,6 +392,7 @@ func (c *Controller) performSync(ctx context.Context) error {
 		return fmt.Errorf("failed to sync DNS records: %w", err)
 	}
 
+	slog.Info("Sync operation completed successfully")
 	return nil
 }
 
@@ -410,12 +418,17 @@ func (c *Controller) syncDNSRecords(ctx context.Context) error {
 	}
 	c.mu.RUnlock()
 
-	slog.Info("Syncing DNS records", "hostnamesCount", len(currentHostnames))
+	slog.Info("Syncing DNS records", "expectedHostnamesCount", len(currentHostnames), "expectedHostnames", currentHostnames)
 
 	// 先获取Cloudflare上当前的所有DNS记录，以减少API访问次数
 	allTunnelRecords, err := c.cloudflareManager.ListDNSRecords(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list tunnel DNS records: %w", err)
+	}
+
+	slog.Debug("Found existing tunnel DNS records", "count", len(allTunnelRecords))
+	for _, record := range allTunnelRecords {
+		slog.Debug("Existing DNS record", "name", record.Name, "content", record.Content, "id", record.ID)
 	}
 
 	// 创建一个映射以便快速查找现有的DNS记录
@@ -445,6 +458,10 @@ func (c *Controller) syncDNSRecords(ctx context.Context) error {
 			deleteHostnames = append(deleteHostnames, hostname)
 		}
 	}
+
+	slog.Info("DNS sync operations", 
+		"toUpsert", len(upsertHostnames), "upsertList", upsertHostnames,
+		"toDelete", len(deleteHostnames), "deleteList", deleteHostnames)
 
 	// 执行批量删除操作
 	if len(deleteHostnames) > 0 {

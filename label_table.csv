@@ -1,0 +1,64 @@
+【全局规则、核心控制】,,,,,
+功能描述,Cloudflare 字段 (Ingress / Origin),类型,自定义 Label (cftunnel.*),兼容 Traefik Label (traefik.*),说明 / 解析逻辑
+启用开关,-,boolean,cftunnel.enable,-,必填。值为 true 时 Sidecar 才会处理该容器。
+Tunnel ID,-,string,cftunnel.id,-,(可选) 指定该服务归属的 Tunnel ID。不填则使用全局默认。
+清理策略,-,string,cftunnel.delete_retention,-,"容器停止后的保留时长策略。
+默认1h
+1. 0 / immediate: 立即模式。监听到停止事件立刻删除。
+2. forever / keep: 永久保留。GC 扫描时会忽略该容器。
+3. 30m / 1h / 7d。容器停止后，配置保留指定时长。全局 GC 任务巡检时，若发现 (当前时间 - 停止时间) > 阈值，则执行删除。"
+Catch-all规则,service,,cftunnel.service,-,"所有规则都无法匹配时返回的内容。
+默认：http_status:404"
+跳过 TLS 验证,originRequest.noTLSVerify,boolean,cftunnel.no_tls_verify,-,Origin。设为 true 时，允许容器使用自签名证书。
+SNI 域名,originRequest.originServerName,string,cftunnel.origin_server_name,-,Origin。用于 TLS 握手的 SNI 域名（当容器绑定了特定域名而非 IP 时必填）。
+自动 SNI,originRequest.matchSnItoHost,boolean,cftunnel.match_sni_to_host,-,Origin。设为 true 时，自动将 Hostname 设置为 SNI。
+CA 证书路径,originRequest.caPool,string,cftunnel.ca_pool,-,Origin。Sidecar 容器内的 CA 证书文件路径（需挂载）。
+连接超时,originRequest.connectTimeout,duration,cftunnel.connect_timeout,-,Origin。建立 TCP 连接超时，默认 30s。
+TLS 握手超时,originRequest.tlsTimeout,duration,cftunnel.tls_timeout,-,Origin。HTTPS 握手超时，默认 10s。
+TCP Keep-Alive,originRequest.tcpKeepAlive,duration,cftunnel.tcp_keep_alive,-,Origin。TCP 保活探测间隔，默认 30s。
+长连接数,originRequest.keepAliveConnections,int,cftunnel.keep_alive_conns,-,Origin。最大空闲连接数，默认 100。
+长连接超时,originRequest.keepAliveTimeout,duration,cftunnel.keep_alive_timeout,-,Origin。空闲连接保持时间，默认 1m30s。
+禁用 HE 算法,originRequest.noHappyEyeballs,boolean,cftunnel.no_happy_eyeballs,-,Origin。禁用 Happy Eyeballs 算法（防止 IPv4/IPv6 回退导致的延迟）。
+代理类型,originRequest.proxyType,string,cftunnel.proxy_type,-,Origin。可选 socks，通常留空。
+HTTP Host 头,originRequest.httpHostHeader,string,cftunnel.http_host_header,-,Origin。强制重写发送给容器的 Host Header。不填默认等于外部 Hostname。
+HTTP/2 支持,originRequest.http2Origin,boolean,cftunnel.http2_origin,-,Origin。设为 true 尝试使用 HTTP/2 连接后端（gRPC 服务必须开启）。
+禁用分块传输,originRequest.disableChunkedEncoding,boolean,cftunnel.disable_chunked_encoding,-,Origin。设为 true 禁用 Chunked Encoding。
+Access 团队名,originRequest.access.teamName,string,cftunnel.access.team_name,-,Access。Zero Trust 团队名称。
+Access Aud Tag,originRequest.access.audTag,string,cftunnel.access.aud_tag,-,Access。用于验证 JWT 的 Application Audience Tag。
+强制鉴权,originRequest.access.required,boolean,cftunnel.access.required,-,Access。设为 true 时，若请求未通过验证则拒绝流量。
+【局部规则】,,,,,
+功能描述,Cloudflare 字段 (Ingress / Origin),类型,自定义 Label (cftunnel.*),兼容 Traefik Label (traefik.*),说明 / 解析逻辑
+清理策略,-,string,cftunnel.<name>.delete_retention,-,"容器停止后的保留时长策略。
+默认1h
+1. 0 / immediate: 立即模式。监听到停止事件立刻删除。
+2. forever / keep: 永久保留。GC 扫描时会忽略该容器。
+3. 30m / 1h / 7d。容器停止后，配置保留指定时长。全局 GC 任务巡检时，若发现 (当前时间 - 停止时间) > 阈值，则执行删除。"
+外部域名,hostname,string,cftunnel.<name>.hostname,http.routers.<name>.rule,Ingress。Traefik: 正则提取 Host('...') 内容。
+路径前缀,path,string,cftunnel.<name>.path,http.routers.<name>.rule,Ingress。Traefik: 正则提取 Path 或 PathPrefix 内容。
+服务地址,service,string,cftunnel.<name>.service,-,Ingress (最高优)。直接指定完整后端 (如 tcp://127.0.0.1:22)，忽略下方协议/端口。注意容器内外ip地址可见性
+内部协议,(组合进 service),string,cftunnel.<name>.scheme,http.services.<name>.loadbalancer.server.scheme,"Ingress。默认 http。支持 https, tcp, unix 等。"
+内部端口,(组合进 service),int,cftunnel.<name>.port,http.services.<name>.loadbalancer.server.port,Ingress。优先级：Label > Traefik > 容器首个 ExposedPort > 80。
+服务关联,-,-,-,http.routers.<name>.service,Ingress。兼容模式下用于查找 Router 对应的 Service 配置。
+跳过 TLS 验证,originRequest.noTLSVerify,boolean,cftunnel.<name>.no_tls_verify,-,Origin。设为 true 时，允许容器使用自签名证书。
+SNI 域名,originRequest.originServerName,string,cftunnel.<name>.origin_server_name,-,Origin。用于 TLS 握手的 SNI 域名（当容器绑定了特定域名而非 IP 时必填）。
+自动 SNI,originRequest.matchSnItoHost,boolean,cftunnel.<name>.match_sni_to_host,-,Origin。设为 true 时，自动将 Hostname 设置为 SNI。
+CA 证书路径,originRequest.caPool,string,cftunnel.<name>.ca_pool,-,Origin。Sidecar 容器内的 CA 证书文件路径（需挂载）。
+连接超时,originRequest.connectTimeout,duration,cftunnel.<name>.connect_timeout,-,Origin。建立 TCP 连接超时，默认 30s。
+TLS 握手超时,originRequest.tlsTimeout,duration,cftunnel.<name>.tls_timeout,-,Origin。HTTPS 握手超时，默认 10s。
+TCP Keep-Alive,originRequest.tcpKeepAlive,duration,cftunnel.<name>.tcp_keep_alive,-,Origin。TCP 保活探测间隔，默认 30s。
+长连接数,originRequest.keepAliveConnections,int,cftunnel.<name>.keep_alive_conns,-,Origin。最大空闲连接数，默认 100。
+长连接超时,originRequest.keepAliveTimeout,duration,cftunnel.<name>.keep_alive_timeout,-,Origin。空闲连接保持时间，默认 1m30s。
+禁用 HE 算法,originRequest.noHappyEyeballs,boolean,cftunnel.<name>.no_happy_eyeballs,-,Origin。禁用 Happy Eyeballs 算法（防止 IPv4/IPv6 回退导致的延迟）。
+代理类型,originRequest.proxyType,string,cftunnel.<name>.proxy_type,-,Origin。可选 socks，通常留空。
+HTTP Host 头,originRequest.httpHostHeader,string,cftunnel.<name>.http_host_header,-,Origin。强制重写发送给容器的 Host Header。不填默认等于外部 Hostname。
+HTTP/2 支持,originRequest.http2Origin,boolean,cftunnel.<name>.http2_origin,-,Origin。设为 true 尝试使用 HTTP/2 连接后端（gRPC 服务必须开启）。
+禁用分块传输,originRequest.disableChunkedEncoding,boolean,cftunnel.<name>.disable_chunked_encoding,-,Origin。设为 true 禁用 Chunked Encoding。
+Access 团队名,originRequest.access.teamName,string,cftunnel.<name>.access.team_name,-,Access。Zero Trust 团队名称。
+Access Aud Tag,originRequest.access.audTag,string,cftunnel.<name>.access.aud_tag,-,Access。用于验证 JWT 的 Application Audience Tag。
+强制鉴权,originRequest.access.required,boolean,cftunnel.<name>.access.required,-,Access。设为 true 时，若请求未通过验证则拒绝流量。
+,,,,,
+,,,,,
+,,,,,
+,,,,,
+,,,,,
+

@@ -471,8 +471,11 @@ func (m *Manager) UpsertDNSRecords(ctx context.Context, hostnames []string) erro
 // DeleteDNSRecords 批量删除DNS记录
 func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) error {
 	if len(hostnames) == 0 {
+		slog.Debug("No hostnames to delete")
 		return nil
 	}
+
+	slog.Info("Deleting DNS records", "hostnames", hostnames)
 
 	// 按zone分组主机名
 	zoneHostnames := make(map[string][]string)
@@ -484,8 +487,12 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) erro
 		zoneHostnames[zoneID] = append(zoneHostnames[zoneID], hostname)
 	}
 
+	slog.Debug("Grouped hostnames by zone", "zoneGroups", zoneHostnames)
+
 	// 为每个zone执行批量删除
 	for zoneID, zoneHosts := range zoneHostnames {
+		slog.Debug("Processing zone for deletion", "zoneID", zoneID, "hostnames", zoneHosts)
+		
 		// 先获取现有的记录ID
 		var deletes []dns.RecordBatchParamsDelete
 		nameParam := dns.RecordListParamsName{}
@@ -503,11 +510,14 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) erro
 					return err
 				}
 
+				slog.Debug("Found records to delete", "hostname", hostname, "recordCount", len(records.Result))
+				
 				// 收集记录ID用于删除
 				for _, record := range records.Result {
 					deletes = append(deletes, dns.RecordBatchParamsDelete{
 						ID: cloudflare.F(record.ID),
 					})
+					slog.Debug("Adding record for deletion", "recordID", record.ID, "hostname", hostname)
 				}
 				return nil
 			})
@@ -519,6 +529,8 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) erro
 
 		// 执行批量删除
 		if len(deletes) > 0 {
+			slog.Info("Performing batch deletion", "zoneID", zoneID, "deleteCount", len(deletes))
+			
 			batchParams := dns.RecordBatchParams{
 				ZoneID:  cloudflare.F(zoneID),
 				Deletes: cloudflare.F(deletes),
@@ -533,6 +545,10 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) erro
 			if err != nil {
 				return fmt.Errorf("failed to batch delete DNS records for zone %s: %w", zoneID, err)
 			}
+			
+			slog.Info("Batch deletion completed successfully", "zoneID", zoneID, "deletedCount", len(deletes))
+		} else {
+			slog.Debug("No records to delete for zone", "zoneID", zoneID)
 		}
 	}
 

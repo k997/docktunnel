@@ -59,26 +59,26 @@
 
 ### Unit Tests for User Story 1
 
-- [ ] T014 [P] [US1] Create mock Cloudflare client in tests/mocks/cloudflare_api.go (interface with GetTunnelConfig, UpdateTunnelConfig methods)
-- [ ] T015 [P] [US1] Create mock Docker client in tests/mocks/docker_client.go (interface with Events, ContainerInspect methods)
-- [ ] T016 [P] [US1] Write unit test for hostname uniqueness validation in internal/controller/validator_test.go
+- [X] T014 [P] [US1] Create mock Cloudflare client in tests/mocks/cloudflare_api.go (interface with GetTunnelConfig, UpdateTunnelConfig methods)
+- [X] T015 [P] [US1] Create mock Docker client in tests/mocks/docker_client.go (interface with Events, ContainerInspect methods)
+- [X] T016 [P] [US1] Write unit test for hostname uniqueness validation in internal/controller/validator_test.go
 
 ### Implementation for User Story 1
 
-- [ ] T017 [P] [US1] Implement Docker event stream monitoring in internal/docker/monitor.go (filter by docktunnel.enable=true label)
-- [ ] T018 [P] [US1] Implement Docker API client wrapper in internal/docker/client.go (ContainerInspect, ContainerList methods)
-- [ ] T019 [P] [US1] Implement basic label parser in internal/controller/label_parser.go (parse docktunnel.enable, docktunnel.<name>.hostname, docktunnel.<name>.service)
-- [ ] T020 [P] [US1] Implement validator in internal/controller/validator.go (hostname uniqueness, required fields validation)
-- [ ] T021 [P] [US1] Implement Cloudflare API client wrapper in internal/cloudflareManager/tunnel.go (GetTunnelConfig, UpdateTunnelConfig, FindTunnelByName)
-- [ ] T022 [P] [US1] Implement Cloudflare API rate limiter in internal/cloudflareManager/rate_limiter.go (token bucket, 10 req/s)
-- [ ] T023 [P] [US1] Implement retry logic with exponential backoff in internal/cloudflareManager/retry.go (max 3 retries, jitter)
+- [X] T017 [P] [US1] Implement Docker event stream monitoring in internal/docker/monitor.go (filter by docktunnel.enable=true label)
+- [X] T018 [P] [US1] Implement Docker API client wrapper in internal/docker/client.go (ContainerInspect, ContainerList methods)
+- [X] T019 [P] [US1] Implement basic label parser in internal/controller/label_parser.go (parse docktunnel.enable, docktunnel.<name>.hostname, docktunnel.<name>.service)
+- [X] T020 [P] [US1] Implement validator in internal/controller/validator.go (hostname uniqueness, required fields validation)
+- [X] T021 [P] [US1] Implement Cloudflare API client wrapper in internal/cloudflareManager/tunnel.go (GetTunnelConfig, UpdateTunnelConfig, FindTunnelByName)
+- [X] T022 [P] [US1] Implement Cloudflare API rate limiter in internal/cloudflareManager/rate_limiter.go (token bucket, 10 req/s)
+- [X] T023 [P] [US1] Implement retry logic with exponential backoff in internal/cloudflareManager/retry.go (max 3 retries, jitter)
 - [ ] T024 [P] [US1] Implement in-memory state manager in internal/state/manager.go (active tunnels map, add/remove operations)
-- [ ] T025 [US1] Implement controller event orchestration in internal/controller/controller.go (handle start/stop events, trigger Cloudflare sync)
-- [ ] T026 [US1] Implement Cloudflare tunnel configuration sync in internal/cloudflareManager/tunnel.go (fetch config, calculate diff, apply updates)
-- [ ] T027 [US1] Implement debouncer in internal/events/dispatcher.go (2-second window to batch rapid events)
-- [ ] T028 [US1] Create main entry point in cmd/docktunnel/main.go (initialization sequence, signal handling setup)
-- [ ] T029 [US1] Implement graceful shutdown in cmd/docktunnel/main.go (SIGTERM/SIGINT handling, complete in-flight operations)
-- [ ] T030 [US1] Add comprehensive logging at INFO/ERROR levels throughout controller and Cloudflare manager
+- [X] T025 [US1] Implement controller event orchestration in internal/controller/controller.go (handle start/stop events, trigger Cloudflare sync)
+- [X] T026 [US1] Implement Cloudflare tunnel configuration sync in internal/cloudflareManager/tunnel.go (fetch config, calculate diff, apply updates)
+- [X] T027 [US1] Implement debouncer in internal/events/dispatcher.go (2-second window to batch rapid events)
+- [X] T028 [US1] Create main entry point in cmd/docktunnel/main.go (initialization sequence, signal handling setup)
+- [X] T029 [US1] Implement graceful shutdown in cmd/docktunnel/main.go (SIGTERM/SIGINT handling, complete in-flight operations)
+- [X] T030 [US1] Add comprehensive logging at INFO/ERROR levels throughout controller and Cloudflare manager
 
 **Checkpoint**: At this point, User Story 1 should be fully functional - labeled containers are automatically exposed via Cloudflare Tunnel
 
