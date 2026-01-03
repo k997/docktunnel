@@ -263,8 +263,8 @@
 ### Security Hardening
 
 - [X] T102 Add label input validation to prevent injection attacks in internal/controller/label_parser.go (sanitize label values, reject shell metacharacters)
-- [ ] T103 Add API token validation on startup in internal/config/config.go (test Cloudflare API call, fail fast if invalid)
-- [ ] T104 Ensure API tokens and secrets never appear in logs in internal/logger/logger.go (sanitize log output)
+- [X] T103 Add API token validation on startup in internal/config/config.go (test Cloudflare API call, fail fast if invalid)
+- [X] T104 Ensure API tokens and secrets never appear in logs in internal/logger/logger.go (sanitize log output)
 
 ### Final Validation
 
