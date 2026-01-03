@@ -231,10 +231,10 @@
 
 ### Flapping Detection
 
-- [ ] T089 [P] Define FlappingState and FlappingDetector types in pkg/types/tunnel.go (transitions array, cooling period)
-- [ ] T090 Implement flapping detection algorithm in internal/state/manager.go (sliding window counter, 60s observation, 300s cooling)
-- [ ] T091 Add flapping detection to controller event handler in internal/controller/controller.go (track state transitions, mark as FLAPPING)
-- [ ] T092 Add logging for flapping detection events in internal/controller/controller.go (WARN when flapping detected, INFO when cooling period expires)
+- [X] T089 [P] Define FlappingState and FlappingDetector types in pkg/types/tunnel.go (transitions array, cooling period)
+- [X] T090 Implement flapping detection algorithm in internal/state/manager.go (sliding window counter, 60s observation, 300s cooling)
+- [X] T091 Add flapping detection to controller event handler in internal/controller/controller.go (track state transitions, mark as FLAPPING)
+- [X] T092 Add logging for flapping detection events in internal/controller/controller.go (WARN when flapping detected, INFO when cooling period expires)
 
 ### Additional Edge Cases
 
@@ -250,9 +250,9 @@
 
 ### Documentation
 
-- [ ] T096 [P] Update README.md with complete usage examples (label examples, configuration guide, deployment instructions)
-- [ ] T097 [P] Update CLAUDE.md with implementation details (module descriptions, data flow diagrams)
-- [ ] T098 [P] Create example docker-compose.yml for development and production deployment in repository root
+- [X] T096 [P] Update README.md with complete usage examples (label examples, configuration guide, deployment instructions)
+- [X] T097 [P] Update CLAUDE.md with implementation details (module descriptions, data flow diagrams)
+- [X] T098 [P] Create example docker-compose.yml for development and production deployment in repository root
 
 ### Performance & Resource Management
 
@@ -268,9 +268,9 @@
 
 ### Final Validation
 
-- [ ] T105 Run full test suite (make test) and ensure 100% pass rate
-- [ ] T106 Validate quickstart.md instructions work end-to-end (follow guide, verify all commands succeed)
-- [ ] T107 Run constitution compliance check (verify all 6 principles satisfied)
+- [X] T105 Run full test suite (make test) and ensure 100% pass rate
+- [X] T106 Validate quickstart.md instructions work end-to-end (follow guide, verify all commands succeed)
+- [X] T107 Run constitution compliance check (verify all 6 principles satisfied)
 
 ---
 

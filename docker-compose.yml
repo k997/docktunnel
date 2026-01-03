@@ -1,0 +1,106 @@
+version: '3.8'
+
+# DockTunnel - Cloudflare Tunnel Docker Controller
+# This docker-compose file provides development and production configurations
+
+services:
+  docktunnel:
+    image: docktunnel:latest
+    container_name: docktunnel
+    restart: unless-stopped
+
+    # Mount Docker socket for container monitoring
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config.yaml:/etc/docktunnel/config.yaml:ro
+
+    # Optional: Mount state file directory for persistence
+    # volumes:
+    #   - ./state:/var/lib/docktunnel
+
+    # Environment variables (override config file)
+    environment:
+      - DOCKTUNNEL_LOG_LEVEL=info
+      # - DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
+      # - DOCKTUNNEL_CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+          cpus: '0.25'
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "docktunnel"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Network mode (host mode required for Docker socket access)
+    network_mode: host
+
+# Production override profile
+# Usage: docker-compose --profile production up -d
+x-production: &production
+  docktunnel:
+    restart: always
+    environment:
+      - DOCKTUNNEL_LOG_LEVEL=warn  # Less verbose in production
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+# Development override profile
+# Usage: docker-compose --profile dev up -d
+x-development: &development
+  docktunnel:
+    environment:
+      - DOCKTUNNEL_LOG_LEVEL=debug  # Verbose logging for development
+    volumes:
+      - ./config.yaml:/etc/docktunnel/config.yaml:rw  # Read-write for config changes
+      - .:/workspace:ro  # Mount source code for development
+    working_dir: /workspace
+    command: ./docktunnel  # Override to run locally built binary
+
+# Optional: Example service to test DockTunnel
+# Usage: docker-compose --profile with-example up -d
+x-with-example: &with-example
+  web-app:
+    image: nginx:alpine
+    container_name: example-web-app
+    ports:
+      - "8080:80"
+    labels:
+      - "docktunnel.enable=true"
+      - "docktunnel.web.hostname=app.example.com"
+      - "docktunnel.web.service=http://localhost:8080"
+    restart: unless-stopped
+
+# Profile usage examples:
+#
+# 1. Basic production deployment:
+#    docker-compose up -d
+#
+# 2. Development mode with debug logging:
+#    docker-compose --profile dev up -d
+#
+# 3. With example web application:
+#    docker-compose --profile with-example up -d
+#
+# 4. Multiple profiles:
+#    docker-compose --profile dev --profile with-example up -d
