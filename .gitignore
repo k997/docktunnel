@@ -38,4 +38,8 @@ docktunnel
 .Spotlight-V100
 .Trashes
 ehthumbs.db
-Thumbs.db
+Thumbs.db# Go build artifacts
+*.test
+*.exe
+dist/
+build/
