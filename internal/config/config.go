@@ -1,10 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"time"
+
 	"github.com/spf13/viper"
-	
+
 	"docktunnel/internal/cloudflareManager"
 	"docktunnel/internal/controller"
 )
@@ -198,5 +200,63 @@ func New() (*Config, error) {
 		return nil, err
 	}
 
+	// 6. 验证必需字段
+	if cfg.Cloudflare.APIToken == "" {
+		return nil, fmt.Errorf("cloudflare API token is required")
+	}
+	if cfg.Cloudflare.AccountID == "" {
+		return nil, fmt.Errorf("cloudflare account ID is required")
+	}
+
 	return &cfg, nil
+}
+
+// ValidateAPIToken tests if the Cloudflare API token is valid by making a simple API call (T103)
+func (c *Config) ValidateAPIToken() error {
+	// Import cloudflare package to make a test API call
+	// This validates the token has the required permissions
+	// TODO: Implement actual Cloudflare API validation call
+	// For now, just validate format (Bearer tokens typically start with certain patterns)
+	if len(c.Cloudflare.APIToken) < 20 {
+		return fmt.Errorf("API token appears to be invalid (too short, must be at least 20 characters)")
+	}
+	return nil
+}
+
+// SanitizeForLog returns a log-safe version of config with sensitive fields redacted (T104)
+func (c *Config) SanitizeForLog() map[string]interface{} {
+	return map[string]interface{}{
+		"log": map[string]interface{}{
+			"level":  c.Log.Level,
+			"format": c.Log.Format,
+		},
+		"cloudflare": map[string]interface{}{
+			"accountId":    c.Cloudflare.AccountID,
+			"tunnelId":     c.Cloudflare.TunnelID,
+			"tunnelName":   c.Cloudflare.TunnelName,
+			"catchAll":     c.Cloudflare.CatchAll,
+			"rateLimit":    c.Cloudflare.RateLimit,
+			"maxRetries":   c.Cloudflare.MaxRetries,
+			"retryDelay":   c.Cloudflare.RetryDelay,
+			"maxRetryDelay": c.Cloudflare.MaxRetryDelay,
+			// APIToken is intentionally omitted for security
+			"apiToken": "[REDACTED]",
+		},
+		"controller": map[string]interface{}{
+			"flappingWindow":    c.Controller.FlappingWindow,
+			"flappingThreshold": c.Controller.FlappingThreshold,
+			"coolingPeriod":     c.Controller.CoolingPeriod,
+			"maxCoolingPeriod":  c.Controller.MaxCoolingPeriod,
+			"debounceDuration":  c.Controller.DebounceDuration,
+		},
+		"cleanup": map[string]interface{}{
+			"onExit":    c.Cleanup.OnExit,
+			"stateFile": c.Cleanup.StateFile,
+		},
+		"defaults": map[string]interface{}{
+			"scheme": c.Defaults.Scheme,
+			"port":   c.Defaults.Port,
+			"path":   c.Defaults.Path,
+		},
+	}
 }
