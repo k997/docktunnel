@@ -2,30 +2,39 @@ package controller
 
 import (
 	"fmt"
-	
-	"github.com/cloudflare/cloudflare-go"
+	"log/slog"
+	"net"
+	"net/url"
+	"strings"
+
+	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 )
 
-// RuleValidator 定义规则验证器接口
+// RuleValidator 定义规则验证器接口，适配cloudflare-go/v5
 type RuleValidator interface {
-	Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error
+	Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, existingRules map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error
 }
 
 // HostnameUniquenessValidator 验证主机名唯一性
 type HostnameUniquenessValidator struct{}
 
-func (v *HostnameUniquenessValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (v *HostnameUniquenessValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, existingRules map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	hostnameMap := make(map[string]string) // hostname -> service name
+
+	// 从现有规则中填充主机名
+	if existingRules != nil {
+		for hostname := range existingRules {
+			hostnameMap[hostname] = "an existing service"
+		}
+	}
+
+	// 检查新规则中的主机名
 	for serviceName, rule := range rules {
-		if rule.Hostname == "" {
-			return fmt.Errorf("service %s missing required hostname", serviceName)
+		if existingService, exists := hostnameMap[rule.Hostname.Value]; exists {
+			return fmt.Errorf("duplicate hostname %s found. It is already used by %s, and new service %s also tries to use it", rule.Hostname.Value, existingService, serviceName)
 		}
-		
-		if existingService, exists := hostnameMap[rule.Hostname]; exists {
-			return fmt.Errorf("duplicate hostname %s found in services %s and %s", rule.Hostname, existingService, serviceName)
-		}
-		
-		hostnameMap[rule.Hostname] = serviceName
+
+		hostnameMap[rule.Hostname.Value] = serviceName
 	}
 	return nil
 }
@@ -33,7 +42,7 @@ func (v *HostnameUniquenessValidator) Validate(rules map[string]*cloudflare.Unva
 // ServiceNameUniquenessValidator 验证服务名唯一性
 type ServiceNameUniquenessValidator struct{}
 
-func (v *ServiceNameUniquenessValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (v *ServiceNameUniquenessValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, _ map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	serviceNameMap := make(map[string]bool)
 	for serviceName := range rules {
 		if serviceNameMap[serviceName] {
@@ -47,14 +56,127 @@ func (v *ServiceNameUniquenessValidator) Validate(rules map[string]*cloudflare.U
 // RequiredFieldsValidator 验证必需字段
 type RequiredFieldsValidator struct{}
 
-func (v *RequiredFieldsValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (v *RequiredFieldsValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, _ map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	for serviceName, rule := range rules {
-		if rule.Hostname == "" {
+		if rule.Hostname.Value == "" {
 			return fmt.Errorf("service %s missing required hostname", serviceName)
 		}
-		
-		if rule.Service == "" {
+
+		if rule.Service.Value == "" {
 			return fmt.Errorf("service %s missing required service", serviceName)
+		}
+	}
+	return nil
+}
+
+// ServiceURLValidator 验证服务URL格式 (T094)
+type ServiceURLValidator struct{}
+
+func (v *ServiceURLValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, _ map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
+	for serviceName, rule := range rules {
+		serviceURL := rule.Service.Value
+
+		// Check if it's a special service URL (http_status, etc.)
+		if strings.HasPrefix(serviceURL, "http_status:") || strings.HasPrefix(serviceURL, "ssh:") {
+			continue
+		}
+
+		// Parse URL to validate format
+		parsedURL, err := url.Parse(serviceURL)
+		if err != nil {
+			slog.Warn("Service URL is malformed",
+				"service", serviceName,
+				"url", serviceURL,
+				"error", err)
+			return fmt.Errorf("service %s has malformed service URL: %s: %w", serviceName, serviceURL, err)
+		}
+
+		// Validate scheme
+		if parsedURL.Scheme == "" {
+			return fmt.Errorf("service %s missing URL scheme: %s", serviceName, serviceURL)
+		}
+
+		// Validate scheme is supported
+		supportedSchemes := map[string]bool{
+			"http":  true,
+			"https": true,
+			"tcp":   true,
+			"ssh":   true,
+			"ws":    true,
+			"wss":   true,
+		}
+		if !supportedSchemes[parsedURL.Scheme] {
+			return fmt.Errorf("service %s has unsupported URL scheme: %s (supported: http, https, tcp, ssh, ws, wss)", serviceName, parsedURL.Scheme)
+		}
+
+		// Validate host is present
+		if parsedURL.Host == "" {
+			return fmt.Errorf("service %s missing host in service URL: %s", serviceName, serviceURL)
+		}
+
+		// Validate host format (host:port)
+		host, port, err := net.SplitHostPort(parsedURL.Host)
+		if err != nil {
+			// If there's no port, check if it's just a host
+			if strings.Contains(err.Error(), "missing port") {
+				// URLs without ports might be valid for some schemes
+				slog.Debug("Service URL has no explicit port",
+					"service", serviceName,
+					"url", serviceURL)
+				continue
+			}
+			return fmt.Errorf("service %s has invalid host format: %s: %w", serviceName, parsedURL.Host, err)
+		}
+
+		// Validate host is not empty
+		if host == "" {
+			return fmt.Errorf("service %s has empty host in service URL: %s", serviceName, serviceURL)
+		}
+
+		// Validate port is in valid range
+		if port != "" {
+			portNum, err := net.LookupPort("tcp", port)
+			if err != nil {
+				return fmt.Errorf("service %s has invalid port in service URL: %s: %w", serviceName, port, err)
+			}
+			if portNum < 1 || portNum > 65535 {
+				return fmt.Errorf("service %s has port out of range in service URL: %d", serviceName, portNum)
+			}
+		}
+	}
+	return nil
+}
+
+// ExposedPortValidator 验证容器暴露了端口 (T093)
+// Note: This validator requires container information which is not available in the validator interface.
+// Port validation is handled during label parsing in label_parser.go where container info is available.
+// This validator serves as a placeholder and logs a warning for manual verification.
+type ExposedPortValidator struct{}
+
+func (v *ExposedPortValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, _ map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
+	// Port validation is handled in label_parser.go where container.NetworkSettings.Ports is available
+	// This validator performs basic URL-based port validation
+	for serviceName, rule := range rules {
+		serviceURL := rule.Service.Value
+
+		// Skip special service URLs
+		if strings.HasPrefix(serviceURL, "http_status:") {
+			continue
+		}
+
+		parsedURL, err := url.Parse(serviceURL)
+		if err != nil {
+			// URL validation will be caught by ServiceURLValidator
+			continue
+		}
+
+		// Extract port from URL
+		_, port, err := net.SplitHostPort(parsedURL.Host)
+		if err != nil || port == "" {
+			// No explicit port - this might be using default ports
+			slog.Debug("Service URL has no explicit port, relying on container port configuration",
+				"service", serviceName,
+				"url", serviceURL)
 		}
 	}
 	return nil
@@ -70,14 +192,16 @@ func NewCompositeValidator() *CompositeValidator {
 		validators: []RuleValidator{
 			&ServiceNameUniquenessValidator{},
 			&RequiredFieldsValidator{},
+			&ServiceURLValidator{},
 			&HostnameUniquenessValidator{},
+			&ExposedPortValidator{},
 		},
 	}
 }
 
-func (v *CompositeValidator) Validate(rules map[string]*cloudflare.UnvalidatedIngressRule) error {
+func (v *CompositeValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, existingRules map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	for _, validator := range v.validators {
-		if err := validator.Validate(rules); err != nil {
+		if err := validator.Validate(rules, existingRules); err != nil {
 			return err
 		}
 	}

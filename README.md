@@ -1,268 +1,975 @@
 # DockTunnel
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/docktunnel)](https://goreportcard.com/report/github.com/yourusername/docktunnel)
+[![Go Report Card](https://goreportcard.com/badge/github.com/kongque/docktunnel)](https://goreportcard.com/report/github.com/kongque/docktunnel)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## 简介
 
-DockTunnel 是一个自动化工具，用于管理 Docker 容器和 Cloudflare Tunnel 之间的连接。它能够监听 Docker 容器事件，并自动配置 Cloudflare Tunnel 和 DNS 记录，使得容器化的服务可以通过自定义域名在互联网上访问。
+**DockTunnel** 是一个智能化的 Cloudflare Tunnel Docker Controller，通过监听 Docker 容器事件自动管理 Cloudflare Tunnel 配置和 DNS 记录。它弥合了 Docker 动态环境与 Cloudflare Tunnel 静态配置之间的鸿沟，让容器化服务通过自定义域名轻松暴露到互联网。
 
-## 功能特性
+### 核心特性
 
-- 自动监听 Docker 容器的启动和停止事件
-- 根据容器标签自动配置 Cloudflare Tunnel
-- 自动管理 Cloudflare DNS 记录
-- 支持多种容器服务配置选项
-- 通过配置文件进行灵活配置
-- 支持日志级别和格式的自定义
+- **事件驱动架构**: 实时监听 Docker 容器启动/停止事件，自动同步配置
+- **智能标签解析**: 支持多层级配置优先级（自定义标签 → Traefik 兼容 → 自动检测 → 全局默认）
+- **Traefik 兼容**: 完美支持 Traefik 标签，实现平滑迁移
+- **高级网络支持**: 自动检测容器 IP，支持 Bridge/Host 网络模式
+- **强大的容错机制**:
+  - 容器抖动检测（Flapping Detection）
+  - 智能退避和冷却期管理
+  - 事件防抖（Debouncing）
+  - 三层容错设计（配置校验、状态同步、资源清理）
+- **灵活的清理策略**: 支持立即删除、延时保留、永久保留等多种策略
+- **批量 DNS 管理**: 高效的批量 DNS 记录操作，减少 API 调用
+- **速率限制与重试**: 令牌桶算法 + 指数退避，保护 API 资源
 
 ## 工作原理
 
-DockTunnel 通过监听 Docker daemon 的事件来检测容器的启动和停止。当一个带有特定标签的容器启动时，DockTunnel 会解析这些标签并创建相应的 Cloudflare Tunnel 配置和 DNS 记录。当容器停止时，相关的配置也会被清理。
+DockTunnel 采用 **事件驱动 + 状态协调** 的架构模式：
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Docker        │    │   Controller    │    │  Cloudflare     │
+│   Events        │    │   & Logic       │    │   Manager       │
+│   Listener      │◄──►│                 │◄──►│                 │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         │              ┌─────────────────┐              │
+         │              │     Config     │              │
+         │              │     Manager    │              │
+         │              └─────────────────┘              │
+         │                       │                       │
+         └───────────────────────────────────────────────┘
+```
+
+### 数据流程
+
+1. **事件源**: Docker Daemon 发送 `START`、`DIE`、`DESTROY` 事件
+2. **事件摄入**: Watcher 模块接收事件，过滤掉无 `docktunnel.enable=true` 标签的无关容器
+3. **配置处理**:
+   - **检查器**: 调用 Docker API 查询容器详细信息（Labels, Ports, Networks）
+   - **解析器**: 应用 4 层优先级策略，解析出标准化的 `IngressRule` 对象
+   - **策略引擎**: 处理 `retention`（保留策略）和 GC 逻辑
+4. **状态管理**: 维护一份 "期望状态"（Desired State）
+5. **执行同步**: Syncer 模块计算 Diff，通过 Cloudflare API 更新远程配置
 
 ## 快速开始
 
 ### 系统要求
 
-- Docker 18.09 或更高版本
-- Go 1.21 或更高版本（仅开发）
-- Cloudflare 账户和 API 令牌
+- **Docker**: 18.09+ （用于容器部署）
+- **Go**: 1.21+ （仅开发环境）
+- **Cloudflare 账户**和 API Token，需要以下权限：
+  - Account: Read/Write
+  - Zone: Read/Write
+  - Tunnel: Read/Write
 
 ### 安装
 
-#### 使用 Go 安装
-
-```bash
-go install github.com/yourusername/docktunnel@latest
-```
-
-#### 从源码构建
-
-```bash
-git clone https://github.com/yourusername/docktunnel.git
-cd docktunnel
-go build -o docktunnel ./cmd/docktunnel
-```
-
-#### 使用 Docker 运行
+#### 方式 1: 使用 Docker（推荐）
 
 ```bash
 docker run -d \
   --name=docktunnel \
+  --restart=unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v ./config.yaml:/etc/docktunnel/config.yaml \
-  yourusername/docktunnel:latest
+  kongque/docktunnel:latest
+```
+
+#### 方式 2: 从源码构建
+
+```bash
+# 克隆仓库
+git clone https://github.com/kongque/docktunnel.git
+cd docktunnel
+
+# 构建二进制文件
+go build -o docktunnel ./cmd/docktunnel
+
+# 运行
+./docktunnel
+```
+
+#### 方式 3: 使用 Make
+
+```bash
+# 下载依赖
+make deps
+
+# 构建并运行
+make build
+make run
 ```
 
 ### 配置
 
-创建 `config.yaml` 文件：
+DockTunnel 支持多种配置方式，按优先级从高到低：
+
+1. 环境变量（前缀 `DOCKTUNNEL_`）
+2. 配置文件 `./config.yaml` 或 `/etc/docktunnel/config.yaml`
+3. 默认值
+
+#### 配置文件示例
+
+创建 `config.yaml`：
 
 ```yaml
 log:
-  level: "info"
-  format: "text"
+  level: info          # 日志级别: debug, info, warn, error
+  format: text         # 日志格式: text 或 json
 
 cloudflare:
   accountId: "your-cloudflare-account-id"
   apiToken: "your-cloudflare-api-token"
-  tunnelId: ""  # 如果为空，将自动创建隧道
+  tunnelName: "DockTunnel"      # 隧道名称，为空则自动创建
+  tunnelId: ""                   # 可选：指定现有隧道 ID
+  catchAll: "http_status:404"   # 默认 catch-all 规则
+  rateLimit: 10                  # API 速率限制（请求/秒）
+  maxRetries: 3                  # 最大重试次数
+  retryDelay: 1s                 # 初始重试延迟
+  maxRetryDelay: 30s             # 最大重试延迟
+
+controller:
+  flappingWindow: 60s            # 容器抖动检测时间窗口
+  flappingThreshold: 5           # 触发抖动的重启次数阈值
+  coolingPeriod: 300s            # 冷却期（5分钟）
+  maxCoolingPeriod: 1800s        # 最大冷却期（30分钟）
+  debounceDuration: 2s           # 事件防抖延迟
+
+cleanup:
+  onExit: true                   # 退出时清理资源
 ```
 
-### 容器标签
+#### 环境变量配置
 
-要让 DockTunnel 管理您的容器，请在运行容器时添加以下标签：
+```bash
+export DOCKTUNNEL_LOG_LEVEL=debug
+export DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID="your-account-id"
+export DOCKTUNNEL_CLOUDFLARE_API_TOKEN="your-api-token"
+export DOCKTUNNEL_CLOUDFLARE_TUNNEL_NAME="DockTunnel"
+```
+
+## 容器标签系统
+
+### 标签架构
+
+DockTunnel 使用双层标签架构：
+- **全局规则**: 应用于所有服务的默认配置
+- **局部规则**: 针对特定服务的配置（优先级更高）
+
+### 标签格式
+
+```
+docktunnel.<service-name>.<attribute>
+```
+
+例如：`docktunnel.web.hostname` 中，`web` 是服务名，`hostname` 是属性名。
+
+### 核心标签
+
+#### 必需标签
+
+| 标签 | 类型 | 说明 | 示例 |
+|------|------|------|------|
+| `docktunnel.enable` | boolean | 启用开关（必填） | `true` |
+
+#### 全局规则标签
+
+| 标签 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `docktunnel.id` | string | 指定隧道 ID | 使用全局默认 |
+| `docktunnel.delete_retention` | string | 清理策略 | `1h` |
+| `docktunnel.service` | string | Catch-all 服务 | `http_status:404` |
+
+**清理策略说明**：
+- `0` / `immediate`: 立即删除
+- `forever` / `keep`: 永久保留
+- `30m` / `1h` / `7d`: 延时删除（支持时间单位：`s`, `m`, `h`）
+
+#### 局部规则标签
+
+| 标签 | 类型 | 说明 | 示例 |
+|------|------|------|------|
+| `docktunnel.<name>.hostname` | string | 外部域名 | `example.com` |
+| `docktunnel.<name>.service` | string | 服务地址 | `http://172.17.0.2:8080` |
+| `docktunnel.<name>.path` | string | 路径前缀 | `/api` |
+| `docktunnel.<name>.scheme` | string | 内部协议 | `https` |
+| `docktunnel.<name>.port` | int | 内部端口 | `8080` |
+
+**优先级回退**（端口检测）：
+1. `docktunnel.<name>.port` 标签
+2. Traefik `http.services.<name>.loadbalancer.server.port` 标签
+3. 容器首个 ExposedPort
+4. 默认端口 `80`
+
+### Origin Request 配置
+
+#### TLS 设置
+
+| 标签 | 类型 | 说明 |
+|------|------|------|
+| `docktunnel.<name>.no_tls_verify` | boolean | 跳过 TLS 验证（允许自签名证书） |
+| `docktunnel.<name>.origin_server_name` | string | TLS 握手的 SNI 域名 |
+| `docktunnel.<name>.match_sni_to_host` | boolean | 自动将 Hostname 设置为 SNI |
+| `docktunnel.<name>.ca_pool` | string | CA 证书路径（需挂载到容器） |
+
+#### 超时设置
+
+| 标签 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `docktunnel.<name>.connect_timeout` | duration | TCP 连接超时 | `30s` |
+| `docktunnel.<name>.tls_timeout` | duration | TLS 握手超时 | `10s` |
+| `docktunnel.<name>.tcp_keep_alive` | duration | TCP 保活探测间隔 | `30s` |
+
+#### 连接池设置
+
+| 标签 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `docktunnel.<name>.keep_alive_conns` | int | 最大空闲连接数 | `100` |
+| `docktunnel.<name>.keep_alive_timeout` | duration | 空闲连接保持时间 | `1m30s` |
+
+#### HTTP 设置
+
+| 标签 | 类型 | 说明 |
+|------|------|------|
+| `docktunnel.<name>.http_host_header` | string | 强制重写 Host Header |
+| `docktunnel.<name>.http2_origin` | boolean | 启用 HTTP/2（gRPC 服务必须） |
+| `docktunnel.<name>.disable_chunked_encoding` | boolean | 禁用分块传输编码 |
+
+#### 代理设置
+
+| 标签 | 类型 | 说明 |
+|------|------|------|
+| `docktunnel.<name>.proxy_type` | string | 代理类型（通常留空或 `socks`） |
+| `docktunnel.<name>.no_happy_eyeballs` | boolean | 禁用 Happy Eyeballs 算法 |
+
+#### Cloudflare Access（Zero Trust）
+
+| 标签 | 类型 | 说明 |
+|------|------|------|
+| `docktunnel.<name>.access.team_name` | string | Zero Trust 团队名称 |
+| `docktunnel.<name>.access.aud_tag` | string | JWT Application Audience Tag |
+| `docktunnel.<name>.access.required` | boolean | 强制鉴权（未验证则拒绝） |
+
+### Traefik 兼容标签
+
+DockTunnel 支持解析 Traefik 标签，实现平滑迁移：
+
+| Traefik 标签 | 对应 DockTunnel 标签 | 解析逻辑 |
+|--------------|---------------------|----------|
+| `traefik.http.routers.<name>.rule` | `docktunnel.<name>.hostname` | 正则提取 `Host('...')` |
+| `traefik.http.services.<name>.loadbalancer.server.port` | `docktunnel.<name>.port` | 直接读取 |
+| `traefik.http.services.<name>.loadbalancer.server.scheme` | `docktunnel.<name>.scheme` | 直接读取 |
+
+### 容器 IP 检测
+
+DockTunnel 自动检测容器 IP 地址：
+
+- **Host 网络模式**: 使用 `localhost`
+- **Bridge 网络**: 使用容器的 Bridge IP 地址（如 `172.17.0.2`）
+- **其他网络**: 使用第一个可用网络的 IP 地址
+
+### 完整标签示例
 
 ```bash
 docker run -d \
-  --name=web-server \
+  --name=web-app \
   -l docktunnel.enable=true \
-  -l docktunnel.web.hostname=example.com \
-  -l docktunnel.web.service=http://localhost:8080 \
+  -l docktunnel.web.hostname=app.example.com \
+  -l docktunnel.web.service=http://172.17.0.2:8080 \
+  -l docktunnel.web.path=/api \
+  -l docktunnel.web.no_tls_verify=true \
+  -l docktunnel.web.connect_timeout=30s \
+  -l docktunnel.web.keep_alive_conns=50 \
+  -l docktunnel.web.access.required=true \
+  -l docktunnel.web.access.team_name=myteam \
   nginx:latest
-```
-
-支持的标签包括：
-
-- `docktunnel.enable`: 设置为 `true` 以启用 DockTunnel 管理
-- `docktunnel.<service-name>.hostname`: 服务的主机名
-- `docktunnel.<service-name>.service`: 服务地址（例如 `http://localhost:8080`）
-- `docktunnel.<service-name>.path`: 可选，服务路径
-
-#### OriginRequest 配置选项
-
-- `docktunnel.<service-name>.originRequest.connectTimeout`: 可选，连接超时时间（例如 `30s`）
-- `docktunnel.<service-name>.originRequest.tlsTimeout`: 可选，TLS 超时时间（例如 `10s`）
-- `docktunnel.<service-name>.originRequest.tcpKeepAlive`: 可选，TCP 保持连接时间（例如 `60s`）
-- `docktunnel.<service-name>.originRequest.noHappyEyeballs`: 可选，禁用 IPv4/IPv6 回退机制（`true` 或 `false`）
-- `docktunnel.<service-name>.originRequest.keepAliveConnections`: 可选，保持连接数
-- `docktunnel.<service-name>.originRequest.keepAliveTimeout`: 可选，保持连接超时时间（例如 `90s`）
-- `docktunnel.<service-name>.originRequest.httpHostHeader`: 可选，设置 HTTP Host 头
-- `docktunnel.<service-name>.originRequest.originServerName`: 可选，源服务器证书上的主机名
-- `docktunnel.<service-name>.originRequest.caPool`: 可选，源服务器证书 CA 路径
-- `docktunnel.<service-name>.originRequest.noTLSVerify`: 可选，是否跳过 TLS 验证（`true` 或 `false`）
-- `docktunnel.<service-name>.originRequest.disableChunkedEncoding`: 可选，禁用分块传输编码（`true` 或 `false`）
-- `docktunnel.<service-name>.originRequest.bastionMode`: 可选，作为跳板机运行（`true` 或 `false`）
-- `docktunnel.<service-name>.originRequest.proxyAddress`: 可选，代理监听地址
-- `docktunnel.<service-name>.originRequest.proxyPort`: 可选，代理监听端口
-- `docktunnel.<service-name>.originRequest.proxyType`: 可选，代理类型（`socks` 或空）
-- `docktunnel.<service-name>.originRequest.http2Origin`: 可选，是否启用 HTTP/2（`true` 或 `false`）
-
-### 运行
-
-```bash
-./docktunnel
 ```
 
 ## 使用示例
 
-### 简单Web服务示例
-
-假设您有一个运行在端口8080的Web应用，想要通过 `myapp.example.com` 访问：
+### 示例 1: 基础 Web 服务
 
 ```bash
-# 启动您的应用容器
 docker run -d \
   --name=my-web-app \
+  -p 8080:80 \
   -l docktunnel.enable=true \
   -l docktunnel.web.hostname=myapp.example.com \
   -l docktunnel.web.service=http://localhost:8080 \
-  my-web-app:latest
+  nginx:alpine
 ```
 
-当容器启动后，DockTunnel 会自动：
-1. 在 Cloudflare 中为您的账户创建或使用现有隧道
-2. 为 `myapp.example.com` 创建 DNS 记录，指向您的隧道
-3. 配置隧道规则，将 `myapp.example.com` 的请求转发到 `http://localhost:8080`
+**自动执行流程**：
+1. 检测到容器启动事件
+2. 解析标签，生成 Ingress 规则
+3. 在 Cloudflare 创建/更新隧道配置
+4. 创建 DNS 记录 `myapp.example.com` → 指向隧道
+5. 配置生效，外部可访问
 
-### 多服务示例
-
-如果您有多个服务需要暴露：
+### 示例 2: 多服务容器
 
 ```bash
-# API服务
 docker run -d \
-  --name=api-service \
+  --name=fullstack-app \
   -l docktunnel.enable=true \
+  # 前端服务
+  -l docktunnel.frontend.hostname=app.example.com \
+  -l docktunnel.frontend.service=http://localhost:3000 \
+  # API 服务
   -l docktunnel.api.hostname=api.example.com \
-  -l docktunnel.api.service=http://localhost:3000 \
+  -l docktunnel.api.service=http://localhost:8080 \
   -l docktunnel.api.path=/api \
-  api-service:latest
-
-# Web前端服务
-docker run -d \
-  --name=web-service \
-  -l docktunnel.enable=true \
-  -l docktunnel.web.hostname=example.com \
-  -l docktunnel.web.service=http://localhost:8080 \
-  web-service:latest
+  -l docktunnel.api.http2_origin=true \
+  myapp:latest
 ```
 
-### 高级配置示例
-
-对于需要特殊配置的服务：
+### 示例 3: Traefik 兼容模式
 
 ```bash
 docker run -d \
-  --name=legacy-service \
+  --name=legacy-app \
   -l docktunnel.enable=true \
-  -l docktunnel.legacy.hostname=legacy.example.com \
-  -l docktunnel.legacy.service=http://localhost:8080 \
-  -l docktunnel.legacy.originRequest.noTLSVerify=true \
-  -l docktunnel.legacy.originRequest.connectTimeout=10s \
-  -l docktunnel.legacy.originRequest.keepAliveConnections=10 \
-  -l docktunnel.legacy.originRequest.http2Origin=true \
-  legacy-service:latest
+  # Traefik 标签（DockTunnel 会自动解析）
+  -l traefik.http.routers.app.rule=Host\('legacy.example.com'\) \
+  -l traefik.http.services.app.loadbalancer.server.port=8080 \
+  -l traefik.http.services.app.loadbalancer.server.scheme=http \
+  legacy-app:latest
 ```
 
-### 完整配置示例
-
-以下示例展示了所有可用的配置选项：
+### 示例 4: 自签名证书 + gRPC 服务
 
 ```bash
 docker run -d \
-  --name=full-config-service \
+  --name=grpc-service \
   -l docktunnel.enable=true \
+  -l docktunnel.grpc.hostname=grpc.example.com \
+  -l docktunnel.grpc.service=https://localhost:9090 \
+  -l docktunnel.grpc.no_tls_verify=true \
+  -l docktunnel.grpc.http2_origin=true \
+  -l docktunnel.grpc.origin_server_name=grpc.example.com \
+  grpc-service:latest
+```
+
+### 示例 5: 延时清理策略
+
+```bash
+docker run -d \
+  --name=temp-service \
+  -l docktunnel.enable=true \
+  -l docktunnel.temp.hostname=temp.example.com \
+  -l docktunnel.temp.service=http://localhost:8080 \
+  -l docktunnel.temp.delete_retention=30m \
+  temp-service:latest
+```
+
+**清理流程**：
+1. 容器停止后，配置保留 30 分钟
+2. 全局 GC 任务每分钟扫描一次
+3. 超过 30 分钟后，自动删除配置和 DNS 记录
+
+### 示例 6: 永久保留策略
+
+```bash
+docker run -d \
+  --name=prod-service \
+  -l docktunnel.enable=true \
+  -l docktunnel.prod.hostname=prod.example.com \
+  -l docktunnel.prod.service=http://localhost:8080 \
+  -l docktunnel.prod.delete_retention=forever \
+  prod-service:latest
+```
+
+**行为**：容器停止后，配置永久保留（GC 扫描时会忽略）
+
+### 示例 7: Cloudflare Access 零信任保护
+
+```bash
+docker run -d \
+  --name=internal-tool \
+  -l docktunnel.enable=true \
+  -l docktunnel.tool.hostname=internal.example.com \
+  -l docktunnel.tool.service=http://localhost:3000 \
+  -l docktunnel.tool.access.required=true \
+  -l docktunnel.tool.access.team_name=engineering \
+  -l docktunnel.tool.access.aud_tag=a4b3c2d1 \
+  internal-tool:latest
+```
+
+**行为**：访问时必须通过 Cloudflare Access 验证
+
+### 示例 8: 完整配置（所有选项）
+
+```bash
+docker run -d \
+  --name=full-config \
+  -l docktunnel.enable=true \
+  # 服务配置
   -l docktunnel.full.hostname=full.example.com \
-  -l docktunnel.full.service=http://localhost:8080 \
+  -l docktunnel.full.service=http://172.17.0.2:8080 \
   -l docktunnel.full.path=/api \
-  -l docktunnel.full.originRequest.connectTimeout=30s \
-  -l docktunnel.full.originRequest.tlsTimeout=10s \
-  -l docktunnel.full.originRequest.tcpKeepAlive=60s \
-  -l docktunnel.full.originRequest.noHappyEyeballs=true \
-  -l docktunnel.full.originRequest.keepAliveConnections=10 \
-  -l docktunnel.full.originRequest.keepAliveTimeout=90s \
-  -l docktunnel.full.originRequest.httpHostHeader=host.example.com \
-  -l docktunnel.full.originRequest.originServerName=origin.example.com \
-  -l docktunnel.full.originRequest.caPool=/path/to/ca \
-  -l docktunnel.full.originRequest.noTLSVerify=true \
-  -l docktunnel.full.originRequest.disableChunkedEncoding=true \
-  -l docktunnel.full.originRequest.bastionMode=false \
-  -l docktunnel.full.originRequest.proxyAddress=127.0.0.1 \
-  -l docktunnel.full.originRequest.proxyPort=8081 \
-  -l docktunnel.full.originRequest.proxyType=socks \
-  -l docktunnel.full.originRequest.http2Origin=true \
-  full-config-service:latest
+  # TLS 配置
+  -l docktunnel.full.no_tls_verify=true \
+  -l docktunnel.full.origin_server_name=origin.example.com \
+  -l docktunnel.full.ca_pool=/etc/ssl/certs/ca.pem \
+  # 超时配置
+  -l docktunnel.full.connect_timeout=30s \
+  -l docktunnel.full.tls_timeout=10s \
+  -l docktunnel.full.tcp_keep_alive=30s \
+  # 连接池配置
+  -l docktunnel.full.keep_alive_conns=100 \
+  -l docktunnel.full.keep_alive_timeout=90s \
+  # HTTP 配置
+  -l docktunnel.full.http_host_header=full.example.com \
+  -l docktunnel.full.http2_origin=false \
+  -l docktunnel.full.disable_chunked_encoding=false \
+  # 代理配置
+  -l docktunnel.full.proxy_type=socks \
+  -l docktunnel.full.no_happy_eyeballs=false \
+  # Access 配置
+  -l docktunnel.full.access.required=true \
+  -l docktunnel.full.access.team_name=myteam \
+  -l docktunnel.full.access.aud_tag=abc123 \
+  # 清理策略
+  -l docktunnel.full.delete_retention=1h \
+  full-config:latest
 ```
 
-## 开发
+## 高级功能
 
-### 依赖
+### 容器抖动检测
 
-- Go 1.21+
-- Docker
+当容器在短时间内频繁重启时，DockTunnel 会：
+
+1. **检测抖动**: 在 `flappingWindow`（默认 60s）内重启次数超过 `flappingThreshold`（默认 5 次）
+2. **触发冷却**: 标记容器为不稳定，进入冷却期
+3. **指数退避**: 冷却期从 `coolingPeriod`（默认 300s）开始，最大 `maxCoolingPeriod`（默认 1800s）
+4. **恢复同步**: 冷却期结束后，恢复正常同步
+
+### 事件防抖
+
+- **防抖延迟**: `debounceDuration`（默认 2s）
+- **行为**: 在 2 秒内的多个容器事件会被合并为一次同步操作
+- **好处**: 减少 API 调用，避免配置抖动
+
+### 状态同步流程
+
+```
+容器启动 → 解析标签 → 校验规则 → 更新内存状态 → 批量同步 Cloudflare
+    ↓
+检测到变化 → 计算配置差异 → 应用更新 → 记录日志
+```
+
+### 规则校验
+
+- **hostname 唯一性**: 全局检查，防止域名冲突
+- **service name 唯一性**: 容器内服务名唯一性检查
+- **必填字段**: 确保 `hostname` 和 `service` 配置完整
+
+## 配置优先级
+
+### 端口检测优先级
+
+1. `docktunnel.<name>.port` 标签
+2. `traefik.http.services.<name>.loadbalancer.server.port` 标签
+3. 容器首个 ExposedPort
+4. 默认端口 `80`
+
+### 协议检测优先级
+
+1. `docktunnel.<name>.service` 标签中包含的协议（如 `https://`）
+2. `docktunnel.<name>.scheme` 标签
+3. `traefik.http.services.<name>.loadbalancer.server.scheme` 标签
+4. 默认协议 `http`
+
+### 配置合并优先级
+
+1. **局部规则**: `docktunnel.<name>.*` 标签（最高优先级）
+2. **Traefik 兼容**: `traefik.http.*` 标签
+3. **全局规则**: `docktunnel.*` 标签（不含服务名）
+4. **系统默认**: 配置文件中的默认值
+
+## 故障排除
+
+### 调试模式
+
+```bash
+# 启用 Debug 日志
+export DOCKTUNNEL_LOG_LEVEL=debug
+./docktunnel
+
+# 或在配置文件中
+log:
+  level: debug
+  format: json
+```
+
+### 常见问题
+
+#### 1. 无法连接到 Docker daemon
+
+**症状**: `Error: Cannot connect to the Docker daemon`
+
+**解决方案**:
+- 确保 Docker socket 已挂载：`-v /var/run/docker.sock:/var/run/docker.sock`
+- 检查文件权限：`ls -l /var/run/docker.sock`
+- 确保 DockTunnel 运行在 Docker 容器外或正确挂载 socket
+
+#### 2. Cloudflare API 错误
+
+**症状**: `Error: Cloudflare API request failed`
+
+**解决方案**:
+- 验证 `accountId` 和 `apiToken` 正确性
+- 确认 API Token 权限：
+  - Account: Read/Write
+  - Zone: Read/Write
+  - Tunnel: Read/Write
+- 检查网络连接和防火墙设置
+
+#### 3. 容器标签未生效
+
+**症状**: 容器启动后无反应
+
+**解决方案**:
+- 确认设置了 `docktunnel.enable=true`
+- 检查日志：`docker logs docktunnel`
+- 验证标签格式：`docker inspect <container> --format='{{json .Config.Labels}}'`
+- 确保 hostname 和 service 配置正确
+
+#### 4. DNS 记录未创建
+
+**症状**: 隧道配置成功但无法访问域名
+
+**解决方案**:
+- 检查域名 DNS 记录是否在 Cloudflare 控制台显示
+- 验证 Zone ID 正确性
+- 确认域名已添加到 Cloudflare 账户
+- 检查 DNS 传播：`dig example.com`
+
+#### 5. 服务无法访问
+
+**症状**: DNS 解析正确但服务无法访问
+
+**解决方案**:
+- 验证容器服务正常运行：`docker exec <container> curl localhost:8080`
+- 检查容器 IP 地址：`docker inspect <container> --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'`
+- 确认网络模式：
+  - Bridge 模式：使用容器 IP
+  - Host 模式：使用 `localhost`
+- 检查防火墙规则
+
+#### 6. 配置频繁更新/回退
+
+**症状**: Cloudflare 配置频繁变化
+
+**解决方案**:
+- 检查容器是否在频繁重启（容器抖动）
+- 调整 `flappingThreshold` 和 `coolingPeriod`
+- 检查事件防抖设置 `debounceDuration`
+- 查看日志中的冷却期提示
+
+### 日志分析
+
+#### Debug 日志示例
+
+```json
+{
+  "level": "DEBUG",
+  "msg": "Container started",
+  "container_id": "abc123",
+  "container_name": "web-app",
+  "labels": {
+    "docktunnel.enable": "true",
+    "docktunnel.web.hostname": "app.example.com"
+  }
+}
+```
+
+#### 错误日志示例
+
+```json
+{
+  "level": "ERROR",
+  "msg": "Failed to update tunnel configuration",
+  "error": "rate limit exceeded",
+  "retry_after": "60s"
+}
+```
+
+## 开发指南
+
+### 项目结构
+
+```
+DockTunnel/
+├── cmd/
+│   └── docktunnel/          # 主程序入口
+│       ├── main.go
+│       └── main_test.go
+├── internal/
+│   ├── cloudflareManager/   # Cloudflare API 管理
+│   │   ├── tunnel.go
+│   │   └── tunnel_test.go
+│   ├── config/              # 配置管理
+│   │   ├── config.go
+│   │   └── config_test.go
+│   ├── controller/          # 核心业务逻辑
+│   │   ├── controller.go
+│   │   ├── controller_test.go
+│   │   ├── label_parser.go
+│   │   ├── label_parser_test.go
+│   │   ├── validator.go
+│   │   └── validator_test.go
+│   ├── docker/              # Docker 监控
+│   │   ├── monitor.go
+│   │   └── monitor_test.go
+│   ├── events/              # 事件定义
+│   │   └── event.go
+│   └── logger/              # 日志管理
+│       ├── logger.go
+│       └── logger_test.go
+├── config.yaml              # 配置文件示例
+├── go.mod
+├── go.sum
+├── Makefile
+├── Dockerfile
+└── README.md
+```
 
 ### 构建
 
 ```bash
-go build -o docktunnel ./cmd/docktunnel
+# 格式化代码
+make fmt
+
+# 下载依赖
+make deps
+
+# 构建
+make build
+
+# 运行测试
+make test
+
+# 测试覆盖率
+make test-coverage
+
+# 清理
+make clean
 ```
 
 ### 测试
 
 ```bash
+# 运行所有测试
 go test ./...
+
+# 运行特定包测试
+go test ./internal/controller
+
+# 显示详细输出
+go test -v ./internal/controller
+
+# 测试覆盖率
+go test -cover ./...
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
 ```
+
+### 代码风格
+
+- 遵循 [Effective Go](https://golang.org/doc/effective_go) 指南
+- 使用 `gofmt` 格式化代码
+- 编写单元测试（覆盖率目标：80%+）
+- 添加文档注释到导出的类型、函数、常量
+
+### 提交代码
+
+1. Fork 项目
+2. 创建功能分支：`git checkout -b feature/amazing-feature`
+3. 提交更改：`git commit -m 'Add amazing feature'`
+4. 推送分支：`git push origin feature/amazing-feature`
+5. 提交 Pull Request
 
 ## 部署
 
-### 作为系统服务
+### 作为系统服务（systemd）
 
-创建 systemd 服务文件 `/etc/systemd/system/docktunnel.service`：
+创建 `/etc/systemd/system/docktunnel.service`：
 
 ```ini
 [Unit]
-Description=DockTunnel Service
+Description=DockTunnel - Cloudflare Tunnel Docker Controller
 After=docker.service
 Requires=docker.service
 
 [Service]
+Type=simple
+User=root
 ExecStart=/usr/local/bin/docktunnel
 Restart=always
 RestartSec=10
 Environment=CONFIG_PATH=/etc/docktunnel/config.yaml
 
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/docktunnel
+
 [Install]
 WantedBy=multi-user.target
 ```
 
-然后启用并启动服务：
+启用并启动服务：
 
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl enable docktunnel
 sudo systemctl start docktunnel
+sudo systemctl status docktunnel
 ```
 
-## 故障排除
+### Docker Compose 部署
 
-### 常见问题
+```yaml
+version: '3.8'
 
-1. **无法连接到 Docker daemon**
-   确保 DockTunnel 可以访问 Docker socket 文件（通常位于 `/var/run/docker.sock`）。
+services:
+  docktunnel:
+    image: kongque/docktunnel:latest
+    container_name: docktunnel
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config.yaml:/etc/docktunnel/config.yaml:ro
+    environment:
+      - DOCKTUNNEL_LOG_LEVEL=info
+```
 
-2. **Cloudflare API 错误**
-   检查您的 `accountId` 和 `apiToken` 是否正确，并确保 API 令牌具有足够的权限。
+启动：
+
+```bash
+docker-compose up -d
+```
+
+### Kubernetes 部署（DaemonSet）
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: docktunnel
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: docktunnel
+  template:
+    metadata:
+      labels:
+        app: docktunnel
+    spec:
+      containers:
+      - name: docktunnel
+        image: kongque/docktunnel:latest
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+          readOnly: true
+        - name: config
+          mountPath: /etc/docktunnel
+          readOnly: true
+        env:
+        - name: DOCKTUNNEL_LOG_LEVEL
+          value: "info"
+      volumes:
+      - name: docker-socket
+        hostPath:
+          path: /var/run/docker.sock
+      - name: config
+        configMap:
+          name: docktunnel-config
+```
+
+## 性能优化
+
+### API 速率限制
+
+默认配置：
+- 速率限制：10 请求/秒
+- 最大重试：3 次
+- 重试延迟：1s（指数增长，最大 30s）
+
+调整建议：
+- 大规模部署（100+ 容器）：提高到 20-30 请求/秒
+- 小规模部署（< 20 容器）：保持默认或降低到 5 请求/秒
+
+### 事件防抖优化
+
+- **默认值**: 2 秒
+- **高动态环境**: 降低到 500ms - 1s
+- **稳定环境**: 提高到 5s - 10s
+
+### 冷却期调整
+
+- **默认值**: 300s（5 分钟）
+- **生产环境**: 提高到 600s - 900s
+- **开发环境**: 降低到 60s - 120s
+
+## 安全建议
+
+### API Token 安全
+
+- 使用最小权限原则
+- 定期轮换 API Token
+- 不要将 Token 提交到版本控制
+- 使用环境变量或密钥管理工具（如 HashiCorp Vault）
+
+### Docker Socket 安全
+
+- 以只读方式挂载：`/var/run/docker.sock:ro`
+- 限制容器权限（不使用 `--privileged`）
+- 使用专用用户运行
+
+### 网络隔离
+
+- 在专用网络中运行 DockTunnel
+- 限制出站连接（仅允许 Cloudflare API）
+- 使用防火墙规则限制访问
+
+## 常见应用场景
+
+### 场景 1: 本地开发环境
+
+将本地开发服务暴露到互联网：
+
+```bash
+docker run -d \
+  --name=dev-app \
+  -p 3000:3000 \
+  -l docktunnel.enable=true \
+  -l docktunnel.dev.hostname=dev.example.com \
+  -l docktunnel.dev.service=http://localhost:3000 \
+  my-dev-app:latest
+```
+
+### 场景 2: 微服务架构
+
+管理多个微服务的外部访问：
+
+```bash
+# 用户服务
+docker run -d --name=user-service \
+  -l docktunnel.enable=true \
+  -l docktunnel.users.hostname=api.example.com \
+  -l docktunnel.users.path=/users \
+  -l docktunnel.users.service=http://user-service:8001 \
+  user-service:latest
+
+# 订单服务
+docker run -d --name=order-service \
+  -l docktunnel.enable=true \
+  -l docktunnel.orders.hostname=api.example.com \
+  -l docktunnel.orders.path=/orders \
+  -l docktunnel.orders.service=http://order-service:8002 \
+  order-service:latest
+```
+
+### 场景 3: CI/CD 流水线
+
+临时暴露测试环境：
+
+```bash
+docker run -d \
+  --name=staging-$BUILD_NUMBER \
+  -l docktunnel.enable=true \
+  -l docktunnel.staging.hostname=staging-$BUILD_NUMBER.example.com \
+  -l docktunnel.staging.service=http://localhost:8080 \
+  -l docktunnel.staging.delete_retention=1h \
+  staging-app:latest
+```
+
+### 场景 4: Traefik 迁移
+
+从 Traefik 平滑迁移到 Cloudflare Tunnel：
+
+```bash
+# 原有 Traefik 标签保持不变
+docker run -d \
+  --name=legacy-app \
+  -l docktunnel.enable=true \
+  -l traefik.http.routers.app.rule=Host\('app.example.com'\) \
+  -l traefik.http.services.app.loadbalancer.server.port=8080 \
+  legacy-app:latest
+```
+
+## 监控与日志
+
+### 日志输出示例
+
+```json
+{"level":"INFO","msg":"DockTunnel starting","version":"1.0.0"}
+{"level":"INFO","msg":"Connected to Docker daemon"}
+{"level":"INFO","msg":"Connected to Cloudflare API","account_id":"xxx"}
+{"level":"DEBUG","msg":"Container event received","action":"start","container_id":"abc123"}
+{"level":"INFO","msg":"Processing container","container_name":"web-app","services":["web"]}
+{"level":"INFO","msg":"Updating tunnel configuration","tunnel_id":"xxx","rules_count":5}
+{"level":"INFO","msg":"DNS records updated","created":1,"deleted":0}
+{"level":"INFO","msg":"Sync completed","duration":1.234s}
+```
+
+### 日志聚合
+
+推荐使用以下工具聚合日志：
+- **ELK Stack**: Elasticsearch + Logstash + Kibana
+- **Loki**: Grafana Loki（轻量级）
+- **Fluentd**: Fluentd + Elasticsearch
+- **Cloud Logging**: 云服务商日志服务
+
+## 贡献指南
+
+欢迎贡献！请遵循以下步骤：
+
+1. Fork 项目
+2. 创建功能分支：`git checkout -b feature/amazing-feature`
+3. 编写测试：`go test ./...`
+4. 提交代码：`git commit -m 'Add amazing feature'`
+5. 推送分支：`git push origin feature/amazing-feature`
+6. 提交 Pull Request
+
+### 代码审查标准
+
+- 遵循 Go 代码规范
+- 测试覆盖率 > 80%
+- 添加文档注释
+- 通过所有测试
 
 ## 许可证
 
-本项目采用 MIT 许可证。详情请见 [LICENSE](LICENSE) 文件。
+本项目采用 **MIT 许可证**。详情请见 [LICENSE](LICENSE) 文件。
+
+## 致谢
+
+- [Cloudflare](https://www.cloudflare.com/) - 提供 Tunnel 服务和 API
+- [Cloudflare Go SDK](https://github.com/cloudflare/cloudflare-go) - 官方 Go SDK
+- [Docker](https://www.docker.com/) - 容器技术
+- [Traefik](https://traefik.io/) - 灵感的来源（标签兼容性设计）
+
+## 联系方式
+
+- **问题反馈**: [GitHub Issues](https://github.com/kongque/docktunnel/issues)
+- **功能建议**: [GitHub Discussions](https://github.com/kongque/docktunnel/discussions)
+- **邮件**: kongque@example.com
+
+---
+
+**注意**: 本项目仍在活跃开发中，API 可能发生变化。建议在生产环境使用前进行充分测试。
+
+**Star 🌟 这个项目**: 如果你觉得 DockTunnel 有帮助，请给我们一个 Star！

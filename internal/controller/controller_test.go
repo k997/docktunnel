@@ -1,48 +1,334 @@
 package controller
 
 import (
+	"context"
+	"log/slog"
 	"testing"
+	"time"
 
-	"github.com/cloudflare/cloudflare-go"
+	"docktunnel/internal/state"
+	"docktunnel/pkg/types"
+
+	"github.com/cloudflare/cloudflare-go/v5"
+	"github.com/cloudflare/cloudflare-go/v5/dns"
+	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 )
+
+// mockCloudflareManager 是一个模拟的Cloudflare管理器，用于测试
+type mockCloudflareManager struct {
+	tunnel *zero_trust.TunnelCloudflaredGetResponse
+}
+
+// GetTunnel 返回模拟的隧道信息
+func (m *mockCloudflareManager) GetTunnel() *zero_trust.TunnelCloudflaredGetResponse {
+	return m.tunnel
+}
+
+// UpdateConfiguration 模拟更新配置
+func (m *mockCloudflareManager) UpdateConfiguration(ctx context.Context, ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
+	return nil
+}
+
+// ListDNSRecords 模拟列出DNS记录
+func (m *mockCloudflareManager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, error) {
+	return []dns.RecordResponse{}, nil
+}
+
+// DeleteDNSRecords 模拟批量删除DNS记录
+func (m *mockCloudflareManager) DeleteDNSRecords(ctx context.Context, hostnames []string) error {
+	return nil
+}
+
+// UpsertDNSRecords 模拟批量创建或更新DNS记录
+func (m *mockCloudflareManager) UpsertDNSRecords(ctx context.Context, hostnames []string) error {
+	return nil
+}
 
 func TestNewController(t *testing.T) {
 	// 测试创建控制器实例
 	controller := &Controller{
-		ingressRules:   make(map[string]cloudflare.UnvalidatedIngressRule),
+		ingressRules:   make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress),
 		containerRules: make(map[string][]string),
+		containerHealth: make(map[string]*ContainerHealth),
 		ruleValidator:  NewCompositeValidator(),
 	}
 
 	if controller == nil {
 		t.Error("Controller should not be nil")
 	}
+
+	// 检查初始状态（不再存储catch-all规则）
+	if len(controller.ingressRules) != 0 {
+		t.Errorf("Expected no rules initially, got %d", len(controller.ingressRules))
+	}
+	
+	// 检查通过GetIngressRules方法可以获取到catch-all规则
+	rules := controller.GetIngressRules()
+	if len(rules) == 0 {
+		t.Error("Expected to get rules from GetIngressRules, got none")
+		return
+	}
+	
+	// 检查最后一个规则是否为catch-all规则
+	lastRule := rules[len(rules)-1]
+	if lastRule.Service.Value != "http_status:404" {
+		t.Errorf("Expected last rule to be catch-all with service 'http_status:404', got '%s'", lastRule.Service.Value)
+	}
 }
 
-func TestParseLabelsToIngress(t *testing.T) {
-	// 创建测试用的标签数据
-	labels := map[string]string{
-		"docktunnel.enable":                        "true",
-		"docktunnel.web.hostname":                  "example.com",
-		"docktunnel.web.service":                   "http://localhost:8080",
-		"docktunnel.web.path":                      "/api",
-		"docktunnel.web.originRequest.noTLSVerify": "true",
+func TestNewControllerWithOptions(t *testing.T) {
+	// 测试使用ControllerOptions创建控制器实例
+	opts := ControllerOptions{
+		CatchAllService:   "http_status:404",
+		FlappingWindow:    60 * time.Second,
+		FlappingThreshold: 5,
+		CoolingPeriod:     300 * time.Second,
+		MaxCoolingPeriod:  1800 * time.Second,
+		DebounceDuration:  2 * time.Second,
 	}
 
-	// 确保labels变量被使用
-	_ = labels
+	controller := NewController(nil, nil, opts)
 
-	// 创建控制器实例（注意：这里只是测试解析逻辑，不涉及实际的Docker或Cloudflare交互）
+	if controller == nil {
+		t.Error("Controller should not be nil")
+	}
+
+	// 检查配置选项是否正确应用
+	if controller.flappingWindow != 60*time.Second {
+		t.Errorf("Expected flappingWindow to be 60s, got %v", controller.flappingWindow)
+	}
+
+	if controller.flappingThreshold != 5 {
+		t.Errorf("Expected flappingThreshold to be 5, got %d", controller.flappingThreshold)
+	}
+
+	if controller.coolingPeriod != 300*time.Second {
+		t.Errorf("Expected coolingPeriod to be 300s, got %v", controller.coolingPeriod)
+	}
+
+	if controller.maxCoolingPeriod != 1800*time.Second {
+		t.Errorf("Expected maxCoolingPeriod to be 1800s, got %v", controller.maxCoolingPeriod)
+	}
+
+	if controller.debounceDuration != 2*time.Second {
+		t.Errorf("Expected debounceDuration to be 2s, got %v", controller.debounceDuration)
+	}
+
+	// 检查初始状态（不再存储catch-all规则）
+	if len(controller.ingressRules) != 0 {
+		t.Errorf("Expected no rules initially, got %d", len(controller.ingressRules))
+	}
+	
+	// 检查通过GetIngressRules方法可以获取到catch-all规则
+	rules := controller.GetIngressRules()
+	if len(rules) == 0 {
+		t.Error("Expected to get rules from GetIngressRules, got none")
+		return
+	}
+	
+	// 检查最后一个规则是否为catch-all规则
+	lastRule := rules[len(rules)-1]
+	if lastRule.Service.Value != "http_status:404" {
+		t.Errorf("Expected last rule to be catch-all with service 'http_status:404', got '%s'", lastRule.Service.Value)
+	}
+}
+
+func TestControllerOptions(t *testing.T) {
+	// 测试ControllerOptions结构体
+	opts := ControllerOptions{
+		CatchAllService:   "http_status:404",
+		FlappingWindow:    60 * time.Second,
+		FlappingThreshold: 5,
+		CoolingPeriod:     300 * time.Second,
+		MaxCoolingPeriod:  1800 * time.Second,
+		DebounceDuration:  2 * time.Second,
+	}
+
+	if opts.CatchAllService != "http_status:404" {
+		t.Errorf("Expected CatchAllService to be 'http_status:404', got %s", opts.CatchAllService)
+	}
+
+	if opts.FlappingWindow != 60*time.Second {
+		t.Errorf("Expected FlappingWindow to be 60s, got %v", opts.FlappingWindow)
+	}
+
+	if opts.FlappingThreshold != 5 {
+		t.Errorf("Expected FlappingThreshold to be 5, got %d", opts.FlappingThreshold)
+	}
+
+	if opts.CoolingPeriod != 300*time.Second {
+		t.Errorf("Expected CoolingPeriod to be 300s, got %v", opts.CoolingPeriod)
+	}
+
+	if opts.MaxCoolingPeriod != 1800*time.Second {
+		t.Errorf("Expected MaxCoolingPeriod to be 1800s, got %v", opts.MaxCoolingPeriod)
+	}
+
+	if opts.DebounceDuration != 2*time.Second {
+		t.Errorf("Expected DebounceDuration to be 2s, got %v", opts.DebounceDuration)
+	}
+}
+
+func TestCleanupResourcesLogic(t *testing.T) {
+	// 创建控制器实例
+	opts := ControllerOptions{
+		CatchAllService: "http_status:410",
+	}
+	controller := NewController(nil, nil, opts)
+
+	// 添加一些测试规则
+	controller.ingressRules["example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("example.com"),
+		Service:  cloudflare.F("http://localhost:8080"),
+	}
+
+	controller.ingressRules["test.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("test.com"),
+		Service:  cloudflare.F("http://localhost:3000"),
+	}
+
+	controller.containerRules["container1"] = []string{"example.com", "test.com"}
+	controller.containerRules["container2"] = []string{"test.com"}
+
+	// 检查规则是否正确添加
+	rules := controller.GetIngressRules()
+	if len(rules) != 3 { // 2个普通规则 + 1个catch-all规则
+		t.Errorf("Expected 3 ingress rules, got %d", len(rules))
+	}
+
+	if len(controller.containerRules) != 2 {
+		t.Errorf("Expected 2 container rules, got %d", len(controller.containerRules))
+	}
+
+	// 手动测试CleanupResources的逻辑部分（不调用实际的方法）
+	// 清空ingressRules和containerRules
+	controller.ingressRules = make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
+	controller.containerRules = make(map[string][]string)
+
+	// 检查规则是否被正确清理（不保留任何规则）
+	rules = controller.GetIngressRules()
+	if len(rules) != 1 { // 只应该保留动态添加的catch-all规则
+		t.Errorf("Expected 1 ingress rule after cleanup (catch-all), got %d", len(rules))
+	}
+
+
+	// 检查containerRules是否被清空
+	if len(controller.containerRules) != 0 {
+		t.Errorf("Expected 0 container rules after cleanup, got %d", len(controller.containerRules))
+	}
+}
+
+func TestContainerHealthStruct(t *testing.T) {
+	// 测试ContainerHealth结构体
+	health := &ContainerHealth{
+		RestartCount: 3,
+		IsFlapping:   true,
+	}
+
+	if health.RestartCount != 3 {
+		t.Errorf("Expected RestartCount to be 3, got %d", health.RestartCount)
+	}
+
+	if !health.IsFlapping {
+		t.Error("Expected IsFlapping to be true")
+	}
+}
+
+// TestStartupReconciliation tests that containers restarted during downtime
+// are properly restored from pending deletion state (T068, T074)
+func TestStartupReconciliation(t *testing.T) {
+	// This is a simplified test that verifies the reconciliation logic path
+	// In a real scenario, this would test the full integration with state persistence
+
+	// Create a controller with state manager
 	controller := &Controller{
-		ingressRules:   make(map[string]cloudflare.UnvalidatedIngressRule),
-		containerRules: make(map[string][]string),
-		ruleValidator:  NewCompositeValidator(),
+		ingressRules:      make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress),
+		containerRules:    make(map[string][]string),
+		containerHealth:   make(map[string]*ContainerHealth),
+		ruleValidator:     NewCompositeValidator(),
+		stateManager:      nil, // Will be set below
+		flappingWindow:    60 * time.Second,
+		flappingThreshold: 5,
+		coolingPeriod:     5 * time.Minute,
+		maxCoolingPeriod:  30 * time.Minute,
+		debounceDuration:  2 * time.Second,
 	}
 
-	// 确保controller变量被使用
-	_ = controller
+	// Create state manager
+	controller.stateManager = state.NewManager(slog.Default())
 
-	// 这里我们无法完整测试parseLabelsToIngress方法，因为它需要完整的控制器设置
-	// 但在后续的集成测试中可以进行完整测试
-	t.Log("ParseLabelsToIngress test - method exists and can be called with valid structure")
+	// Simulate a container that was stopped and moved to pending deletion
+	containerID := "test-container-123"
+	now := time.Now().UTC()
+	pastTime := now.Add(-1 * time.Hour)
+
+	pendingEntry := &types.TunnelEntry{
+		ContainerID: containerID,
+		TunnelID:    "tunnel-123",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		CreatedAt:   now.Add(-2 * time.Hour),
+		DeletedAt:   &pastTime,
+		LastSyncAt:  pastTime,
+		Config: types.TunnelConfiguration{
+			Hostname:   "test.example.com",
+			ServiceURL: "http://localhost:8080",
+		},
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+
+	// Add to pending deletions (simulating persisted state)
+	controller.stateManager.AddPendingDeletion(pendingEntry)
+
+	// Verify it's in pending deletions
+	_, exists := controller.stateManager.GetPendingDeletion(containerID)
+	if !exists {
+		t.Fatal("Container should be in pending deletions before reconciliation")
+	}
+
+	// Now simulate the container being restarted
+	// This would happen during the Sync() reconciliation loop
+	// For this test, we directly call the restoration logic
+
+	err := controller.stateManager.RestoreActiveTunnel(containerID)
+	if err != nil {
+		t.Fatalf("Failed to restore active tunnel: %v", err)
+	}
+
+	// Verify it's no longer in pending deletions
+	_, exists = controller.stateManager.GetPendingDeletion(containerID)
+	if exists {
+		t.Error("Container should no longer be in pending deletions after restoration")
+	}
+
+	// Verify it's now in active tunnels
+	restoredEntry, exists := controller.stateManager.GetActiveTunnel(containerID)
+	if !exists {
+		t.Fatal("Container should be in active tunnels after restoration")
+	}
+
+	// Verify the entry details
+	if restoredEntry.ContainerID != containerID {
+		t.Errorf("Expected container ID %s, got %s", containerID, restoredEntry.ContainerID)
+	}
+
+	if restoredEntry.Status != types.StatusActive {
+		t.Errorf("Expected status Active, got %d", restoredEntry.Status)
+	}
+
+	if restoredEntry.ServiceName != "web" {
+		t.Errorf("Expected service name 'web', got %s", restoredEntry.ServiceName)
+	}
+
+	if restoredEntry.Config.Hostname != "test.example.com" {
+		t.Errorf("Expected hostname 'test.example.com', got %s", restoredEntry.Config.Hostname)
+	}
+
+	// Verify DeletedAt was cleared
+	if restoredEntry.DeletedAt != nil {
+		t.Error("DeletedAt should be nil after restoration")
+	}
 }

@@ -40,6 +40,12 @@ docktunnel
 ehthumbs.db
 Thumbs.db
 
+# Go build artifacts
+*.test
+*.exe
+dist/
+build/
+
 # Development documentation
 .claude/
 .specify/

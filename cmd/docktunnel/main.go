@@ -2,11 +2,17 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/pprof"
 	"sync"
 	"syscall"
+	"time"
+
+	"log/slog"
 
 	"docktunnel/internal/cloudflareManager"
 	"docktunnel/internal/config"
@@ -14,10 +20,30 @@ import (
 	"docktunnel/internal/docker"
 	"docktunnel/internal/events"
 	"docktunnel/internal/logger"
-	"log/slog"
+	"docktunnel/internal/state"
+)
+
+var (
+	cpuprofile  = flag.String("cpuprofile", "", "write cpu profile to `file`")
+	memprofile  = flag.String("memprofile", "", "write memory profile to `file`")
 )
 
 func main() {
+	flag.Parse()
+
+	// Start CPU profiling if requested (T101)
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatalf("Could not create CPU profile: %v", err)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatalf("Could not start CPU profile: %v", err)
+		}
+		defer pprof.StopCPUProfile()
+	}
+
 	log.Println("DockTunnel starting...")
 
 	// 加载配置
@@ -26,10 +52,9 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-
 	// 初始化日志记录器
 	var appLogger *slog.Logger = logger.New(cfg.Log.Level, cfg.Log.Format)
-	appLogger.Info("Configuration loaded successfully")
+	appLogger.Info("Configuration loaded successfully", "log_level", cfg.Log.Level, "log_format", cfg.Log.Format)
 
 	// 创建上下文用于优雅关闭
 	ctx, cancel := context.WithCancel(context.Background())
@@ -43,22 +68,34 @@ func main() {
 	}
 	defer dockerManager.Close()
 
-	// 初始化Cloudflare管理器
-	cfManager, err := cloudflareManager.NewManager(
-		cfg.Cloudflare.AccountID,
-		cfg.Cloudflare.APIToken,
-		cfg.Cloudflare.TunnelID,
-		cfg.Cloudflare.TunnelName,
-	)
+	// 创建Cloudflare Manager
+	cfManager, err := cloudflareManager.NewManager(cfg.GetCloudflareOptions())
 	if err != nil {
-		appLogger.Error("Failed to create Cloudflare manager", "error", err)
+		slog.Error("Failed to create Cloudflare manager", "error", err)
 		os.Exit(1)
 	}
 
-	appLogger.Info("Using tunnel", "tunnel", cfManager.GetTunnel())
+	appLogger.Info("Using tunnel", "tunnel", cfManager.GetTunnel().ID)
 
-	// 初始化控制器
-	controller := controller.NewController(dockerManager, cfManager)
+	// 创建Controller
+	controller := controller.NewController(dockerManager, cfManager, cfg.GetControllerOptions())
+
+	// Register gob types for state persistence (T073)
+	state.RegisterGobTypes()
+
+	// Load persisted state at startup (T073, T075)
+	statePath := cfg.Cleanup.StateFile
+	if statePath == "" {
+		statePath = state.StateFileDefault
+	}
+	controller.SetStatePath(statePath)
+
+	appLogger.Info("Loading persisted state", "path", statePath)
+	if err := controller.LoadState(); err != nil {
+		appLogger.Warn("Failed to load persisted state, starting with clean state",
+			"error", err)
+		// Continue anyway - don't fail startup (T075)
+	}
 
 	// 创建事件通道
 	eventChan := make(chan events.Event, 10)
@@ -71,7 +108,7 @@ func main() {
 		for {
 			select {
 			case event := <-eventChan:
-				appLogger.Info("Processing Docker event", "type", event.Type, "containerID", event.ContainerID)
+				appLogger.Debug("Processing Docker event", "type", event.Type, "containerID", event.ContainerID)
 				if err := controller.Dispatch(ctx, event); err != nil {
 					appLogger.Error("Failed to dispatch event", "error", err)
 				}
@@ -100,6 +137,29 @@ func main() {
 		appLogger.Info("Initial synchronization completed successfully")
 	}
 
+	// 启动垃圾回收定时器 (T062) - 每60秒运行一次
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		appLogger.Info("Starting garbage collection ticker", "interval", "60s")
+
+		for {
+			select {
+			case <-ticker.C:
+				appLogger.Debug("Running garbage collection for expired retention policies")
+				if err := controller.RunGarbageCollection(ctx); err != nil {
+					appLogger.Error("Garbage collection failed", "error", err)
+				}
+			case <-ctx.Done():
+				appLogger.Info("Garbage collection ticker stopped")
+				return
+			}
+		}
+	}()
+
 	// 设置系统信号处理
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -126,7 +186,7 @@ shutdown:
 	// 如果配置要求清理资源，则执行清理操作
 	if cfg.Cleanup.OnExit {
 		appLogger.Info("Cleaning up resources as requested in configuration")
-		if err := cleanupResources(ctx, cfManager, controller, appLogger); err != nil {
+		if err := controller.CleanupResources(ctx); err != nil {
 			appLogger.Error("Failed to cleanup resources", "error", err)
 		} else {
 			appLogger.Info("Resources cleaned up successfully")
@@ -136,26 +196,21 @@ shutdown:
 	// 等待所有goroutine完成
 	wg.Wait()
 
+	// Write memory profile if requested (T101)
+	if *memprofile != "" {
+		f, err := os.Create(*memprofile)
+		if err != nil {
+			log.Fatalf("Could not create memory profile: %v", err)
+		}
+		defer f.Close()
+		runtime.ReadMemStats(&memStats)
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			log.Fatalf("Could not write memory profile: %v", err)
+		}
+		log.Printf("Memory profile written to %s", *memprofile)
+	}
+
 	appLogger.Info("DockTunnel shutdown complete")
 }
 
-// cleanupResources 清理创建的DNS记录和tunnel
-func cleanupResources(ctx context.Context, cfManager *cloudflareManager.Manager, controller *controller.Controller, logger *slog.Logger) error {
-	// 获取当前的ingress规则以获取所有主机名
-	ingressRules := controller.GetIngressRules()
-
-	// 删除所有DNS记录
-	for _, rule := range ingressRules {
-		if rule.Hostname != "" && rule.Service != "http_status:404" {
-			if err := cfManager.DeleteDNSRecord(ctx, rule.Hostname); err != nil {
-				logger.Error("Failed to delete DNS record", "hostname", rule.Hostname, "error", err)
-				// 继续尝试删除其他记录
-			}
-		}
-	}
-
-	// 注意：我们不删除tunnel本身，因为这可能会影响其他服务
-	// 如果需要删除tunnel，用户可以手动删除或通过Cloudflare仪表板操作
-
-	return nil
-}
+var memStats runtime.MemStats
