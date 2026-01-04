@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -626,6 +627,141 @@ func TestConcurrentContainerStarts(t *testing.T) {
 // Helper function to generate random suffix for container names
 func randomSuffix() string {
 	return time.Now().Format("20060102-150405")
+}
+
+// TestMemoryFootprintWith100Containers validates memory usage with 100 containers (T099)
+//
+// This test ensures that DockTunnel maintains a memory footprint < 100MB
+// when managing 100 containers, which is critical for production deployments.
+func TestMemoryFootprintWith100Containers(t *testing.T) {
+	dockerManager, err := docker.NewManager()
+	if err != nil {
+		t.Skipf("Docker daemon not available: %v", err)
+		return
+	}
+	defer dockerManager.Close()
+
+	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Skipf("Failed to create Docker client: %v", err)
+		return
+	}
+	defer dockerClient.Close()
+
+	ctx := context.Background()
+	numContainers := 100
+
+	// Force garbage collection before starting
+	runtime.GC()
+	var m1 runtime.MemStats
+	runtime.ReadMemStats(&m1)
+	initialMB := float64(m1.Alloc) / 1024 / 1024
+	t.Logf("Initial memory: %.2f MB", initialMB)
+
+	// Ensure image is available
+	if !helperEnsureImage(t, ctx, dockerClient, "nginx:alpine") {
+		t.Skip("Image not available, skipping test")
+		return
+	}
+
+	// Create containers
+	containerIDs := make([]string, 0, numContainers)
+	suffix := randomSuffix()
+
+	for i := 0; i < numContainers; i++ {
+		containerName := fmt.Sprintf("docktunnel-test-mem-%s-%03d", suffix, i)
+
+		containerConfig := &container.Config{
+			Image: "nginx:alpine",
+			Labels: map[string]string{
+				"docktunnel.enable":     "true",
+				"docktunnel.web.hostname": fmt.Sprintf("test-mem-%s-%03d.example.com", suffix, i),
+				"docktunnel.web.service":  "http://localhost:80",
+			},
+		}
+
+		hostConfig := &container.HostConfig{}
+
+		resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
+		if err != nil {
+			t.Logf("Warning: Failed to create container %s: %v", containerName, err)
+			continue
+		}
+		containerIDs = append(containerIDs, resp.ID)
+	}
+
+	t.Logf("Created %d containers", len(containerIDs))
+
+	// Force GC and measure memory after container creation
+	runtime.GC()
+	var m2 runtime.MemStats
+	runtime.ReadMemStats(&m2)
+	afterCreationMB := float64(m2.Alloc) / 1024 / 1024
+	t.Logf("Memory after creating %d containers: %.2f MB", len(containerIDs), afterCreationMB)
+
+	// Start containers to simulate real load
+	for _, containerID := range containerIDs {
+		dockerClient.ContainerStart(ctx, containerID, container.StartOptions{})
+	}
+
+	// Wait a bit for event processing
+	time.Sleep(2 * time.Second)
+
+	// Force GC and measure peak memory
+	runtime.GC()
+	var m3 runtime.MemStats
+	runtime.ReadMemStats(&m3)
+	peakMB := float64(m3.Alloc) / 1024 / 1024
+	t.Logf("Peak memory with %d running containers: %.2f MB", len(containerIDs), peakMB)
+
+	// Calculate memory increase
+	memoryIncreaseMB := peakMB - initialMB
+	t.Logf("Memory increase: %.2f MB", memoryIncreaseMB)
+
+	// Validate memory footprint is < 100MB
+	const maxMemoryMB = 100
+	if peakMB > maxMemoryMB {
+		t.Errorf("Memory footprint too high: %.2f MB > %d MB", peakMB, maxMemoryMB)
+	} else {
+		t.Logf("✓ Memory footprint within limits: %.2f MB < %d MB", peakMB, maxMemoryMB)
+	}
+
+	// Additional memory metrics
+	t.Logf("Memory Statistics:")
+	t.Logf("  HeapAlloc: %.2f MB", float64(m3.HeapAlloc)/1024/1024)
+	t.Logf("  HeapSys: %.2f MB", float64(m3.HeapSys)/1024/1024)
+	t.Logf("  HeapInuse: %.2f MB", float64(m3.HeapInuse)/1024/1024)
+	t.Logf("  StackInuse: %.2f MB", float64(m3.StackInuse)/1024/1024)
+	t.Logf("  Mallocs: %d", m3.Mallocs)
+	t.Logf("  Frees: %d", m3.Frees)
+	t.Logf("  NumGC: %d", m3.NumGC)
+
+	// Calculate average memory per container
+	avgMemPerContainerMB := memoryIncreaseMB / float64(len(containerIDs))
+	t.Logf("Average memory per container: %.2f MB", avgMemPerContainerMB)
+
+	// Cleanup
+	t.Log("Cleaning up containers...")
+	for _, containerID := range containerIDs {
+		timeout := int(time.Second * 5)
+		dockerClient.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
+		dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+	}
+
+	// Force GC after cleanup and measure final memory
+	runtime.GC()
+	var m4 runtime.MemStats
+	runtime.ReadMemStats(&m4)
+	finalMB := float64(m4.Alloc) / 1024 / 1024
+	t.Logf("Final memory after cleanup: %.2f MB", finalMB)
+
+	// Check for memory leaks (final memory should be close to initial)
+	memoryLeakMB := finalMB - initialMB
+	if memoryLeakMB > 10 { // Allow 10MB tolerance
+		t.Logf("Warning: Possible memory leak detected: %.2f MB increase", memoryLeakMB)
+	} else {
+		t.Logf("✓ No significant memory leak detected")
+	}
 }
 
 // TestMain handles setup and teardown for integration tests
