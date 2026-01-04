@@ -12,6 +12,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -213,15 +214,16 @@ func TestDockerEventHandling(t *testing.T) {
 
 		// Create multiple containers rapidly
 		containers := make([]string, 0, numContainers)
+		suffix := randomSuffix()
 
 		for i := 0; i < numContainers; i++ {
-			containerName := "docktunnel-test-rapid-" + randomSuffix() + "-" + string(rune('0'+i))
+			containerName := fmt.Sprintf("docktunnel-test-rapid-%s-%d", suffix, i)
 
 			containerConfig := &container.Config{
 				Image: "nginx:alpine",
 				Labels: map[string]string{
-					"docktunnel.enable":    "true",
-					"docktunnel.web.hostname": "test-rapid-" + string(rune('0'+i)) + ".example.com",
+					"docktunnel.enable":     "true",
+					"docktunnel.web.hostname": fmt.Sprintf("test-rapid-%s-%d.example.com", suffix, i),
 					"docktunnel.web.service":  "http://localhost:80",
 				},
 			}
@@ -507,13 +509,13 @@ func TestConcurrentContainerStarts(t *testing.T) {
 	t.Logf("Creating %d containers...", numContainers)
 	for i := 0; i < numContainers; i++ {
 		go func(index int) {
-			containerName := "docktunnel-test-concurrent-" + suffix + "-" + string(rune('0'+index%10))
+			containerName := fmt.Sprintf("docktunnel-test-concurrent-%s-%03d", suffix, index)
 
 			containerConfig := &container.Config{
 				Image: imageName,
 				Labels: map[string]string{
-					"docktunnel.enable":    "true",
-					"docktunnel.web.hostname": "test-concurrent-" + suffix + "-" + string(rune('0'+index%10)) + ".example.com",
+					"docktunnel.enable":     "true",
+					"docktunnel.web.hostname": fmt.Sprintf("test-concurrent-%s-%03d.example.com", suffix, index),
 					"docktunnel.web.service":  "http://localhost:80",
 				},
 			}
@@ -544,8 +546,29 @@ func TestConcurrentContainerStarts(t *testing.T) {
 	t.Logf("Container creation complete: %d succeeded, %d failed", createSuccess, createFail)
 
 	if createFail > numContainers/10 { // Allow 10% failure rate
+		t.Logf("Too many container creation failures: %d/%d", createFail, numContainers)
+		// Cleanup before failing
+		t.Log("Cleaning up containers after failure...")
+		for _, containerID := range containerIDs {
+			timeout := int(time.Second * 5)
+			dockerClient.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
+			dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		}
 		t.Fatalf("Too many container creation failures: %d/%d", createFail, numContainers)
 	}
+
+	// Ensure cleanup happens even if test fails later
+	defer func() {
+		t.Log("Cleaning up containers...")
+		cleanupStart := time.Now()
+		for _, containerID := range containerIDs {
+			timeout := int(time.Second * 5)
+			dockerClient.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
+			dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		}
+		cleanupElapsed := time.Since(cleanupStart)
+		t.Logf("Cleanup completed in %v", cleanupElapsed)
+	}()
 
 	// Start all containers concurrently
 	t.Logf("Starting %d containers...", len(containerIDs))
@@ -597,20 +620,6 @@ func TestConcurrentContainerStarts(t *testing.T) {
 	t.Log("Waiting for event processing...")
 	time.Sleep(5 * time.Second)
 
-	// Cleanup: Stop and remove all containers
-	t.Log("Cleaning up containers...")
-	cleanupStart := time.Now()
-
-	for _, containerID := range containerIDs {
-		go func(id string) {
-			timeout := int(time.Second * 5)
-			dockerClient.ContainerStop(ctx, id, container.StopOptions{Timeout: &timeout})
-			dockerClient.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
-		}(containerID)
-	}
-
-	cleanupElapsed := time.Since(cleanupStart)
-	t.Logf("Cleanup completed in %v", cleanupElapsed)
 	t.Log("Test completed successfully")
 }
 
