@@ -131,10 +131,10 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 
-			// 解析时间值
+			// 解析时间值 (T084: Cloudflare API expects nanoseconds)
 			if duration, err := time.ParseDuration(value); err == nil {
-				seconds := int64(duration.Seconds())
-				rule.OriginRequest.Value.ConnectTimeout = cloudflare.F(seconds)
+				nanoseconds := duration.Nanoseconds()
+				rule.OriginRequest.Value.ConnectTimeout = cloudflare.F(nanoseconds)
 			} else {
 				slog.Warn("Invalid connect timeout value, skipping", "value", value)
 			}
@@ -145,10 +145,10 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 
-			// 解析时间值
+			// 解析时间值 (T084: Cloudflare API expects nanoseconds)
 			if duration, err := time.ParseDuration(value); err == nil {
-				seconds := int64(duration.Seconds())
-				rule.OriginRequest.Value.TLSTimeout = cloudflare.F(seconds)
+				nanoseconds := duration.Nanoseconds()
+				rule.OriginRequest.Value.TLSTimeout = cloudflare.F(nanoseconds)
 			} else {
 				slog.Warn("Invalid TLS timeout value, skipping", "value", value)
 			}
@@ -159,10 +159,10 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 
-			// 解析时间值
+			// 解析时间值 (T084: Cloudflare API expects nanoseconds)
 			if duration, err := time.ParseDuration(value); err == nil {
-				seconds := int64(duration.Seconds())
-				rule.OriginRequest.Value.TCPKeepAlive = cloudflare.F(seconds)
+				nanoseconds := duration.Nanoseconds()
+				rule.OriginRequest.Value.TCPKeepAlive = cloudflare.F(nanoseconds)
 			} else {
 				slog.Warn("Invalid TCP keep alive value, skipping", "value", value)
 			}
@@ -197,10 +197,10 @@ func parseLabelsToIngress(containerInfo *container.InspectResponse) (map[string]
 				rule.OriginRequest = cloudflare.F(originRequest)
 			}
 
-			// 解析时间值
+			// 解析时间值 (T084: Cloudflare API expects nanoseconds)
 			if duration, err := time.ParseDuration(value); err == nil {
-				seconds := int64(duration.Seconds())
-				rule.OriginRequest.Value.KeepAliveTimeout = cloudflare.F(seconds)
+				nanoseconds := duration.Nanoseconds()
+				rule.OriginRequest.Value.KeepAliveTimeout = cloudflare.F(nanoseconds)
 			} else {
 				slog.Warn("Invalid keep alive timeout value, skipping", "value", value)
 			}

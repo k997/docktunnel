@@ -347,8 +347,8 @@ func TestParseLabelsToIngress_OriginRequestSettings(t *testing.T) {
 		return
 	}
 	
-	if !apiRule.OriginRequest.Value.ConnectTimeout.Present || apiRule.OriginRequest.Value.ConnectTimeout.Value != 5 {
-		t.Errorf("Expected connect timeout to be 5, got %d", apiRule.OriginRequest.Value.ConnectTimeout.Value)
+	if !apiRule.OriginRequest.Value.ConnectTimeout.Present || apiRule.OriginRequest.Value.ConnectTimeout.Value != 5000000000 {
+		t.Errorf("Expected connect timeout to be 5000000000 (5s in nanoseconds), got %d", apiRule.OriginRequest.Value.ConnectTimeout.Value)
 	}
 	
 	if !apiRule.OriginRequest.Value.NoTLSVerify.Present || !apiRule.OriginRequest.Value.NoTLSVerify.Value {
