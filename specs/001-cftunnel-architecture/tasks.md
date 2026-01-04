@@ -227,7 +227,7 @@
 
 - [X] T086 [P] Create integration test for Docker event handling in tests/integration/docker_events_test.go (use real Docker daemon, test container start/stop)
 - [ ] T087 [P] Create end-to-end integration test in tests/integration/end_to_end_test.go (full lifecycle: container start → tunnel created → container stop → tunnel removed)
-- [ ] T088 [P] Create integration test for concurrent container starts in tests/integration/docker_events_test.go (100 containers simultaneously)
+- [X] T088 [P] Create integration test for concurrent container starts in tests/integration/docker_events_test.go (100 containers simultaneously)
 
 ### Flapping Detection
 
