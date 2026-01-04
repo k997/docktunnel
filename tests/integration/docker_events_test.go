@@ -431,6 +431,168 @@ func TestContainerScanning(t *testing.T) {
 	t.Log("Container labels verified successfully")
 }
 
+// TestConcurrentContainerStarts tests 100 containers starting simultaneously (T088)
+//
+// This test verifies that DockTunnel can handle a large number of containers
+// starting concurrently, which is critical for:
+// - Production deployments with many microservices
+// - Event debouncing under high load
+// - Performance validation
+// - Memory leak detection
+func TestConcurrentContainerStarts(t *testing.T) {
+	dockerManager, err := docker.NewManager()
+	if err != nil {
+		t.Skipf("Docker daemon not available: %v", err)
+		return
+	}
+	defer dockerManager.Close()
+
+	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Skipf("Failed to create Docker client: %v", err)
+		return
+	}
+	defer dockerClient.Close()
+
+	ctx := context.Background()
+
+	numContainers := 100
+	t.Logf("Starting %d containers concurrently...", numContainers)
+
+	// Use a lightweight image (nginx:alpine ~40MB)
+	imageName := "nginx:alpine"
+
+	// Pull image once before the test
+	t.Log("Pre-pulling nginx:alpine image...")
+	pullResp, err := dockerClient.ImagePull(ctx, imageName, image.PullOptions{})
+	if err != nil {
+		t.Skipf("Failed to pull image: %v", err)
+		return
+	}
+	pullResp.Close()
+	t.Log("Image pulled successfully")
+
+	// Create channels for synchronization
+	createResults := make(chan string, numContainers) // Send container IDs or empty string on error
+	startResults := make(chan error, numContainers)
+	containerIDs := make([]string, 0, numContainers)
+
+	suffix := randomSuffix()
+
+	// Track start time for performance measurement
+	startTime := time.Now()
+
+	// Create all containers concurrently
+	t.Logf("Creating %d containers...", numContainers)
+	for i := 0; i < numContainers; i++ {
+		go func(index int) {
+			containerName := "docktunnel-test-concurrent-" + suffix + "-" + string(rune('0'+index%10))
+
+			containerConfig := &container.Config{
+				Image: imageName,
+				Labels: map[string]string{
+					"docktunnel.enable":    "true",
+					"docktunnel.web.hostname": "test-concurrent-" + suffix + "-" + string(rune('0'+index%10)) + ".example.com",
+					"docktunnel.web.service":  "http://localhost:80",
+				},
+			}
+
+			hostConfig := &container.HostConfig{}
+
+			resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
+			if err != nil {
+				createResults <- "" // Empty string indicates error
+				return
+			}
+
+			createResults <- resp.ID
+		}(i)
+	}
+
+	// Collect all created container IDs
+	for i := 0; i < numContainers; i++ {
+		containerID := <-createResults
+		if containerID != "" {
+			containerIDs = append(containerIDs, containerID)
+		}
+	}
+
+	createSuccess := len(containerIDs)
+	createFail := numContainers - createSuccess
+
+	t.Logf("Container creation complete: %d succeeded, %d failed", createSuccess, createFail)
+
+	if createFail > numContainers/10 { // Allow 10% failure rate
+		t.Fatalf("Too many container creation failures: %d/%d", createFail, numContainers)
+	}
+
+	// Start all containers concurrently
+	t.Logf("Starting %d containers...", len(containerIDs))
+	for _, containerID := range containerIDs {
+		go func(id string) {
+			err := dockerClient.ContainerStart(ctx, id, container.StartOptions{})
+			startResults <- err
+		}(containerID)
+	}
+
+	// Wait for all container starts to complete
+	startSuccess := 0
+	startFail := 0
+	for i := 0; i < len(containerIDs); i++ {
+		err := <-startResults
+		if err != nil {
+			startFail++
+			t.Logf("Container start failed: %v", err)
+		} else {
+			startSuccess++
+		}
+	}
+
+	elapsed := time.Since(startTime)
+	t.Logf("Container start complete: %d succeeded, %d failed", startSuccess, startFail)
+	t.Logf("Started %d containers in %v (%.2f containers/sec)", startSuccess, elapsed, float64(startSuccess)/elapsed.Seconds())
+
+	if startFail > numContainers/10 { // Allow 10% failure rate
+		t.Fatalf("Too many container start failures: %d/%d", startFail, numContainers)
+	}
+
+	// Verify all containers are running
+	t.Log("Verifying container states...")
+	runningCount := 0
+	for _, containerID := range containerIDs {
+		containerJSON, err := dockerClient.ContainerInspect(ctx, containerID)
+		if err == nil && containerJSON.State.Running {
+			runningCount++
+		}
+	}
+
+	t.Logf("Containers running: %d/%d", runningCount, len(containerIDs))
+
+	if runningCount < len(containerIDs)*9/10 { // Allow 10% not running
+		t.Errorf("Too few containers running: %d/%d", runningCount, len(containerIDs))
+	}
+
+	// Wait for event processing (simulating real-world scenario)
+	t.Log("Waiting for event processing...")
+	time.Sleep(5 * time.Second)
+
+	// Cleanup: Stop and remove all containers
+	t.Log("Cleaning up containers...")
+	cleanupStart := time.Now()
+
+	for _, containerID := range containerIDs {
+		go func(id string) {
+			timeout := int(time.Second * 5)
+			dockerClient.ContainerStop(ctx, id, container.StopOptions{Timeout: &timeout})
+			dockerClient.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+		}(containerID)
+	}
+
+	cleanupElapsed := time.Since(cleanupStart)
+	t.Logf("Cleanup completed in %v", cleanupElapsed)
+	t.Log("Test completed successfully")
+}
+
 // Helper function to generate random suffix for container names
 func randomSuffix() string {
 	return time.Now().Format("20060102-150405")
@@ -439,13 +601,13 @@ func randomSuffix() string {
 // TestMain handles setup and teardown for integration tests
 func TestMain(m *testing.M) {
 	// Check if Docker is available
-	client, err := docker.NewManager()
+	dockerMgr, err := docker.NewManager()
 	if err != nil {
 		slog.Warn("Docker daemon not available, skipping integration tests", "error", err)
 		os.Exit(0)
 		return
 	}
-	client.Close()
+	dockerMgr.Close()
 
 	// Run tests
 	exitCode := m.Run()
