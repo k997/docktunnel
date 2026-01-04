@@ -34,8 +34,8 @@ DockTunnel 采用 **事件驱动 + 状态协调** 的架构模式：
 └─────────────────┘    └─────────────────┘    └─────────────────┘
          │                       │                       │
          │              ┌─────────────────┐              │
-         │              │     Config     │              │
-         │              │     Manager    │              │
+         │              │     Config      │              │
+         │              │     Manager     │              │
          │              └─────────────────┘              │
          │                       │                       │
          └───────────────────────────────────────────────┘
@@ -208,40 +208,40 @@ docktunnel.<service-name>.<attribute>
 
 | 标签 | 类型 | 说明 |
 |------|------|------|
-| `docktunnel.<name>.no_tls_verify` | boolean | 跳过 TLS 验证（允许自签名证书） |
-| `docktunnel.<name>.origin_server_name` | string | TLS 握手的 SNI 域名 |
-| `docktunnel.<name>.match_sni_to_host` | boolean | 自动将 Hostname 设置为 SNI |
-| `docktunnel.<name>.ca_pool` | string | CA 证书路径（需挂载到容器） |
+| `docktunnel.<name>.originRequest.noTLSVerify` | boolean | 跳过 TLS 验证（允许自签名证书） |
+| `docktunnel.<name>.originRequest.originServerName` | string | TLS 握手的 SNI 域名 |
+| `docktunnel.<name>.originRequest.matchSniToHost` | boolean | 自动将 Hostname 设置为 SNI |
+| `docktunnel.<name>.originRequest.caPool` | string | CA 证书路径（需挂载到容器） |
 
 #### 超时设置
 
 | 标签 | 类型 | 说明 | 默认值 |
 |------|------|------|--------|
-| `docktunnel.<name>.connect_timeout` | duration | TCP 连接超时 | `30s` |
-| `docktunnel.<name>.tls_timeout` | duration | TLS 握手超时 | `10s` |
-| `docktunnel.<name>.tcp_keep_alive` | duration | TCP 保活探测间隔 | `30s` |
+| `docktunnel.<name>.originRequest.connectTimeout` | duration | TCP 连接超时 | `30s` |
+| `docktunnel.<name>.originRequest.tlsTimeout` | duration | TLS 握手超时 | `10s` |
+| `docktunnel.<name>.originRequest.tcpKeepAlive` | duration | TCP 保活探测间隔 | `30s` |
 
 #### 连接池设置
 
 | 标签 | 类型 | 说明 | 默认值 |
 |------|------|------|--------|
-| `docktunnel.<name>.keep_alive_conns` | int | 最大空闲连接数 | `100` |
-| `docktunnel.<name>.keep_alive_timeout` | duration | 空闲连接保持时间 | `1m30s` |
+| `docktunnel.<name>.originRequest.keepAliveConnections` | int | 最大空闲连接数 | `100` |
+| `docktunnel.<name>.originRequest.keepAliveTimeout` | duration | 空闲连接保持时间 | `1m30s` |
 
 #### HTTP 设置
 
 | 标签 | 类型 | 说明 |
 |------|------|------|
-| `docktunnel.<name>.http_host_header` | string | 强制重写 Host Header |
-| `docktunnel.<name>.http2_origin` | boolean | 启用 HTTP/2（gRPC 服务必须） |
-| `docktunnel.<name>.disable_chunked_encoding` | boolean | 禁用分块传输编码 |
+| `docktunnel.<name>.originRequest.httpHostHeader` | string | 强制重写 Host Header |
+| `docktunnel.<name>.originRequest.http2Origin` | boolean | 启用 HTTP/2（gRPC 服务必须） |
+| `docktunnel.<name>.originRequest.disableChunkedEncoding` | boolean | 禁用分块传输编码 |
 
 #### 代理设置
 
 | 标签 | 类型 | 说明 |
 |------|------|------|
-| `docktunnel.<name>.proxy_type` | string | 代理类型（通常留空或 `socks`） |
-| `docktunnel.<name>.no_happy_eyeballs` | boolean | 禁用 Happy Eyeballs 算法 |
+| `docktunnel.<name>.originRequest.proxyType` | string | 代理类型（通常留空或 `socks`） |
+| `docktunnel.<name>.originRequest.noHappyEyeballs` | boolean | 禁用 Happy Eyeballs 算法 |
 
 #### Cloudflare Access（Zero Trust）
 
@@ -278,9 +278,9 @@ docker run -d \
   -l docktunnel.web.hostname=app.example.com \
   -l docktunnel.web.service=http://172.17.0.2:8080 \
   -l docktunnel.web.path=/api \
-  -l docktunnel.web.no_tls_verify=true \
-  -l docktunnel.web.connect_timeout=30s \
-  -l docktunnel.web.keep_alive_conns=50 \
+  -l docktunnel.web.originRequest.noTLSVerify=true \
+  -l docktunnel.web.originRequest.connectTimeout=30s \
+  -l docktunnel.web.originRequest.keepAliveConnections=50 \
   -l docktunnel.web.access.required=true \
   -l docktunnel.web.access.team_name=myteam \
   nginx:latest
@@ -320,7 +320,7 @@ docker run -d \
   -l docktunnel.api.hostname=api.example.com \
   -l docktunnel.api.service=http://localhost:8080 \
   -l docktunnel.api.path=/api \
-  -l docktunnel.api.http2_origin=true \
+  -l docktunnel.api.originRequest.http2Origin=true \
   myapp:latest
 ```
 
@@ -345,9 +345,9 @@ docker run -d \
   -l docktunnel.enable=true \
   -l docktunnel.grpc.hostname=grpc.example.com \
   -l docktunnel.grpc.service=https://localhost:9090 \
-  -l docktunnel.grpc.no_tls_verify=true \
-  -l docktunnel.grpc.http2_origin=true \
-  -l docktunnel.grpc.origin_server_name=grpc.example.com \
+  -l docktunnel.grpc.originRequest.noTLSVerify=true \
+  -l docktunnel.grpc.originRequest.http2Origin=true \
+  -l docktunnel.grpc.originRequest.originServerName=grpc.example.com \
   grpc-service:latest
 ```
 
@@ -409,23 +409,23 @@ docker run -d \
   -l docktunnel.full.service=http://172.17.0.2:8080 \
   -l docktunnel.full.path=/api \
   # TLS 配置
-  -l docktunnel.full.no_tls_verify=true \
-  -l docktunnel.full.origin_server_name=origin.example.com \
-  -l docktunnel.full.ca_pool=/etc/ssl/certs/ca.pem \
+  -l docktunnel.full.originRequest.noTLSVerify=true \
+  -l docktunnel.full.originRequest.originServerName=origin.example.com \
+  -l docktunnel.full.originRequest.caPool=/etc/ssl/certs/ca.pem \
   # 超时配置
-  -l docktunnel.full.connect_timeout=30s \
-  -l docktunnel.full.tls_timeout=10s \
-  -l docktunnel.full.tcp_keep_alive=30s \
+  -l docktunnel.full.originRequest.connectTimeout=30s \
+  -l docktunnel.full.originRequest.tlsTimeout=10s \
+  -l docktunnel.full.originRequest.tcpKeepAlive=30s \
   # 连接池配置
-  -l docktunnel.full.keep_alive_conns=100 \
-  -l docktunnel.full.keep_alive_timeout=90s \
+  -l docktunnel.full.originRequest.keepAliveConnections=100 \
+  -l docktunnel.full.originRequest.keepAliveTimeout=90s \
   # HTTP 配置
-  -l docktunnel.full.http_host_header=full.example.com \
-  -l docktunnel.full.http2_origin=false \
-  -l docktunnel.full.disable_chunked_encoding=false \
+  -l docktunnel.full.originRequest.httpHostHeader=full.example.com \
+  -l docktunnel.full.originRequest.http2Origin=false \
+  -l docktunnel.full.originRequest.disableChunkedEncoding=false \
   # 代理配置
-  -l docktunnel.full.proxy_type=socks \
-  -l docktunnel.full.no_happy_eyeballs=false \
+  -l docktunnel.full.originRequest.proxyType=socks \
+  -l docktunnel.full.originRequest.noHappyEyeballs=false \
   # Access 配置
   -l docktunnel.full.access.required=true \
   -l docktunnel.full.access.team_name=myteam \
