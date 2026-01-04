@@ -795,6 +795,17 @@ func TestEventProcessingSLA(t *testing.T) {
 	const numIterations = 10
 
 	processingTimes := make([]time.Duration, 0, numIterations)
+	createdContainers := make([]string, 0, numIterations)
+
+	// Ensure cleanup on test exit
+	defer func() {
+		t.Log("Final cleanup: removing any remaining containers...")
+		for _, containerID := range createdContainers {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		}
+	}()
 
 	t.Logf("Running %d iterations to validate event processing SLA...", numIterations)
 
@@ -822,11 +833,13 @@ func TestEventProcessingSLA(t *testing.T) {
 			continue
 		}
 
+		// Track created container for cleanup
+		createdContainers = append(createdContainers, resp.ID)
+
 		// Start container (triggers event)
 		err = dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{})
 		if err != nil {
 			t.Logf("Warning: Iteration %d failed to start container: %v", iteration, err)
-			dockerClient.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 			continue
 		}
 
@@ -858,13 +871,26 @@ func TestEventProcessingSLA(t *testing.T) {
 
 		t.Logf("Iteration %d: Event processed in %v", iteration, processingTime)
 
-		// Cleanup
-		timeout := int(time.Second * 5)
-		dockerClient.ContainerStop(ctx, resp.ID, container.StopOptions{Timeout: &timeout})
-		dockerClient.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		// Cleanup with timeout protection
+		cleanupDone := make(chan error, 1)
+		go func() {
+			timeout := int(time.Second * 2) // Reduced timeout
+			stopErr := dockerClient.ContainerStop(ctx, resp.ID, container.StopOptions{Timeout: &timeout})
+			removeErr := dockerClient.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+			cleanupDone <- fmt.Errorf("stop: %w, remove: %w", stopErr, removeErr)
+		}()
+
+		// Wait for cleanup or timeout
+		select {
+		case <-cleanupDone:
+			// Cleanup completed
+		case <-time.After(10 * time.Second):
+			t.Logf("Warning: Iteration %d cleanup timeout, forcing removal", iteration)
+			dockerClient.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		}
 
 		// Brief pause between iterations
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	if len(processingTimes) == 0 {
