@@ -39,3 +39,11 @@ docktunnel
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Development documentation
+.claude/
+.specify/
+specs/
+*.plan.md
+label_table.csv
+gemini-plan.md
