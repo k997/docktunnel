@@ -212,7 +212,7 @@
 - [X] T081 [US6] Implement comprehensive originRequest attribute parser in internal/controller/label_parser.go (parse all docktunnel.<name>.originRequest.* labels)
 - [X] T082 [US6] Implement global defaults for OriginRequestConfig in internal/config/config.go (populate from cloudflare section of config.yaml)
 - [X] T083 [US6] Implement merge strategy for originRequest settings in internal/controller/label_parser.go (start with global defaults, override with container labels)
-- [ ] T084 [US6] Implement duration to nanoseconds conversion for Cloudflare API in internal/cloudflareManager/tunnel.go (Cloudflare expects nanoseconds for timeouts)
+- [X] T084 [US6] Implement duration to nanoseconds conversion for Cloudflare API in internal/cloudflareManager/tunnel.go (Cloudflare expects nanoseconds for timeouts)
 - [X] T085 [US6] Add comprehensive logging for originRequest configuration in internal/controller/label_parser.go (log which settings applied from defaults vs labels)
 
 **Checkpoint**: At this point, ALL user stories should be fully functional - complete enterprise-grade configuration control
