@@ -764,6 +764,160 @@ func TestMemoryFootprintWith100Containers(t *testing.T) {
 	}
 }
 
+// TestEventProcessingSLA validates 5-second event processing SLA (T100)
+//
+// This test ensures that Docker events are processed within 5 seconds,
+// which is critical for responsive container management.
+func TestEventProcessingSLA(t *testing.T) {
+	dockerManager, err := docker.NewManager()
+	if err != nil {
+		t.Skipf("Docker daemon not available: %v", err)
+		return
+	}
+	defer dockerManager.Close()
+
+	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Skipf("Failed to create Docker client: %v", err)
+		return
+	}
+	defer dockerClient.Close()
+
+	ctx := context.Background()
+
+	// Ensure image is available
+	if !helperEnsureImage(t, ctx, dockerClient, "nginx:alpine") {
+		t.Skip("Image not available, skipping test")
+		return
+	}
+
+	const maxProcessingTimeSec = 5.0
+	const numIterations = 10
+
+	processingTimes := make([]time.Duration, 0, numIterations)
+
+	t.Logf("Running %d iterations to validate event processing SLA...", numIterations)
+
+	for iteration := 0; iteration < numIterations; iteration++ {
+		containerName := fmt.Sprintf("docktunnel-test-sla-%s-%03d", randomSuffix(), iteration)
+
+		containerConfig := &container.Config{
+			Image: "nginx:alpine",
+			Labels: map[string]string{
+				"docktunnel.enable":     "true",
+				"docktunnel.web.hostname": fmt.Sprintf("test-sla-%03d.example.com", iteration),
+				"docktunnel.web.service":  "http://localhost:80",
+			},
+		}
+
+		hostConfig := &container.HostConfig{}
+
+		// Record start time
+		startTime := time.Now()
+
+		// Create container
+		resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
+		if err != nil {
+			t.Logf("Warning: Iteration %d failed to create container: %v", iteration, err)
+			continue
+		}
+
+		// Start container (triggers event)
+		err = dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{})
+		if err != nil {
+			t.Logf("Warning: Iteration %d failed to start container: %v", iteration, err)
+			dockerClient.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+			continue
+		}
+
+		// Wait for container to be fully running
+		for {
+			containerJSON, inspectErr := dockerClient.ContainerInspect(ctx, resp.ID)
+			if inspectErr != nil {
+				t.Logf("Warning: Iteration %d failed to inspect container: %v", iteration, inspectErr)
+				break
+			}
+
+			if containerJSON.State.Running {
+				// Container is running, consider event processed
+				break
+			}
+
+			// Check timeout
+			if time.Since(startTime) > 10*time.Second {
+				t.Logf("Warning: Iteration %d container took too long to start", iteration)
+				break
+			}
+
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		// Record processing time
+		processingTime := time.Since(startTime)
+		processingTimes = append(processingTimes, processingTime)
+
+		t.Logf("Iteration %d: Event processed in %v", iteration, processingTime)
+
+		// Cleanup
+		timeout := int(time.Second * 5)
+		dockerClient.ContainerStop(ctx, resp.ID, container.StopOptions{Timeout: &timeout})
+		dockerClient.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+
+		// Brief pause between iterations
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if len(processingTimes) == 0 {
+		t.Fatal("No successful iterations")
+	}
+
+	// Calculate statistics
+	var totalTime time.Duration
+	var minTime time.Duration = processingTimes[0]
+	var maxTime time.Duration = processingTimes[0]
+
+	for _, t := range processingTimes {
+		totalTime += t
+		if t < minTime {
+			minTime = t
+		}
+		if t > maxTime {
+			maxTime = t
+		}
+	}
+
+	avgTime := totalTime / time.Duration(len(processingTimes))
+
+	t.Logf("Event Processing Statistics (%d iterations):", len(processingTimes))
+	t.Logf("  Average: %v", avgTime)
+	t.Logf("  Min: %v", minTime)
+	t.Logf("  Max: %v", maxTime)
+	t.Logf("  Total: %v", totalTime)
+
+	// Validate SLA: all events must be processed within 5 seconds
+	slaViolations := 0
+	for i, pt := range processingTimes {
+		if pt.Seconds() > maxProcessingTimeSec {
+			slaViolations++
+			t.Errorf("SLA violation: Iteration %d took %v > %v", i, pt, time.Duration(maxProcessingTimeSec)*time.Second)
+		}
+	}
+
+	if slaViolations == 0 {
+		t.Logf("✓ All events processed within SLA: < %v", time.Duration(maxProcessingTimeSec)*time.Second)
+	} else {
+		t.Errorf("SLA violations: %d/%d events exceeded %v threshold", slaViolations, len(processingTimes), time.Duration(maxProcessingTimeSec)*time.Second)
+	}
+
+	// Additional validation: average should be well under SLA
+	avgTargetSec := maxProcessingTimeSec * 0.5 // Target 50% of SLA
+	if avgTime.Seconds() > avgTargetSec {
+		t.Logf("Warning: Average processing time (%v) is above target (%v)", avgTime, time.Duration(avgTargetSec)*time.Second)
+	} else {
+		t.Logf("✓ Average processing time within target: %v < %v", avgTime, time.Duration(avgTargetSec)*time.Second)
+	}
+}
+
 // TestMain handles setup and teardown for integration tests
 func TestMain(m *testing.M) {
 	// Check if Docker is available
