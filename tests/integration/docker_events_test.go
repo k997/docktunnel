@@ -25,6 +25,29 @@ import (
 	"log/slog"
 )
 
+// helperEnsureImage pulls an image if not already present locally
+// Returns true if image is available (either pulled or already present), false if unavailable
+func helperEnsureImage(t *testing.T, ctx context.Context, dockerClient *client.Client, imageName string) bool {
+	t.Logf("Checking %s image...", imageName)
+
+	// Try to pull the image
+	pullResp, err := dockerClient.ImagePull(ctx, imageName, image.PullOptions{})
+	if err != nil {
+		// Pull failed, check if image exists locally
+		_, inspectErr := dockerClient.ImageInspect(ctx, imageName)
+		if inspectErr != nil {
+			// Image doesn't exist locally either
+			t.Logf("Image %s not available: pull error=%v, inspect error=%v", imageName, err, inspectErr)
+			return false
+		}
+		t.Logf("Image %s pull failed (network error), but exists locally, continuing...", imageName)
+		return true
+	}
+	defer pullResp.Close()
+	t.Logf("Image %s pulled successfully", imageName)
+	return true
+}
+
 // TestDockerEventHandling tests Docker event handling with real Docker daemon (T086)
 //
 // This test verifies that:
@@ -72,14 +95,11 @@ func TestDockerEventHandling(t *testing.T) {
 			RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 		}
 
-		// Pull image if not present
-		t.Log("Pulling nginx:alpine image...")
-		pullResp, err := dockerClient.ImagePull(ctx, "nginx:alpine", image.PullOptions{})
-		if err != nil {
-			t.Skipf("Failed to pull image: %v", err)
+		// Ensure image is available
+		if !helperEnsureImage(t, ctx, dockerClient, "nginx:alpine") {
+			t.Skip("Image not available, skipping test")
 			return
 		}
-		pullResp.Close()
 
 		// Create container
 		resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
@@ -295,13 +315,11 @@ func TestDockerEventChannel(t *testing.T) {
 
 	t.Log("Creating test container to trigger event...")
 
-	// Pull image first
-	pullResp, err := dockerClient.ImagePull(ctx, "nginx:alpine", image.PullOptions{})
-	if err != nil {
-		t.Skipf("Failed to pull image: %v", err)
+	// Ensure image is available
+	if !helperEnsureImage(t, ctx, dockerClient, "nginx:alpine") {
+		t.Skip("Image not available, skipping test")
 		return
 	}
-	pullResp.Close()
 
 	resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
 	if err != nil {
@@ -370,14 +388,11 @@ func TestContainerScanning(t *testing.T) {
 
 	hostConfig := &container.HostConfig{}
 
-	// Pull image
-	t.Log("Pulling nginx:alpine...")
-	pullResp, err := dockerClient.ImagePull(ctx, "nginx:alpine", image.PullOptions{})
-	if err != nil {
-		t.Skipf("Failed to pull image: %v", err)
+	// Ensure image is available
+	if !helperEnsureImage(t, ctx, dockerClient, "nginx:alpine") {
+		t.Skip("Image not available, skipping test")
 		return
 	}
-	pullResp.Close()
 
 	// Create container
 	resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
@@ -462,15 +477,21 @@ func TestConcurrentContainerStarts(t *testing.T) {
 	// Use a lightweight image (nginx:alpine ~40MB)
 	imageName := "nginx:alpine"
 
-	// Pull image once before the test
-	t.Log("Pre-pulling nginx:alpine image...")
+	// Pull image once before the test (or verify it exists locally)
+	t.Log("Checking nginx:alpine image...")
 	pullResp, err := dockerClient.ImagePull(ctx, imageName, image.PullOptions{})
 	if err != nil {
-		t.Skipf("Failed to pull image: %v", err)
-		return
+		// Check if image exists locally
+		_, inspectErr := dockerClient.ImageInspect(ctx, imageName)
+		if inspectErr != nil {
+			t.Skipf("Failed to pull image and image not found locally: pull error=%v, inspect error=%v", err, inspectErr)
+			return
+		}
+		t.Log("Image pull failed (network error), but image exists locally, continuing...")
+	} else {
+		pullResp.Close()
+		t.Log("Image pulled successfully")
 	}
-	pullResp.Close()
-	t.Log("Image pulled successfully")
 
 	// Create channels for synchronization
 	createResults := make(chan string, numContainers) // Send container IDs or empty string on error
