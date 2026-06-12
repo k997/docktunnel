@@ -254,4 +254,7 @@ func RegisterGobTypes() {
 	gob.Register(types.FlappingState{})
 	gob.Register(map[string]*types.TunnelEntry{})
 	gob.Register(map[string]types.FlappingState{})
+	gob.Register(types.TransitionEvent(0))
+	gob.Register(types.ActionKind(0))
+	gob.Register(types.Action{})
 }

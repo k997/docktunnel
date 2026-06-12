@@ -426,6 +426,15 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 	sm.pendingDeletes = snapshot.PendingDeletions
 	sm.flappingContainers = snapshot.FlappingContainers
 
+	// Migrate Phase 1 PendingDelete entries with Timed/Forever to StatusRetaining
+	for _, entry := range sm.pendingDeletes {
+		if entry.Status == types.StatusPendingDelete {
+			if entry.RetentionPolicy.Type == types.Timed || entry.RetentionPolicy.Type == types.Forever {
+				entry.Status = types.StatusRetaining
+			}
+		}
+	}
+
 	sm.logger.Info("Loaded state from snapshot",
 		"version", snapshot.Version,
 		"timestamp", snapshot.Timestamp,

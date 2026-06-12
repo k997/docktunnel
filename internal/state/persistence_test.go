@@ -85,11 +85,11 @@ func TestSaveAndLoadGob(t *testing.T) {
 	assert.Equal(t, "active.example.com", loadedActive.Config.Hostname)
 	assert.Equal(t, types.StatusActive, loadedActive.Status)
 
-	// Verify pending deletions were restored
+	// Verify pending deletions were restored and migrated
 	loadedPending, ok := sm2.GetPendingDeletion("pending-1")
 	assert.True(t, ok, "Pending deletion should be loaded")
 	assert.Equal(t, "pending-1", loadedPending.ContainerID)
-	assert.Equal(t, types.StatusPendingDelete, loadedPending.Status)
+	assert.Equal(t, types.StatusRetaining, loadedPending.Status) // Should be migrated from PendingDelete to Retaining
 	assert.Equal(t, types.Timed, loadedPending.RetentionPolicy.Type)
 
 	// Verify flapping state was restored

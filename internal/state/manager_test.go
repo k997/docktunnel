@@ -712,3 +712,44 @@ func TestRunGC_PendingDelete_CleanedUp(t *testing.T) {
 		t.Error("PendingDelete entry should be removed")
 	}
 }
+
+func TestLoadFromSnapshot_MigratesPendingDeleteToRetaining(t *testing.T) {
+	sm := NewManager(slog.Default())
+	now := time.Now()
+
+	snapshot := &types.StateSnapshot{
+		Version: 1,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"c2": {ContainerID: "c2", Status: types.StatusActive},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{
+			"c1:web": {
+				ContainerID:     "c1",
+				ServiceName:     "web",
+				Status:          types.StatusPendingDelete, // Phase 1 status
+				RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+				DeletedAt:       &now,
+			},
+			"c3:api": {
+				ContainerID:     "c3",
+				ServiceName:     "api",
+				Status:          types.StatusPendingDelete, // Phase 1 status
+				RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+			},
+		},
+	}
+
+	sm.LoadFromSnapshot(snapshot)
+
+	// Timed should be migrated to Retaining
+	entry, _ := sm.GetPendingDeletion("c1")
+	if entry.Status != types.StatusRetaining {
+		t.Errorf("Timed entry should be migrated to StatusRetaining, got %d", entry.Status)
+	}
+
+	// Immediate should stay PendingDelete
+	entry3, _ := sm.GetPendingDeletion("c3")
+	if entry3.Status != types.StatusPendingDelete {
+		t.Errorf("Immediate entry should stay StatusPendingDelete, got %d", entry3.Status)
+	}
+}
