@@ -87,7 +87,7 @@ func TestDockerEventHandling(t *testing.T) {
 		containerConfig := &container.Config{
 			Image: "nginx:alpine",
 			Labels: map[string]string{
-				"docktunnel.enable":   "true",
+				"docktunnel.enable":       "true",
 				"docktunnel.web.hostname": "test-start.example.com",
 				"docktunnel.web.service":  "http://localhost:80",
 			},
@@ -153,7 +153,7 @@ func TestDockerEventHandling(t *testing.T) {
 		containerConfig := &container.Config{
 			Image: "nginx:alpine",
 			Labels: map[string]string{
-				"docktunnel.enable":   "true",
+				"docktunnel.enable":       "true",
 				"docktunnel.web.hostname": "test-stop.example.com",
 				"docktunnel.web.service":  "http://localhost:80",
 			},
@@ -223,7 +223,7 @@ func TestDockerEventHandling(t *testing.T) {
 			containerConfig := &container.Config{
 				Image: "nginx:alpine",
 				Labels: map[string]string{
-					"docktunnel.enable":     "true",
+					"docktunnel.enable":       "true",
 					"docktunnel.web.hostname": fmt.Sprintf("test-rapid-%s-%d.example.com", suffix, i),
 					"docktunnel.web.service":  "http://localhost:80",
 				},
@@ -381,9 +381,9 @@ func TestContainerScanning(t *testing.T) {
 	containerConfig := &container.Config{
 		Image: "nginx:alpine",
 		Labels: map[string]string{
-			"docktunnel.enable":    "true",
-			"docktunnel.web.hostname":  "test-scan.example.com",
-			"docktunnel.web.service":   "http://localhost:80",
+			"docktunnel.enable":                           "true",
+			"docktunnel.web.hostname":                     "test-scan.example.com",
+			"docktunnel.web.service":                      "http://localhost:80",
 			"docktunnel.web.originRequest.connectTimeout": "30s",
 			"docktunnel.web.originRequest.noTLSVerify":    "true",
 		},
@@ -515,7 +515,7 @@ func TestConcurrentContainerStarts(t *testing.T) {
 			containerConfig := &container.Config{
 				Image: imageName,
 				Labels: map[string]string{
-					"docktunnel.enable":     "true",
+					"docktunnel.enable":       "true",
 					"docktunnel.web.hostname": fmt.Sprintf("test-concurrent-%s-%03d.example.com", suffix, index),
 					"docktunnel.web.service":  "http://localhost:80",
 				},
@@ -674,7 +674,7 @@ func TestMemoryFootprintWith100Containers(t *testing.T) {
 		containerConfig := &container.Config{
 			Image: "nginx:alpine",
 			Labels: map[string]string{
-				"docktunnel.enable":     "true",
+				"docktunnel.enable":       "true",
 				"docktunnel.web.hostname": fmt.Sprintf("test-mem-%s-%03d.example.com", suffix, i),
 				"docktunnel.web.service":  "http://localhost:80",
 			},
@@ -815,7 +815,7 @@ func TestEventProcessingSLA(t *testing.T) {
 		containerConfig := &container.Config{
 			Image: "nginx:alpine",
 			Labels: map[string]string{
-				"docktunnel.enable":     "true",
+				"docktunnel.enable":       "true",
 				"docktunnel.web.hostname": fmt.Sprintf("test-sla-%03d.example.com", iteration),
 				"docktunnel.web.service":  "http://localhost:80",
 			},

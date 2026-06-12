@@ -9,10 +9,10 @@ import (
 
 func TestDecodeTraefikToSpecs_HTTPRouterWithService(t *testing.T) {
 	labels := map[string]string{
-		"traefik.http.routers.myapp.rule":                              "Host(`example.com`)",
-		"traefik.http.routers.myapp.service":                           "myapp-svc",
-		"traefik.http.services.myapp-svc.loadbalancer.server.port":     "8080",
-		"traefik.http.services.myapp-svc.loadbalancer.server.scheme":   "https",
+		"traefik.http.routers.myapp.rule":                            "Host(`example.com`)",
+		"traefik.http.routers.myapp.service":                         "myapp-svc",
+		"traefik.http.services.myapp-svc.loadbalancer.server.port":   "8080",
+		"traefik.http.services.myapp-svc.loadbalancer.server.scheme": "https",
 	}
 
 	containerInfo := &container.InspectResponse{
@@ -48,7 +48,7 @@ func TestDecodeTraefikToSpecs_HTTPRouterWithService(t *testing.T) {
 
 func TestDecodeTraefikToSpecs_MultipleHosts(t *testing.T) {
 	labels := map[string]string{
-		"traefik.http.routers.myapp.rule": "Host(`a.com`, `b.com`)",
+		"traefik.http.routers.myapp.rule":                      "Host(`a.com`, `b.com`)",
 		"traefik.http.services.myapp.loadbalancer.server.port": "8080",
 	}
 
@@ -67,7 +67,7 @@ func TestDecodeTraefikToSpecs_MultipleHosts(t *testing.T) {
 
 func TestDecodeTraefikToSpecs_HostAndPath(t *testing.T) {
 	labels := map[string]string{
-		"traefik.http.routers.myapp.rule": "Host(`example.com`) && Path(`/api`)",
+		"traefik.http.routers.myapp.rule":                      "Host(`example.com`) && Path(`/api`)",
 		"traefik.http.services.myapp.loadbalancer.server.port": "8080",
 	}
 
@@ -83,8 +83,8 @@ func TestDecodeTraefikToSpecs_HostAndPath(t *testing.T) {
 
 func TestDecodeTraefikToSpecs_TCPRouter(t *testing.T) {
 	labels := map[string]string{
-		"traefik.tcp.routers.ssh.rule":                         "HostSNI(`ssh.example.com`)",
-		"traefik.tcp.routers.ssh.service":                      "ssh-svc",
+		"traefik.tcp.routers.ssh.rule":                          "HostSNI(`ssh.example.com`)",
+		"traefik.tcp.routers.ssh.service":                       "ssh-svc",
 		"traefik.tcp.services.ssh-svc.loadbalancer.server.port": "2222",
 	}
 
@@ -119,7 +119,7 @@ func TestDecodeTraefikToSpecs_NoTraefikLabels(t *testing.T) {
 
 func TestDecodeTraefikToSpecs_DefaultServiceName(t *testing.T) {
 	labels := map[string]string{
-		"traefik.http.routers.myapp.rule": "Host(`example.com`)",
+		"traefik.http.routers.myapp.rule":                      "Host(`example.com`)",
 		"traefik.http.services.myapp.loadbalancer.server.port": "3000",
 	}
 

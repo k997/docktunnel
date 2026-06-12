@@ -69,7 +69,7 @@ func TestParse_TraefikOnly(t *testing.T) {
 			Labels: map[string]string{
 				"docktunnel.enable":                                    "true",
 				"traefik.http.routers.myapp.rule":                      "Host(`app.example.com`)",
-				"traefik.http.services.myapp.loadbalancer.server.port":  "8080",
+				"traefik.http.services.myapp.loadbalancer.server.port": "8080",
 			},
 		},
 		NetworkSettings: &container.NetworkSettings{
@@ -110,7 +110,7 @@ func TestParse_BothLabels_DockTunnelOverrides(t *testing.T) {
 				"docktunnel.web.hostname":                              "example.com",
 				"docktunnel.web.service":                               "http://localhost:3000",
 				"traefik.http.routers.myapp.rule":                      "Host(`example.com`)",
-				"traefik.http.services.myapp.loadbalancer.server.port":  "8080",
+				"traefik.http.services.myapp.loadbalancer.server.port": "8080",
 			},
 		},
 		NetworkSettings: &container.NetworkSettings{
@@ -145,11 +145,11 @@ func TestParse_BothLabels_NoConflict(t *testing.T) {
 		},
 		Config: &container.Config{
 			Labels: map[string]string{
-				"docktunnel.enable":                                    "true",
-				"docktunnel.web.hostname":                              "web.example.com",
-				"docktunnel.web.service":                               "http://localhost:8080",
-				"traefik.http.routers.api.rule":                        "Host(`api.example.com`)",
-				"traefik.http.services.api.loadbalancer.server.port":    "3000",
+				"docktunnel.enable":                                  "true",
+				"docktunnel.web.hostname":                            "web.example.com",
+				"docktunnel.web.service":                             "http://localhost:8080",
+				"traefik.http.routers.api.rule":                      "Host(`api.example.com`)",
+				"traefik.http.services.api.loadbalancer.server.port": "3000",
 			},
 		},
 		NetworkSettings: &container.NetworkSettings{

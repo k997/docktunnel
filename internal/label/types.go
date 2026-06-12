@@ -75,18 +75,18 @@ type ServiceConfig struct {
 	TLSTimeout             string
 	TCPKeepAlive           string
 	KeepAliveConnections   string
-	KeepAliveTimeout      string
+	KeepAliveTimeout       string
 	NoHappyEyeballs        string
-	NoTLSVerify           string
-	HTTP2Origin           string
+	NoTLSVerify            string
+	HTTP2Origin            string
 	DisableChunkedEncoding string
 	HTTPHostHeader         string
-	OriginServerName      string
-	CAPool                string
-	ProxyType             string
-	ProxyAddress          string
-	ProxyPort             string
-	MatchSNItoHost        string
+	OriginServerName       string
+	CAPool                 string
+	ProxyType              string
+	ProxyAddress           string
+	ProxyPort              string
+	MatchSNItoHost         string
 
 	// Access fields
 	AccessRequired string
@@ -112,20 +112,20 @@ type OriginRequestSpec struct {
 	ConnectTimeout         *time.Duration
 	TLSTimeout             *time.Duration
 	TCPKeepAlive           *time.Duration
-	KeepAliveConnections  *int64
-	KeepAliveTimeout      *time.Duration
-	NoHappyEyeballs       *bool
-	NoTLSVerify           *bool
-	OriginServerName      string
-	CAPool                string
-	HTTP2Origin           *bool
-	HTTPHostHeader        string
+	KeepAliveConnections   *int64
+	KeepAliveTimeout       *time.Duration
+	NoHappyEyeballs        *bool
+	NoTLSVerify            *bool
+	OriginServerName       string
+	CAPool                 string
+	HTTP2Origin            *bool
+	HTTPHostHeader         string
 	DisableChunkedEncoding *bool
-	ProxyType             string
-	ProxyAddress          string
-	ProxyPort             *int
-	MatchSNItoHost        *bool
-	Access                *AccessSpec
+	ProxyType              string
+	ProxyAddress           string
+	ProxyPort              *int
+	MatchSNItoHost         *bool
+	Access                 *AccessSpec
 }
 
 // AccessSpec holds Cloudflare Access configuration.

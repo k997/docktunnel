@@ -104,7 +104,7 @@ func TestEndToEndLifecycle(t *testing.T) {
 	containerConfig := &container.Config{
 		Image: "nginx:alpine",
 		Labels: map[string]string{
-			"docktunnel.enable":     "true",
+			"docktunnel.enable":       "true",
 			"docktunnel.web.hostname": "e2e-test-" + randomSuffix() + ".example.com",
 			"docktunnel.web.service":  "http://localhost:80",
 		},
@@ -239,7 +239,7 @@ func TestContainerLifecycleWithoutCloudflare(t *testing.T) {
 	containerConfig := &container.Config{
 		Image: "nginx:alpine",
 		Labels: map[string]string{
-			"docktunnel.enable":     "true",
+			"docktunnel.enable":       "true",
 			"docktunnel.web.hostname": "lifecycle-test-" + randomSuffix() + ".example.com",
 			"docktunnel.web.service":  "http://localhost:80",
 		},

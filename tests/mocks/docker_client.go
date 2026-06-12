@@ -11,19 +11,19 @@ import (
 
 // MockDockerClient is a mock implementation of the Docker API client
 type MockDockerClient struct {
-	Containers map[string]*types.ContainerJSON
-	EventChan  chan events.Message
-	ErrorChan  chan error
+	Containers  map[string]*types.ContainerJSON
+	EventChan   chan events.Message
+	ErrorChan   chan error
 	ShouldDelay bool
-	Delay      time.Duration
+	Delay       time.Duration
 }
 
 // NewMockDockerClient creates a new mock Docker client
 func NewMockDockerClient() *MockDockerClient {
 	return &MockDockerClient{
-		Containers: make(map[string]*types.ContainerJSON),
-		EventChan:  make(chan events.Message, 100),
-		ErrorChan:  make(chan error, 1),
+		Containers:  make(map[string]*types.ContainerJSON),
+		EventChan:   make(chan events.Message, 100),
+		ErrorChan:   make(chan error, 1),
 		ShouldDelay: false,
 	}
 }

@@ -25,9 +25,9 @@ func TestDecodeToNode_SingleLabel(t *testing.T) {
 
 func TestDecodeToNode_FilterSkipsNonMatching(t *testing.T) {
 	labels := map[string]string{
-		"traefik.http.routers.myapp.rule":  "Host(`example.com`)",
-		"traefik.tcp.routers.myapp.rule":   "HostSNI(`ssh.com`)",
-		"com.docker.compose.service":       "myapp",
+		"traefik.http.routers.myapp.rule": "Host(`example.com`)",
+		"traefik.tcp.routers.myapp.rule":  "HostSNI(`ssh.com`)",
+		"com.docker.compose.service":      "myapp",
 	}
 
 	node, err := DecodeToNode(labels, "traefik", "traefik.http")

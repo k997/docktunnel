@@ -8,11 +8,11 @@ import (
 
 // MockCloudflareClient is a mock implementation of the Cloudflare API client
 type MockCloudflareClient struct {
-	Tunnels      map[string]*types.TunnelEntry
-	Configs      map[string]string // tunnelID -> config
-	CallCount    int
-	ShouldFail   bool
-	FailAfter    int
+	Tunnels    map[string]*types.TunnelEntry
+	Configs    map[string]string // tunnelID -> config
+	CallCount  int
+	ShouldFail bool
+	FailAfter  int
 }
 
 // NewMockCloudflareClient creates a new mock Cloudflare client

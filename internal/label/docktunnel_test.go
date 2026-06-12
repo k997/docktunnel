@@ -30,12 +30,12 @@ func TestDecodeDockTunnel_BasicService(t *testing.T) {
 
 func TestDecodeDockTunnel_MultipleServices(t *testing.T) {
 	labels := map[string]string{
-		"docktunnel.enable":         "true",
-		"docktunnel.web.hostname":   "web.example.com",
-		"docktunnel.web.service":    "http://localhost:8080",
-		"docktunnel.api.hostname":   "api.example.com",
-		"docktunnel.api.service":    "http://localhost:3000",
-		"docktunnel.api.path":       "/v1",
+		"docktunnel.enable":       "true",
+		"docktunnel.web.hostname": "web.example.com",
+		"docktunnel.web.service":  "http://localhost:8080",
+		"docktunnel.api.hostname": "api.example.com",
+		"docktunnel.api.service":  "http://localhost:3000",
+		"docktunnel.api.path":     "/v1",
 	}
 
 	services := decodeDockTunnel(labels)
@@ -54,13 +54,13 @@ func TestDecodeDockTunnel_MultipleServices(t *testing.T) {
 
 func TestDecodeDockTunnel_OriginRequest(t *testing.T) {
 	labels := map[string]string{
-		"docktunnel.enable":                                "true",
-		"docktunnel.web.hostname":                          "example.com",
-		"docktunnel.web.originRequest.connectTimeout":     "30s",
-		"docktunnel.web.originRequest.noTLSVerify":        "true",
-		"docktunnel.web.originRequest.proxyAddress":       "127.0.0.1",
-		"docktunnel.web.originRequest.proxyPort":          "9050",
-		"docktunnel.web.originRequest.matchSNItoHost":     "true",
+		"docktunnel.enable":                           "true",
+		"docktunnel.web.hostname":                     "example.com",
+		"docktunnel.web.originRequest.connectTimeout": "30s",
+		"docktunnel.web.originRequest.noTLSVerify":    "true",
+		"docktunnel.web.originRequest.proxyAddress":   "127.0.0.1",
+		"docktunnel.web.originRequest.proxyPort":      "9050",
+		"docktunnel.web.originRequest.matchSNItoHost": "true",
 	}
 
 	services := decodeDockTunnel(labels)
@@ -85,11 +85,11 @@ func TestDecodeDockTunnel_OriginRequest(t *testing.T) {
 
 func TestDecodeDockTunnel_AccessConfig(t *testing.T) {
 	labels := map[string]string{
-		"docktunnel.enable":                              "true",
-		"docktunnel.api.hostname":                        "api.example.com",
-		"docktunnel.api.originRequest.access.required":   "true",
-		"docktunnel.api.originRequest.access.teamName":   "my-team",
-		"docktunnel.api.originRequest.access.audTag":     "tag1, tag2",
+		"docktunnel.enable":                            "true",
+		"docktunnel.api.hostname":                      "api.example.com",
+		"docktunnel.api.originRequest.access.required": "true",
+		"docktunnel.api.originRequest.access.teamName": "my-team",
+		"docktunnel.api.originRequest.access.audTag":   "tag1, tag2",
 	}
 
 	services := decodeDockTunnel(labels)
@@ -108,11 +108,11 @@ func TestDecodeDockTunnel_AccessConfig(t *testing.T) {
 
 func TestDecodeDockTunnel_SkipsNonDockTunnelLabels(t *testing.T) {
 	labels := map[string]string{
-		"traefik.enable":                         "true",
-		"traefik.http.routers.myapp.rule":        "Host(`example.com`)",
-		"com.docker.compose.service":             "myapp",
-		"docktunnel.enable":                      "true",
-		"docktunnel.web.hostname":                "web.example.com",
+		"traefik.enable":                  "true",
+		"traefik.http.routers.myapp.rule": "Host(`example.com`)",
+		"com.docker.compose.service":      "myapp",
+		"docktunnel.enable":               "true",
+		"docktunnel.web.hostname":         "web.example.com",
 	}
 
 	services := decodeDockTunnel(labels)

@@ -26,6 +26,6 @@ func New(level, format string) *slog.Logger {
 	} else {
 		handler = slog.NewTextHandler(os.Stdout, opts)
 	}
-	
+
 	return slog.New(handler)
 }

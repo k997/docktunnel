@@ -12,16 +12,16 @@ func TestNewManager(t *testing.T) {
 
 	// 测试创建Cloudflare管理器
 	opts := ManagerOptions{
-		AccountID:  "test-account-id",
-		APIToken:   "test-api-token",
-		TunnelID:   "",
-		TunnelName: "",
-		RateLimit:  10,
-		MaxRetries: 3,
-		RetryDelay: 1 * time.Second,
+		AccountID:     "test-account-id",
+		APIToken:      "test-api-token",
+		TunnelID:      "",
+		TunnelName:    "",
+		RateLimit:     10,
+		MaxRetries:    3,
+		RetryDelay:    1 * time.Second,
 		MaxRetryDelay: 30 * time.Second,
 	}
-	
+
 	manager, err := NewManager(opts)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
@@ -38,8 +38,8 @@ func TestNewManager(t *testing.T) {
 func TestNewManagerWithInvalidConfig(t *testing.T) {
 	// 测试使用无效配置创建Cloudflare管理器（仅测试参数验证）
 	testCases := []struct {
-		name  string
-		opts  ManagerOptions
+		name string
+		opts ManagerOptions
 	}{
 		{
 			name: "Empty account ID",
