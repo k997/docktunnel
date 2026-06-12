@@ -137,18 +137,28 @@ func main() {
 		appLogger.Info("Initial synchronization completed successfully")
 	}
 
-	// 启动垃圾回收定时器 (T062) - 每60秒运行一次
+	// 启动垃圾回收和对账定时器 (T062)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
+
+		gcTicker := time.NewTicker(60 * time.Second)
+		defer gcTicker.Stop()
+
+		// Reconcile ticker (separate from GC for independent interval control)
+		var reconcileTicker *time.Ticker
+		if controller.ReconcileEnabled() {
+			reconcileTicker = time.NewTicker(controller.ReconcileInterval())
+			defer reconcileTicker.Stop()
+			appLogger.Info("Starting reconcile ticker",
+				"interval", controller.ReconcileInterval())
+		}
 
 		appLogger.Info("Starting garbage collection ticker", "interval", "60s")
 
 		for {
 			select {
-			case <-ticker.C:
+			case <-gcTicker.C:
 				appLogger.Debug("Running garbage collection for expired retention policies")
 				if err := controller.RunGarbageCollection(ctx); err != nil {
 					appLogger.Error("Garbage collection failed", "error", err)
@@ -157,8 +167,15 @@ func main() {
 				if err := controller.SaveStateIfDirty(); err != nil {
 					appLogger.Error("Failed to save state", "error", err)
 				}
+
+			case <-reconcileTicker.C:
+				appLogger.Debug("Running periodic reconciliation")
+				if err := controller.Reconcile(ctx); err != nil {
+					appLogger.Error("Periodic reconciliation failed", "error", err)
+				}
+
 			case <-ctx.Done():
-				appLogger.Info("Garbage collection ticker stopped")
+				appLogger.Info("Garbage collection and reconcile ticker stopped")
 				return
 			}
 		}
@@ -189,24 +206,45 @@ shutdown:
 		appLogger.Warn("Failed to save state before shutdown", "error", err)
 	}
 
-	// 取消上下文以通知所有goroutine关闭
+	// Cancel context to notify all goroutines to stop
 	cancel()
 
-	// 如果配置要求清理资源，则执行清理操作
-	if cfg.Cleanup.OnExit {
-		// Use a fresh context for cleanup — the main ctx is already cancelled
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Execute cleanup based on configured strategy
+	switch cfg.Cleanup.Strategy {
+	case "fast-exit":
+		appLogger.Info("Fast exit requested, skipping resource cleanup")
+	case "graceful-cleanup":
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), cfg.Cleanup.Timeout)
 		defer cleanupCancel()
 
-		appLogger.Info("Cleaning up resources as requested in configuration")
+		appLogger.Info("Graceful cleanup requested",
+			"timeout", cfg.Cleanup.Timeout)
+
 		if err := controller.CleanupResources(cleanupCtx); err != nil {
-			appLogger.Error("Failed to cleanup resources", "error", err)
+			if cleanupCtx.Err() == context.DeadlineExceeded {
+				// Collect remaining hostnames for diagnostic logging
+				rules := controller.GetIngressRules()
+				var remaining []string
+				for _, rule := range rules {
+					if rule.Hostname.Value != "" && rule.Service.Value != "http_status:404" {
+						remaining = append(remaining, rule.Hostname.Value)
+					}
+				}
+				appLogger.Warn("Cleanup timed out",
+					"remaining_hostnames", remaining,
+					"timeout", cfg.Cleanup.Timeout)
+			} else {
+				appLogger.Error("Failed to cleanup resources", "error", err)
+			}
 		} else {
 			appLogger.Info("Resources cleaned up successfully")
 		}
+	default:
+		appLogger.Info("Unknown cleanup strategy, skipping cleanup",
+			"strategy", cfg.Cleanup.Strategy)
 	}
 
-	// 等待所有goroutine完成
+	// Wait for all goroutines to finish
 	wg.Wait()
 
 	// Write memory profile if requested (T101)
