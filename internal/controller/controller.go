@@ -221,21 +221,8 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	}
 	slog.Info("Handling container start event", "containerID", event.ContainerID)
 
-	// Check if container is restarting from pending deletion (T064)
-	if _, pending := c.stateManager.GetPendingDeletion(event.ContainerID); pending {
-		slog.Info("Container restarting during retention period, canceling retention timer",
-			"containerID", event.ContainerID)
-
-		// Restore to active state
-		if err := c.stateManager.RestoreActiveTunnel(event.ContainerID); err != nil {
-			slog.Warn("Failed to restore active tunnel for container",
-				"containerID", event.ContainerID,
-				"error", err)
-		}
-
-		// Container will continue through normal start flow
-		// to recreate containerRules and ingressRules entries
-	}
+	// Restore from Retaining/PendingDelete via state machine
+	c.stateManager.Transition(event.ContainerID, types.EventContainerStarted, nil)
 
 	// 检查容器是否处于抖动状态
 	if c.isFlapping(event.ContainerID) {

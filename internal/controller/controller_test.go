@@ -800,3 +800,64 @@ func TestStop_Timed_KeepsRouteViaTransition(t *testing.T) {
 		t.Errorf("expected StatusRetaining, got %d", pending.Status)
 	}
 }
+
+func TestStart_RestoresFromRetainingViaTransition(t *testing.T) {
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "test-tunnel"},
+	}, ControllerOptions{
+		DebounceDuration: 2 * time.Second,
+	})
+
+	// Set up: container in Retaining state (stopped with Timed retention)
+	past := time.Now().Add(-30 * time.Minute)
+	ctrl.stateManager.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+		DeletedAt:       &past,
+	})
+
+	containerInfo := &containerTypes.InspectResponse{
+		ContainerJSONBase: &containerTypes.ContainerJSONBase{
+			HostConfig: &containerTypes.HostConfig{NetworkMode: "bridge"},
+		},
+		Config: &containerTypes.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":       "true",
+				"docktunnel.web.hostname": "app.example.com",
+				"docktunnel.web.service":  "http://localhost:8080",
+			},
+		},
+		NetworkSettings: &containerTypes.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	startEvent := events.Event{Type: "start", ContainerID: "c1", ContainerInfo: containerInfo}
+	err := ctrl.Dispatch(context.Background(), startEvent)
+	if err != nil {
+		t.Fatalf("start dispatch failed: %v", err)
+	}
+
+	// Should be in active tunnels now
+	entry, exists := ctrl.stateManager.GetActiveTunnel("c1")
+	if !exists {
+		t.Fatal("expected entry in active tunnels after restart")
+	}
+	if entry.Status != types.StatusActive {
+		t.Errorf("expected StatusActive, got %d", entry.Status)
+	}
+	if entry.DeletedAt != nil {
+		t.Error("DeletedAt should be nil after restoration")
+	}
+
+	// Should NOT be in pending deletes
+	_, pendingExists := ctrl.stateManager.GetPendingDeletion("c1")
+	if pendingExists {
+		t.Error("entry should not be in pending deletes after restart")
+	}
+}
