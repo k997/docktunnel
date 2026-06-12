@@ -78,7 +78,7 @@ func TestSaveAndLoadGob(t *testing.T) {
 	require.NoError(t, err, "Load should succeed")
 
 	// Verify active tunnels were restored
-	loadedActive, ok := sm2.GetActiveTunnel("active-1")
+	loadedActive, ok := sm2.GetActiveTunnel("active-1", "web")
 	assert.True(t, ok, "Active tunnel should be loaded")
 	assert.Equal(t, "active-1", loadedActive.ContainerID)
 	assert.Equal(t, "web", loadedActive.ServiceName)
@@ -207,7 +207,7 @@ func TestLoadJSONFallback(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify entry was loaded
-	loaded, ok := sm2.GetActiveTunnel("json-test")
+	loaded, ok := sm2.GetActiveTunnel("json-test", "api")
 	assert.True(t, ok)
 	assert.Equal(t, "json.example.com", loaded.Config.Hostname)
 }
@@ -253,7 +253,7 @@ func TestPeriodicSave(t *testing.T) {
 	err = sm2.Load(statePath)
 	require.NoError(t, err)
 
-	loaded, ok := sm2.GetActiveTunnel("periodic-test")
+	loaded, ok := sm2.GetActiveTunnel("periodic-test", "web")
 	assert.True(t, ok)
 	assert.Equal(t, "periodic.example.com", loaded.Config.Hostname)
 }

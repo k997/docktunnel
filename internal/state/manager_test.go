@@ -40,7 +40,7 @@ func TestAddActiveTunnel(t *testing.T) {
 
 	sm.AddActiveTunnel(entry)
 
-	retrieved, ok := sm.GetActiveTunnel("test-container-1")
+	retrieved, ok := sm.GetActiveTunnel("test-container-1", "web")
 	assert.True(t, ok)
 	assert.Equal(t, entry.ContainerID, retrieved.ContainerID)
 	assert.Equal(t, entry.ServiceName, retrieved.ServiceName)
@@ -58,7 +58,7 @@ func TestRemoveActiveTunnel(t *testing.T) {
 	sm.AddActiveTunnel(entry)
 	sm.RemoveActiveTunnel("test-container-1")
 
-	_, ok := sm.GetActiveTunnel("test-container-1")
+	_, ok := sm.GetActiveTunnel("test-container-1", "web")
 	assert.False(t, ok)
 }
 
@@ -96,7 +96,7 @@ func TestAddPendingDeletion(t *testing.T) {
 	sm.AddPendingDeletion(entry)
 
 	// Should not be in active tunnels
-	_, ok := sm.GetActiveTunnel("test-container-1")
+	_, ok := sm.GetActiveTunnel("test-container-1", "web")
 	assert.False(t, ok)
 
 	// Should be in pending deletions
@@ -166,7 +166,7 @@ func TestRestoreActiveTunnel(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be back in active tunnels
-	retrieved, ok := sm.GetActiveTunnel("test-container-1")
+	retrieved, ok := sm.GetActiveTunnel("test-container-1", "web")
 	assert.True(t, ok)
 	assert.Equal(t, types.StatusActive, retrieved.Status)
 	assert.Nil(t, retrieved.DeletedAt)
@@ -236,6 +236,7 @@ func TestGetSnapshot(t *testing.T) {
 	// Add active tunnel
 	activeEntry := &types.TunnelEntry{
 		ContainerID: "active-1",
+		ServiceName: "web",
 		Status:      types.StatusActive,
 	}
 	sm.AddActiveTunnel(activeEntry)
@@ -254,11 +255,10 @@ func TestGetSnapshot(t *testing.T) {
 	snapshot := sm.GetSnapshot()
 
 	assert.NotNil(t, snapshot)
-	assert.Equal(t, 1, snapshot.Version)
+	assert.Equal(t, 2, snapshot.Version)
 	assert.Len(t, snapshot.ActiveTunnels, 1)
 	assert.Len(t, snapshot.PendingDeletions, 1)
-	assert.Contains(t, snapshot.ActiveTunnels, "active-1")
-	// Key is compound: "pending-1:web"
+	assert.Contains(t, snapshot.ActiveTunnels, "active-1:web")
 	assert.Contains(t, snapshot.PendingDeletions, "pending-1:web")
 }
 
@@ -268,11 +268,12 @@ func TestLoadFromSnapshot(t *testing.T) {
 	// Create a snapshot with compound keys
 	now := time.Now()
 	snapshot := &types.StateSnapshot{
-		Version:   1,
+		Version:   2,
 		Timestamp: now,
 		ActiveTunnels: map[string]*types.TunnelEntry{
-			"active-1": {
+			"active-1:web": {
 				ContainerID: "active-1",
+				ServiceName: "web",
 				Status:      types.StatusActive,
 			},
 		},
@@ -295,7 +296,7 @@ func TestLoadFromSnapshot(t *testing.T) {
 	sm.LoadFromSnapshot(snapshot)
 
 	// Verify loaded state
-	entry, ok := sm.GetActiveTunnel("active-1")
+	entry, ok := sm.GetActiveTunnel("active-1", "web")
 	assert.True(t, ok)
 	assert.Equal(t, "active-1", entry.ContainerID)
 
@@ -505,7 +506,7 @@ func TestContainerRestartCancelsRetention(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify it's back in active tunnels
-	retrieved, ok := sm.GetActiveTunnel("restart-test")
+	retrieved, ok := sm.GetActiveTunnel("restart-test", "web")
 	assert.True(t, ok, "Should be back in active tunnels")
 	assert.Equal(t, types.StatusActive, retrieved.Status, "Status should be Active")
 	assert.Nil(t, retrieved.DeletedAt, "DeletedAt should be cleared")
@@ -720,7 +721,7 @@ func TestLoadFromSnapshot_MigratesPendingDeleteToRetaining(t *testing.T) {
 	snapshot := &types.StateSnapshot{
 		Version: 1,
 		ActiveTunnels: map[string]*types.TunnelEntry{
-			"c2": {ContainerID: "c2", Status: types.StatusActive},
+			"c2": {ContainerID: "c2", ServiceName: "web", Status: types.StatusActive},
 		},
 		PendingDeletions: map[string]*types.TunnelEntry{
 			"c1:web": {
@@ -751,5 +752,105 @@ func TestLoadFromSnapshot_MigratesPendingDeleteToRetaining(t *testing.T) {
 	entry3, _ := sm.GetPendingDeletion("c3")
 	if entry3.Status != types.StatusPendingDelete {
 		t.Errorf("Immediate entry should stay StatusPendingDelete, got %d", entry3.Status)
+	}
+}
+
+func TestAddActiveTunnel_CompoundKey(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	webEntry := &types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	}
+	apiEntry := &types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "api",
+		Status:      types.StatusActive,
+		Config:      types.TunnelConfiguration{Hostname: "api.example.com"},
+	}
+
+	sm.AddActiveTunnel(webEntry)
+	sm.AddActiveTunnel(apiEntry)
+
+	got, ok := sm.GetActiveTunnel("c1", "web")
+	if !ok || got.Config.Hostname != "web.example.com" {
+		t.Errorf("expected web entry, got ok=%v hostname=%s", ok, got.Config.Hostname)
+	}
+	got2, ok2 := sm.GetActiveTunnel("c1", "api")
+	if !ok2 || got2.Config.Hostname != "api.example.com" {
+		t.Errorf("expected api entry, got ok=%v hostname=%s", ok2, got2.Config.Hostname)
+	}
+
+	entries := sm.GetActiveTunnelsByContainer("c1")
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	hostnames := map[string]bool{}
+	for _, e := range entries {
+		hostnames[e.Config.Hostname] = true
+	}
+	if !hostnames["web.example.com"] || !hostnames["api.example.com"] {
+		t.Errorf("expected both hostnames, got %v", hostnames)
+	}
+}
+
+func TestRemoveActiveTunnel_RemovesAllServices(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "c1", ServiceName: "web", Status: types.StatusActive})
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "c1", ServiceName: "api", Status: types.StatusActive})
+
+	sm.RemoveActiveTunnel("c1")
+
+	_, ok1 := sm.GetActiveTunnel("c1", "web")
+	_, ok2 := sm.GetActiveTunnel("c1", "api")
+	if ok1 || ok2 {
+		t.Error("both entries should be removed")
+	}
+	entries := sm.GetActiveTunnelsByContainer("c1")
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries after remove, got %d", len(entries))
+	}
+}
+
+func TestRestoreActiveTunnel_MultiService(t *testing.T) {
+	sm := NewManager(slog.Default())
+	now := time.Now()
+
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID: "c1", ServiceName: "web",
+		Status:    types.StatusRetaining,
+		Config:    types.TunnelConfiguration{Hostname: "web.example.com"},
+		DeletedAt: &now,
+	})
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID: "c1", ServiceName: "api",
+		Status:    types.StatusRetaining,
+		Config:    types.TunnelConfiguration{Hostname: "api.example.com"},
+		DeletedAt: &now,
+	})
+
+	err := sm.RestoreActiveTunnel("c1")
+	if err != nil {
+		t.Fatalf("RestoreActiveTunnel failed: %v", err)
+	}
+
+	webEntry, ok1 := sm.GetActiveTunnel("c1", "web")
+	apiEntry, ok2 := sm.GetActiveTunnel("c1", "api")
+	if !ok1 || !ok2 {
+		t.Fatal("both entries should be restored to active")
+	}
+	if webEntry.Status != types.StatusActive || apiEntry.Status != types.StatusActive {
+		t.Error("restored entries should be Active")
+	}
+	if webEntry.DeletedAt != nil || apiEntry.DeletedAt != nil {
+		t.Error("DeletedAt should be nil after restoration")
+	}
+
+	_, pendingExists := sm.GetPendingDeletion("c1")
+	if pendingExists {
+		t.Error("pending deletes should be empty after restoration")
 	}
 }

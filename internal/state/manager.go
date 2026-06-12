@@ -26,7 +26,7 @@ const (
 // Manager manages the state of all tunnel entries
 type Manager struct {
 	mu                 sync.RWMutex
-	activeTunnels      map[string]*types.TunnelEntry  // key: containerID
+	activeTunnels      map[string]*types.TunnelEntry  // key: containerID:serviceName (compound)
 	pendingDeletes     map[string]*types.TunnelEntry  // key: containerID:serviceName (compound)
 	flappingContainers map[string]types.FlappingState // key: containerID
 
@@ -42,7 +42,13 @@ func pendingDeleteKey(containerID, serviceName string) string {
 	return containerID + ":" + serviceName
 }
 
-// containerIDFromKey extracts the container ID from a pending delete key.
+// activeTunnelKey generates a unique map key for active tunnels using
+// containerID and serviceName, matching pendingDeletes key format.
+func activeTunnelKey(containerID, serviceName string) string {
+	return containerID + ":" + serviceName
+}
+
+// containerIDFromKey extracts the container ID from a compound key.
 func containerIDFromKey(key string) string {
 	idx := strings.Index(key, ":")
 	if idx == -1 {
@@ -135,7 +141,8 @@ func (sm *Manager) AddActiveTunnel(entry *types.TunnelEntry) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	sm.activeTunnels[entry.ContainerID] = entry
+	key := activeTunnelKey(entry.ContainerID, entry.ServiceName)
+	sm.activeTunnels[key] = entry
 	sm.markDirty()
 	sm.logger.Debug("Added active tunnel",
 		"container_id", entry.ContainerID,
@@ -144,28 +151,50 @@ func (sm *Manager) AddActiveTunnel(entry *types.TunnelEntry) {
 	)
 }
 
-// RemoveActiveTunnel removes a tunnel from the active tunnels map
+// RemoveActiveTunnel removes all active tunnel entries for a container
 func (sm *Manager) RemoveActiveTunnel(containerID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if _, exists := sm.activeTunnels[containerID]; exists {
-		delete(sm.activeTunnels, containerID)
+	removed := false
+	for key := range sm.activeTunnels {
+		if containerIDFromKey(key) == containerID {
+			delete(sm.activeTunnels, key)
+			removed = true
+		}
+	}
+	if removed {
 		sm.markDirty()
-		sm.logger.Debug("Removed active tunnel", "container_id", containerID)
+		sm.logger.Debug("Removed active tunnels", "container_id", containerID)
 	}
 }
 
-// GetActiveTunnel retrieves an active tunnel by container ID
-func (sm *Manager) GetActiveTunnel(containerID string) (*types.TunnelEntry, bool) {
+// GetActiveTunnel retrieves an active tunnel by container ID and service name
+func (sm *Manager) GetActiveTunnel(containerID, serviceName string) (*types.TunnelEntry, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	entry, ok := sm.activeTunnels[containerID]
+	key := activeTunnelKey(containerID, serviceName)
+	entry, ok := sm.activeTunnels[key]
 	return entry, ok
 }
 
-// GetAllActiveTunnels returns a copy of all active tunnels
+// GetActiveTunnelsByContainer returns all active tunnel entries for a container
+func (sm *Manager) GetActiveTunnelsByContainer(containerID string) []*types.TunnelEntry {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	var entries []*types.TunnelEntry
+	for key, entry := range sm.activeTunnels {
+		if containerIDFromKey(key) == containerID {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// GetAllActiveTunnels returns a copy of all active tunnels.
+// Keys are in compound format: "containerID:serviceName"
 func (sm *Manager) GetAllActiveTunnels() map[string]*types.TunnelEntry {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -265,14 +294,15 @@ func (sm *Manager) RestoreActiveTunnel(containerID string) error {
 			delete(sm.pendingDeletes, key)
 			entry.Status = types.StatusActive
 			entry.DeletedAt = nil
-			sm.activeTunnels[containerID] = entry
+			activeKey := activeTunnelKey(entry.ContainerID, entry.ServiceName)
+			sm.activeTunnels[activeKey] = entry
 			found = true
 		}
 	}
 
 	if found {
 		sm.markDirty()
-		sm.logger.Info("Restored tunnel to active",
+		sm.logger.Info("Restored tunnel(s) to active",
 			"container_id", containerID,
 		)
 	}
@@ -409,7 +439,7 @@ func (sm *Manager) GetSnapshot() *types.StateSnapshot {
 	}
 
 	return &types.StateSnapshot{
-		Version:            1,
+		Version:            2,
 		Timestamp:          time.Now().UTC(),
 		ActiveTunnels:      activeTunnels,
 		PendingDeletions:   pendingDeletions,

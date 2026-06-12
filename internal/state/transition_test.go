@@ -44,7 +44,7 @@ func TestTransition_Stopped_Immediate(t *testing.T) {
 		t.Errorf("expected StatusPendingDelete, got %d", pending.Status)
 	}
 
-	_, activeExists := sm.GetActiveTunnel("c1")
+	_, activeExists := sm.GetActiveTunnel("c1", "web")
 	if activeExists {
 		t.Error("entry should not be in active tunnels")
 	}
@@ -128,7 +128,7 @@ func TestTransition_Started_FromRetaining(t *testing.T) {
 		t.Fatalf("expected 0 actions, got %v", actions)
 	}
 
-	entry, exists := sm.GetActiveTunnel("c1")
+	entry, exists := sm.GetActiveTunnel("c1", "web")
 	if !exists {
 		t.Fatal("expected entry in active tunnels")
 	}
