@@ -169,6 +169,39 @@ func (c *Controller) isDocktunnelEnabled(event events.Event) bool {
 	return event.ContainerInfo.Config.Labels["docktunnel.enable"] == "true"
 }
 
+// registerContainerRules parses labels, validates, and registers ingress rules for a container.
+func (c *Controller) registerContainerRules(ctx context.Context, event events.Event) ([]string, error) {
+	parsedRules, err := label.Parse(event.ContainerInfo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse container labels for container %s: %w", event.ContainerID, err)
+	}
+
+	c.mu.RLock()
+	if err := c.ruleValidator.Validate(parsedRules, c.ingressRules); err != nil {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("invalid ingress rules for container %s: %w", event.ContainerID, err)
+	}
+	c.mu.RUnlock()
+
+	hostnames := make([]string, 0)
+	for _, rule := range parsedRules {
+		if rule.Hostname.Value != "" {
+			hostnames = append(hostnames, rule.Hostname.Value)
+		}
+	}
+
+	c.mu.Lock()
+	for _, rule := range parsedRules {
+		if rule.Hostname.Value != "" {
+			c.ingressRules[rule.Hostname.Value] = *rule
+		}
+	}
+	c.containerRules[event.ContainerID] = hostnames
+	c.mu.Unlock()
+
+	return hostnames, nil
+}
+
 // handleContainerStart 处理容器启动事件
 func (c *Controller) handleContainerStart(ctx context.Context, event events.Event) error {
 	// 检查容器是否启用了docktunnel
@@ -199,49 +232,15 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 		return nil
 	}
 
-	// 解析容器标签生成规则
-	parsedRules, err := label.Parse(event.ContainerInfo)
-	if err != nil {
-		slog.Error("Failed to parse container labels", "error", err, "containerID", event.ContainerID)
-		return fmt.Errorf("failed to parse container labels for container %s: %w", event.ContainerID, err)
+	if _, err := c.registerContainerRules(ctx, event); err != nil {
+		slog.Error("Failed to register container rules", "error", err, "containerID", event.ContainerID)
+		return err
 	}
 
-	// 验证规则
-	c.mu.RLock()
-	if err := c.ruleValidator.Validate(parsedRules, c.ingressRules); err != nil {
-		c.mu.RUnlock()
-		slog.Error("Invalid ingress rules", "error", err, "containerID", event.ContainerID)
-		return fmt.Errorf("invalid ingress rules for container %s: %w", event.ContainerID, err)
-	}
-	c.mu.RUnlock()
-
-	// 收集主机名列表
-	hostnames := make([]string, 0)
-	for _, rule := range parsedRules {
-		// 收集所有主机名
-		if rule.Hostname.Value != "" {
-			hostnames = append(hostnames, rule.Hostname.Value)
-		}
-	}
-
-	// 更新内部状态
 	c.mu.Lock()
-	// 添加规则
-	for _, rule := range parsedRules {
-		// 添加所有有主机名的规则
-		if rule.Hostname.Value != "" {
-			c.ingressRules[rule.Hostname.Value] = *rule
-		}
-	}
-
-	// 记录容器与主机名的关联关系
-	c.containerRules[event.ContainerID] = hostnames
-
-	// 更新容器健康状态
 	c.updateContainerHealth(event.ContainerID, true)
 	c.mu.Unlock()
 
-	// 同步到Cloudflare
 	return c.syncToCloudflare(ctx)
 }
 
@@ -820,43 +819,13 @@ func (c *Controller) handleHealthHealthy(ctx context.Context, event events.Event
 		return nil
 	}
 
-	// 解析容器标签生成规则
-	parsedRules, err := label.Parse(event.ContainerInfo)
-	if err != nil {
-		slog.Error("Failed to parse container labels", "error", err, "containerID", event.ContainerID)
-		return fmt.Errorf("failed to parse container labels for container %s: %w", event.ContainerID, err)
+	if _, err := c.registerContainerRules(ctx, event); err != nil {
+		slog.Error("Failed to register container rules on health event",
+			"error", err, "containerID", event.ContainerID)
+		return err
 	}
 
-	// 验证规则
-	c.mu.RLock()
-	if err := c.ruleValidator.Validate(parsedRules, c.ingressRules); err != nil {
-		c.mu.RUnlock()
-		slog.Error("Invalid ingress rules", "error", err, "containerID", event.ContainerID)
-		return fmt.Errorf("invalid ingress rules for container %s: %w", event.ContainerID, err)
-	}
-	c.mu.RUnlock()
-
-	// 更新内部状态
-	c.mu.Lock()
-	// 添加规则
-	for _, rule := range parsedRules {
-		// 添加所有有主机名的规则
-		if rule.Hostname.Value != "" {
-			c.ingressRules[rule.Hostname.Value] = *rule
-		}
-	}
-
-	// 记录容器与主机名的关联关系
-	hostnames := make([]string, 0)
-	for _, rule := range parsedRules {
-		if rule.Hostname.Value != "" {
-			hostnames = append(hostnames, rule.Hostname.Value)
-		}
-	}
-	c.containerRules[event.ContainerID] = hostnames
-	c.mu.Unlock()
-
-	// 同步到Cloudflare
+	// Do NOT call updateContainerHealth — health events don't affect flapping counter
 	return c.syncToCloudflare(ctx)
 }
 
