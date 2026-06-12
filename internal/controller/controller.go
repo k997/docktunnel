@@ -17,10 +17,18 @@ import (
 	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 	eventTypes "github.com/docker/docker/api/types/events"
 
-	"docktunnel/internal/cloudflareManager"
 	"docktunnel/internal/docker"
 	"docktunnel/internal/events"
 )
+
+// CloudflareManager defines the interface for Cloudflare tunnel management
+type CloudflareManager interface {
+	GetTunnel() *zero_trust.TunnelCloudflaredGetResponse
+	UpdateConfiguration(ctx context.Context, ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error
+	ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, error)
+	DeleteDNSRecords(ctx context.Context, hostnames []string) error
+	UpsertDNSRecords(ctx context.Context, hostnames []string) error
+}
 
 // ControllerOptions 用于配置Controller的选项
 type ControllerOptions struct {
@@ -45,7 +53,7 @@ type ContainerHealth struct {
 // Controller 负责协调Docker和Cloudflare模块的工作
 type Controller struct {
 	dockerManager     *docker.Manager
-	cloudflareManager *cloudflareManager.Manager
+	cloudflareManager CloudflareManager
 	stateManager      *state.Manager // State manager for retention policies
 	ingressRules      map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress // hostname -> rule map
 	containerRules    map[string][]string                                                           // containerID -> hostnames map
@@ -66,7 +74,7 @@ type Controller struct {
 }
 
 // NewController 创建一个新的控制器实例
-func NewController(dockerManager *docker.Manager, cloudflareManager *cloudflareManager.Manager, opts ControllerOptions) *Controller {
+func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareManager, opts ControllerOptions) *Controller {
 	controller := &Controller{
 		dockerManager:     dockerManager,
 		cloudflareManager: cloudflareManager,
@@ -112,6 +120,14 @@ func (c *Controller) Dispatch(ctx context.Context, event events.Event) error {
 		return c.handleContainerStop(ctx, event)
 	case eventTypes.ActionDie:
 		return c.handleContainerStop(ctx, event)
+	case events.ActionHealthHealthy:
+		return c.handleHealthHealthy(ctx, event)
+	case events.ActionHealthUnhealthy:
+		return c.handleHealthUnhealthy(ctx, event)
+	case events.ActionHealthStarting:
+		return c.handleHealthUnhealthy(ctx, event)
+	case events.ActionResync:
+		return c.handleResync(ctx)
 	default:
 		// 忽略不关心的事件
 		return nil
@@ -789,4 +805,87 @@ func (c *Controller) RunGarbageCollection(ctx context.Context) error {
 		"expired_count", len(expiredContainers))
 
 	return nil
+}
+
+// handleHealthHealthy re-exposes a container's services when it becomes healthy.
+func (c *Controller) handleHealthHealthy(ctx context.Context, event events.Event) error {
+	if !c.isDocktunnelEnabled(event) {
+		return nil
+	}
+	slog.Info("Container became healthy, exposing services", "containerID", event.ContainerID)
+
+	// 检查容器是否处于抖动状态
+	if c.isFlapping(event.ContainerID) {
+		slog.Warn("Container is flapping, ignoring health healthy event", "containerID", event.ContainerID)
+		return nil
+	}
+
+	// 解析容器标签生成规则
+	parsedRules, err := label.Parse(event.ContainerInfo)
+	if err != nil {
+		slog.Error("Failed to parse container labels", "error", err, "containerID", event.ContainerID)
+		return fmt.Errorf("failed to parse container labels for container %s: %w", event.ContainerID, err)
+	}
+
+	// 验证规则
+	c.mu.RLock()
+	if err := c.ruleValidator.Validate(parsedRules, c.ingressRules); err != nil {
+		c.mu.RUnlock()
+		slog.Error("Invalid ingress rules", "error", err, "containerID", event.ContainerID)
+		return fmt.Errorf("invalid ingress rules for container %s: %w", event.ContainerID, err)
+	}
+	c.mu.RUnlock()
+
+	// 更新内部状态
+	c.mu.Lock()
+	// 添加规则
+	for _, rule := range parsedRules {
+		// 添加所有有主机名的规则
+		if rule.Hostname.Value != "" {
+			c.ingressRules[rule.Hostname.Value] = *rule
+		}
+	}
+
+	// 记录容器与主机名的关联关系
+	hostnames := make([]string, 0)
+	for _, rule := range parsedRules {
+		if rule.Hostname.Value != "" {
+			hostnames = append(hostnames, rule.Hostname.Value)
+		}
+	}
+	c.containerRules[event.ContainerID] = hostnames
+	c.mu.Unlock()
+
+	// 同步到Cloudflare
+	return c.syncToCloudflare(ctx)
+}
+
+// handleHealthUnhealthy removes a container's services when it becomes unhealthy.
+func (c *Controller) handleHealthUnhealthy(ctx context.Context, event events.Event) error {
+	if !c.isDocktunnelEnabled(event) {
+		return nil
+	}
+	slog.Info("Container became unhealthy, removing services", "containerID", event.ContainerID)
+
+	c.mu.Lock()
+	hostnamesToRemove, exists := c.containerRules[event.ContainerID]
+	if !exists {
+		c.mu.Unlock()
+		slog.Debug("No rules found for unhealthy container", "containerID", event.ContainerID)
+		return nil
+	}
+
+	delete(c.containerRules, event.ContainerID)
+	for _, hostname := range hostnamesToRemove {
+		delete(c.ingressRules, hostname)
+	}
+	c.mu.Unlock()
+
+	return c.syncToCloudflare(ctx)
+}
+
+// handleResync performs a full state synchronization after Docker daemon reconnection.
+func (c *Controller) handleResync(ctx context.Context) error {
+	slog.Info("Handling resync event after Docker reconnection")
+	return c.Sync(ctx)
 }

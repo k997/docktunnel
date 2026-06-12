@@ -6,6 +6,10 @@ import (
 	"testing"
 	"time"
 
+	containerTypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+
+	"docktunnel/internal/events"
 	"docktunnel/internal/state"
 	"docktunnel/pkg/types"
 
@@ -330,5 +334,173 @@ func TestStartupReconciliation(t *testing.T) {
 	// Verify DeletedAt was cleared
 	if restoredEntry.DeletedAt != nil {
 		t.Error("DeletedAt should be nil after restoration")
+	}
+}
+func TestDispatch_HealthHealthy(t *testing.T) {
+	opts := ControllerOptions{
+		FlappingWindow:    60 * time.Second,
+		FlappingThreshold: 5,
+		CoolingPeriod:     5 * time.Minute,
+		MaxCoolingPeriod:  30 * time.Minute,
+		DebounceDuration:  2 * time.Second,
+	}
+
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{
+			ID: "test-tunnel",
+		},
+	}, opts)
+
+	containerInfo := &containerTypes.InspectResponse{
+		ContainerJSONBase: &containerTypes.ContainerJSONBase{
+			HostConfig: &containerTypes.HostConfig{
+				NetworkMode: "bridge",
+			},
+		},
+		Config: &containerTypes.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":       "true",
+				"docktunnel.web.hostname": "app.example.com",
+				"docktunnel.web.service":  "http://localhost:8080",
+			},
+		},
+		NetworkSettings: &containerTypes.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	// Start the container
+	startEvent := events.Event{
+		Type:          "start",
+		ContainerID:   "healthy-container",
+		ContainerInfo: containerInfo,
+	}
+
+	err := ctrl.Dispatch(context.Background(), startEvent)
+	if err != nil {
+		t.Fatalf("start dispatch failed: %v", err)
+	}
+
+	// Verify rules were registered
+	ctrl.mu.RLock()
+	hostnames, exists := ctrl.containerRules["healthy-container"]
+	ctrl.mu.RUnlock()
+	if !exists {
+		t.Fatal("expected container rules after start event")
+	}
+	if len(hostnames) != 1 || hostnames[0] != "app.example.com" {
+		t.Errorf("expected hostname app.example.com, got %v", hostnames)
+	}
+
+	// Simulate health_unhealthy — should remove the rules
+	unhealthyEvent := events.Event{
+		Type:          events.ActionHealthUnhealthy,
+		ContainerID:   "healthy-container",
+		ContainerInfo: containerInfo,
+	}
+
+	err = ctrl.Dispatch(context.Background(), unhealthyEvent)
+	if err != nil {
+		t.Fatalf("unhealthy dispatch failed: %v", err)
+	}
+
+	ctrl.mu.RLock()
+	_, existsAfter := ctrl.containerRules["healthy-container"]
+	ctrl.mu.RUnlock()
+	if existsAfter {
+		t.Error("expected container rules to be removed after unhealthy event")
+	}
+
+	// Simulate health_healthy — should re-add the rules
+	healthyEvent := events.Event{
+		Type:          events.ActionHealthHealthy,
+		ContainerID:   "healthy-container",
+		ContainerInfo: containerInfo,
+	}
+
+	err = ctrl.Dispatch(context.Background(), healthyEvent)
+	if err != nil {
+		t.Fatalf("healthy dispatch failed: %v", err)
+	}
+
+	ctrl.mu.RLock()
+	hostnames2, existsAfter2 := ctrl.containerRules["healthy-container"]
+	ctrl.mu.RUnlock()
+	if !existsAfter2 {
+		t.Fatal("expected container rules after healthy event")
+	}
+	if len(hostnames2) != 1 || hostnames2[0] != "app.example.com" {
+		t.Errorf("expected hostname app.example.com after healthy, got %v", hostnames2)
+	}
+}
+
+func TestDispatch_HealthEventsDoNotTriggerFlapping(t *testing.T) {
+	opts := ControllerOptions{
+		FlappingWindow:    60 * time.Second,
+		FlappingThreshold: 2,
+		CoolingPeriod:     5 * time.Minute,
+		MaxCoolingPeriod:  30 * time.Minute,
+		DebounceDuration:  2 * time.Second,
+	}
+
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{
+			ID: "test-tunnel",
+		},
+	}, opts)
+
+	containerInfo := &containerTypes.InspectResponse{
+		ContainerJSONBase: &containerTypes.ContainerJSONBase{
+			HostConfig: &containerTypes.HostConfig{
+				NetworkMode: "bridge",
+			},
+		},
+		Config: &containerTypes.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":       "true",
+				"docktunnel.web.hostname": "app.example.com",
+				"docktunnel.web.service":  "http://localhost:8080",
+			},
+		},
+		NetworkSettings: &containerTypes.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	// Start the container
+	startEvent := events.Event{
+		Type:          "start",
+		ContainerID:   "test-container",
+		ContainerInfo: containerInfo,
+	}
+	_ = ctrl.Dispatch(context.Background(), startEvent)
+
+	// Send many health unhealthy/healthy cycles
+	for i := 0; i < 10; i++ {
+		unhealthyEvent := events.Event{
+			Type:          events.ActionHealthUnhealthy,
+			ContainerID:   "test-container",
+			ContainerInfo: containerInfo,
+		}
+		_ = ctrl.Dispatch(context.Background(), unhealthyEvent)
+
+		healthyEvent := events.Event{
+			Type:          events.ActionHealthHealthy,
+			ContainerID:   "test-container",
+			ContainerInfo: containerInfo,
+		}
+		_ = ctrl.Dispatch(context.Background(), healthyEvent)
+	}
+
+	// Container should still have rules (not flapping)
+	ctrl.mu.RLock()
+	_, exists := ctrl.containerRules["test-container"]
+	ctrl.mu.RUnlock()
+	if !exists {
+		t.Error("health events should not trigger flapping - container should still have rules")
 	}
 }
