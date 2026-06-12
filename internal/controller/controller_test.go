@@ -89,6 +89,8 @@ func TestNewControllerWithOptions(t *testing.T) {
 		CoolingPeriod:     300 * time.Second,
 		MaxCoolingPeriod:  1800 * time.Second,
 		DebounceDuration:  2 * time.Second,
+		ReconcileEnabled:  true,
+		ReconcileInterval: 120 * time.Second,
 	}
 
 	controller := NewController(nil, nil, opts)
@@ -116,6 +118,15 @@ func TestNewControllerWithOptions(t *testing.T) {
 
 	if controller.debounceDuration != 2*time.Second {
 		t.Errorf("Expected debounceDuration to be 2s, got %v", controller.debounceDuration)
+	}
+
+	// Test new reconcile configuration defaults
+	if controller.reconcileEnabled != true {
+		t.Errorf("Expected reconcile enabled 'true', got %v", controller.reconcileEnabled)
+	}
+
+	if controller.reconcileInterval != 120*time.Second {
+		t.Errorf("Expected reconcile interval '120s', got %v", controller.reconcileInterval)
 	}
 
 	// 检查初始状态（不再存储catch-all规则）
@@ -146,6 +157,8 @@ func TestControllerOptions(t *testing.T) {
 		CoolingPeriod:     300 * time.Second,
 		MaxCoolingPeriod:  1800 * time.Second,
 		DebounceDuration:  2 * time.Second,
+		ReconcileEnabled:  true,
+		ReconcileInterval: 120 * time.Second,
 	}
 
 	if opts.CatchAllService != "http_status:404" {
@@ -170,6 +183,14 @@ func TestControllerOptions(t *testing.T) {
 
 	if opts.DebounceDuration != 2*time.Second {
 		t.Errorf("Expected DebounceDuration to be 2s, got %v", opts.DebounceDuration)
+	}
+
+	if opts.ReconcileEnabled != true {
+		t.Errorf("Expected ReconcileEnabled to be 'true', got %v", opts.ReconcileEnabled)
+	}
+
+	if opts.ReconcileInterval != 120*time.Second {
+		t.Errorf("Expected ReconcileInterval to be 120s, got %v", opts.ReconcileInterval)
 	}
 }
 

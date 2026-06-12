@@ -22,7 +22,7 @@ cleanup:
 
 	// 获取临时目录
 	tempDir := t.TempDir()
-	
+
 	// 创建配置文件
 	configPath := tempDir + "/config.yaml"
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
@@ -34,12 +34,12 @@ cleanup:
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// 切换到临时目录
 	if err := os.Chdir(tempDir); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// 恢复工作目录
 	defer func() {
 		os.Chdir(originalDir)
@@ -131,6 +131,24 @@ func TestLoadDefaultConfig(t *testing.T) {
 	if config.Cleanup.OnExit != true {
 		t.Errorf("Expected default cleanup on exit 'true', got '%v'", config.Cleanup.OnExit)
 	}
+
+	// Test new reconcile configuration defaults
+	if config.Controller.ReconcileEnabled != true {
+		t.Errorf("Expected default reconcile enabled 'true', got '%v'", config.Controller.ReconcileEnabled)
+	}
+
+	if config.Controller.ReconcileInterval != 120*time.Second {
+		t.Errorf("Expected default reconcile interval '120s', got '%v'", config.Controller.ReconcileInterval)
+	}
+
+	// Test new cleanup configuration defaults
+	if config.Cleanup.Strategy != "graceful-cleanup" {
+		t.Errorf("Expected default cleanup strategy 'graceful-cleanup', got '%s'", config.Cleanup.Strategy)
+	}
+
+	if config.Cleanup.Timeout != 30*time.Second {
+		t.Errorf("Expected default cleanup timeout '30s', got '%v'", config.Cleanup.Timeout)
+	}
 }
 
 func TestValidateConfig(t *testing.T) {
@@ -146,7 +164,7 @@ func TestGetLogLevel(t *testing.T) {
 	if config1.Log.Level != "debug" {
 		t.Errorf("Expected 'debug', got '%s'", config1.Log.Level)
 	}
-	
+
 	// 测试获取默认日志级别
 	config2 := &Config{}
 	// 手动设置默认值进行测试
@@ -163,7 +181,7 @@ func TestGetLogFormat(t *testing.T) {
 	if config1.Log.Format != "json" {
 		t.Errorf("Expected 'json', got '%s'", config1.Log.Format)
 	}
-	
+
 	// 测试获取默认日志格式
 	config2 := &Config{}
 	// 手动设置默认值进行测试
@@ -209,39 +227,39 @@ func TestSanitizeForLog(t *testing.T) {
 			Format: "json",
 		},
 		Cloudflare: struct {
-			AccountID       string        `mapstructure:"accountId"`
-			APIToken        string        `mapstructure:"apiToken"`
-			TunnelID        string        `mapstructure:"tunnelId"`
-			TunnelName      string        `mapstructure:"tunnelName"`
-			CatchAll        string        `mapstructure:"catchAll"`
-			RateLimit       int           `mapstructure:"rateLimit"`
-			MaxRetries      int           `mapstructure:"maxRetries"`
-			RetryDelay      time.Duration `mapstructure:"retryDelay"`
-			MaxRetryDelay   time.Duration `mapstructure:"maxRetryDelay"`
-			OriginRequest   struct {
-				NoTLSVerify           bool          `mapstructure:"noTLSVerify"`
-				ConnectTimeout        time.Duration `mapstructure:"connectTimeout"`
-				TLSTimeout            time.Duration `mapstructure:"tlsTimeout"`
-				TCPKeepAlive          time.Duration `mapstructure:"tcpKeepAlive"`
-				KeepAliveConnections  int           `mapstructure:"keepAliveConnections"`
-				KeepAliveTimeout      time.Duration `mapstructure:"keepAliveTimeout"`
-				NoHappyEyeballs       bool          `mapstructure:"noHappyEyeballs"`
-				ProxyType             string        `mapstructure:"proxyType"`
-				HTTPHostHeader        string        `mapstructure:"httpHostHeader"`
-				OriginServerName      string        `mapstructure:"originServerName"`
-				CAPool                string        `mapstructure:"caPool"`
-				HTTP2Origin           bool          `mapstructure:"http2Origin"`
-				DisableChunkedEncoding bool         `mapstructure:"disableChunkedEncoding"`
-				AccessRequired        bool          `mapstructure:"accessRequired"`
-				AccessTeamName        string        `mapstructure:"accessTeamName"`
-				AccessAudTag          string        `mapstructure:"accessAudTag"`
+			AccountID     string        `mapstructure:"accountId"`
+			APIToken      string        `mapstructure:"apiToken"`
+			TunnelID      string        `mapstructure:"tunnelId"`
+			TunnelName    string        `mapstructure:"tunnelName"`
+			CatchAll      string        `mapstructure:"catchAll"`
+			RateLimit     int           `mapstructure:"rateLimit"`
+			MaxRetries    int           `mapstructure:"maxRetries"`
+			RetryDelay    time.Duration `mapstructure:"retryDelay"`
+			MaxRetryDelay time.Duration `mapstructure:"maxRetryDelay"`
+			OriginRequest struct {
+				NoTLSVerify            bool          `mapstructure:"noTLSVerify"`
+				ConnectTimeout         time.Duration `mapstructure:"connectTimeout"`
+				TLSTimeout             time.Duration `mapstructure:"tlsTimeout"`
+				TCPKeepAlive           time.Duration `mapstructure:"tcpKeepAlive"`
+				KeepAliveConnections   int           `mapstructure:"keepAliveConnections"`
+				KeepAliveTimeout       time.Duration `mapstructure:"keepAliveTimeout"`
+				NoHappyEyeballs        bool          `mapstructure:"noHappyEyeballs"`
+				ProxyType              string        `mapstructure:"proxyType"`
+				HTTPHostHeader         string        `mapstructure:"httpHostHeader"`
+				OriginServerName       string        `mapstructure:"originServerName"`
+				CAPool                 string        `mapstructure:"caPool"`
+				HTTP2Origin            bool          `mapstructure:"http2Origin"`
+				DisableChunkedEncoding bool          `mapstructure:"disableChunkedEncoding"`
+				AccessRequired         bool          `mapstructure:"accessRequired"`
+				AccessTeamName         string        `mapstructure:"accessTeamName"`
+				AccessAudTag           string        `mapstructure:"accessAudTag"`
 			} `mapstructure:"originRequest"`
 		}{
-			AccountID: "test-account-id",
-			APIToken:  "super-secret-api-token-12345",
-			TunnelID:  "test-tunnel-id",
+			AccountID:  "test-account-id",
+			APIToken:   "super-secret-api-token-12345",
+			TunnelID:   "test-tunnel-id",
 			TunnelName: "DockTunnel",
-			CatchAll:  "http_status:404",
+			CatchAll:   "http_status:404",
 		},
 	}
 

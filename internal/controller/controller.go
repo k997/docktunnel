@@ -40,6 +40,9 @@ type ControllerOptions struct {
 	MaxCoolingPeriod  time.Duration // 最大冷却期
 	// 防抖配置
 	DebounceDuration time.Duration // 防抖持续时间
+	// 对账配置
+	ReconcileEnabled  bool
+	ReconcileInterval time.Duration
 }
 
 // ContainerHealth 记录容器的健康状态信息
@@ -71,6 +74,9 @@ type Controller struct {
 	debounceTimer    *time.Timer   // 防抖计时器
 	debounceDuration time.Duration // 防抖持续时间
 	pendingUpdates   bool          // 是否有待处理的更新
+	// 对账配置
+	reconcileEnabled  bool
+	reconcileInterval time.Duration
 }
 
 // NewController 创建一个新的控制器实例
@@ -89,6 +95,8 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 		maxCoolingPeriod:  opts.MaxCoolingPeriod,
 		debounceDuration:  opts.DebounceDuration,
 		pendingUpdates:    false,
+		reconcileEnabled:  opts.ReconcileEnabled,
+		reconcileInterval: opts.ReconcileInterval,
 	}
 
 	// 如果没有提供配置参数，则使用默认值
@@ -106,6 +114,9 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 	}
 	if controller.debounceDuration == 0 {
 		controller.debounceDuration = 2 * time.Second
+	}
+	if controller.reconcileInterval == 0 {
+		controller.reconcileInterval = 120 * time.Second
 	}
 
 	return controller

@@ -18,35 +18,35 @@ type Config struct {
 		Format string `mapstructure:"format"`
 	} `mapstructure:"log"`
 	Cloudflare struct {
-		AccountID       string        `mapstructure:"accountId"`
-		APIToken        string        `mapstructure:"apiToken"`
-		TunnelID        string        `mapstructure:"tunnelId"`
-		TunnelName      string        `mapstructure:"tunnelName"`
-		CatchAll        string        `mapstructure:"catchAll"`
+		AccountID  string `mapstructure:"accountId"`
+		APIToken   string `mapstructure:"apiToken"`
+		TunnelID   string `mapstructure:"tunnelId"`
+		TunnelName string `mapstructure:"tunnelName"`
+		CatchAll   string `mapstructure:"catchAll"`
 		// API调用相关配置
-		RateLimit       int           `mapstructure:"rateLimit"`
-		MaxRetries      int           `mapstructure:"maxRetries"`
-		RetryDelay      time.Duration `mapstructure:"retryDelay"`
-		MaxRetryDelay   time.Duration `mapstructure:"maxRetryDelay"`
+		RateLimit     int           `mapstructure:"rateLimit"`
+		MaxRetries    int           `mapstructure:"maxRetries"`
+		RetryDelay    time.Duration `mapstructure:"retryDelay"`
+		MaxRetryDelay time.Duration `mapstructure:"maxRetryDelay"`
 		// OriginRequest默认配置 (T082)
-		OriginRequest   struct {
-			NoTLSVerify           bool          `mapstructure:"noTLSVerify"`
-			ConnectTimeout        time.Duration `mapstructure:"connectTimeout"`
-			TLSTimeout            time.Duration `mapstructure:"tlsTimeout"`
-			TCPKeepAlive          time.Duration `mapstructure:"tcpKeepAlive"`
-			KeepAliveConnections  int           `mapstructure:"keepAliveConnections"`
-			KeepAliveTimeout      time.Duration `mapstructure:"keepAliveTimeout"`
-			NoHappyEyeballs       bool          `mapstructure:"noHappyEyeballs"`
-			ProxyType             string        `mapstructure:"proxyType"`
-			HTTPHostHeader        string        `mapstructure:"httpHostHeader"`
-			OriginServerName      string        `mapstructure:"originServerName"`
-			CAPool                string        `mapstructure:"caPool"`
-			HTTP2Origin           bool          `mapstructure:"http2Origin"`
-			DisableChunkedEncoding bool         `mapstructure:"disableChunkedEncoding"`
+		OriginRequest struct {
+			NoTLSVerify            bool          `mapstructure:"noTLSVerify"`
+			ConnectTimeout         time.Duration `mapstructure:"connectTimeout"`
+			TLSTimeout             time.Duration `mapstructure:"tlsTimeout"`
+			TCPKeepAlive           time.Duration `mapstructure:"tcpKeepAlive"`
+			KeepAliveConnections   int           `mapstructure:"keepAliveConnections"`
+			KeepAliveTimeout       time.Duration `mapstructure:"keepAliveTimeout"`
+			NoHappyEyeballs        bool          `mapstructure:"noHappyEyeballs"`
+			ProxyType              string        `mapstructure:"proxyType"`
+			HTTPHostHeader         string        `mapstructure:"httpHostHeader"`
+			OriginServerName       string        `mapstructure:"originServerName"`
+			CAPool                 string        `mapstructure:"caPool"`
+			HTTP2Origin            bool          `mapstructure:"http2Origin"`
+			DisableChunkedEncoding bool          `mapstructure:"disableChunkedEncoding"`
 			// Access defaults
-			AccessRequired        bool          `mapstructure:"accessRequired"`
-			AccessTeamName        string        `mapstructure:"accessTeamName"`
-			AccessAudTag          string        `mapstructure:"accessAudTag"`
+			AccessRequired bool   `mapstructure:"accessRequired"`
+			AccessTeamName string `mapstructure:"accessTeamName"`
+			AccessAudTag   string `mapstructure:"accessAudTag"`
 		} `mapstructure:"originRequest"`
 	} `mapstructure:"cloudflare"`
 	Controller struct {
@@ -56,10 +56,15 @@ type Config struct {
 		CoolingPeriod     time.Duration `mapstructure:"coolingPeriod"`
 		MaxCoolingPeriod  time.Duration `mapstructure:"maxCoolingPeriod"`
 		DebounceDuration  time.Duration `mapstructure:"debounceDuration"`
+		// 对账配置
+		ReconcileEnabled  bool          `mapstructure:"reconcileEnabled"`
+		ReconcileInterval time.Duration `mapstructure:"reconcileInterval"`
 	} `mapstructure:"controller"`
 	Cleanup struct {
-		OnExit    bool   `mapstructure:"onExit"`
-		StateFile string `mapstructure:"stateFile"`
+		OnExit    bool          `mapstructure:"onExit"`
+		StateFile string        `mapstructure:"stateFile"`
+		Strategy  string        `mapstructure:"strategy"`
+		Timeout   time.Duration `mapstructure:"timeout"`
 	} `mapstructure:"cleanup"`
 	Defaults struct {
 		Scheme string `mapstructure:"scheme"`
@@ -91,6 +96,8 @@ func (c *Config) GetControllerOptions() controller.ControllerOptions {
 		CoolingPeriod:     c.Controller.CoolingPeriod,
 		MaxCoolingPeriod:  c.Controller.MaxCoolingPeriod,
 		DebounceDuration:  c.Controller.DebounceDuration,
+		ReconcileEnabled:  c.Controller.ReconcileEnabled,
+		ReconcileInterval: c.Controller.ReconcileInterval,
 	}
 }
 
@@ -158,18 +165,22 @@ func New() (*Config, error) {
 	// 1. 设置默认值
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")
-	v.SetDefault("cloudflare.tunnelName", "DockTunnel") // 默认通道名称
-	v.SetDefault("cloudflare.catchAll", "http_status:404") // 默认catch-all规则
-	v.SetDefault("cloudflare.rateLimit", 10) // 默认每秒10个请求的速率限制
-	v.SetDefault("cloudflare.maxRetries", 3) // 默认最大重试次数
-	v.SetDefault("cloudflare.retryDelay", 1*time.Second) // 默认初始重试延迟1秒
-	v.SetDefault("cloudflare.maxRetryDelay", 30*time.Second) // 默认最大重试延迟30秒
-	v.SetDefault("controller.flappingWindow", 60*time.Second) // 默认抖动检测窗口60秒
-	v.SetDefault("controller.flappingThreshold", 5) // 默认抖动阈值5次重启
-	v.SetDefault("controller.coolingPeriod", 300*time.Second) // 默认冷却期300秒(5分钟)
+	v.SetDefault("cloudflare.tunnelName", "DockTunnel")           // 默认通道名称
+	v.SetDefault("cloudflare.catchAll", "http_status:404")        // 默认catch-all规则
+	v.SetDefault("cloudflare.rateLimit", 10)                      // 默认每秒10个请求的速率限制
+	v.SetDefault("cloudflare.maxRetries", 3)                      // 默认最大重试次数
+	v.SetDefault("cloudflare.retryDelay", 1*time.Second)          // 默认初始重试延迟1秒
+	v.SetDefault("cloudflare.maxRetryDelay", 30*time.Second)      // 默认最大重试延迟30秒
+	v.SetDefault("controller.flappingWindow", 60*time.Second)     // 默认抖动检测窗口60秒
+	v.SetDefault("controller.flappingThreshold", 5)               // 默认抖动阈值5次重启
+	v.SetDefault("controller.coolingPeriod", 300*time.Second)     // 默认冷却期300秒(5分钟)
 	v.SetDefault("controller.maxCoolingPeriod", 1800*time.Second) // 默认最大冷却期1800秒(30分钟)
-	v.SetDefault("controller.debounceDuration", 2*time.Second) // 默认防抖延迟2秒
+	v.SetDefault("controller.debounceDuration", 2*time.Second)    // 默认防抖延迟2秒
+	v.SetDefault("controller.reconcileEnabled", true)
+	v.SetDefault("controller.reconcileInterval", 120*time.Second)
 	v.SetDefault("cleanup.onExit", true)
+	v.SetDefault("cleanup.strategy", "graceful-cleanup")
+	v.SetDefault("cleanup.timeout", 30*time.Second)
 	// Global defaults for label auto-detection fallback
 	v.SetDefault("defaults.scheme", "http") // 默认scheme (http, https, tcp)
 	v.SetDefault("defaults.port", 80)       // 默认端口
@@ -178,7 +189,7 @@ func New() (*Config, error) {
 	// 2. 设置配置文件
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
-	v.AddConfigPath(".") // 在当前目录查找
+	v.AddConfigPath(".")               // 在当前目录查找
 	v.AddConfigPath("/etc/docktunnel") // 在/etc/docktunnel目录查找
 
 	// 3. 绑定环境变量
@@ -198,6 +209,11 @@ func New() (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
+	}
+
+	// Backward compatibility: onExit: true → strategy: graceful-cleanup
+	if cfg.Cleanup.OnExit && cfg.Cleanup.Strategy == "" {
+		cfg.Cleanup.Strategy = "graceful-cleanup"
 	}
 
 	// 6. 验证必需字段
@@ -231,13 +247,13 @@ func (c *Config) SanitizeForLog() map[string]interface{} {
 			"format": c.Log.Format,
 		},
 		"cloudflare": map[string]interface{}{
-			"accountId":    c.Cloudflare.AccountID,
-			"tunnelId":     c.Cloudflare.TunnelID,
-			"tunnelName":   c.Cloudflare.TunnelName,
-			"catchAll":     c.Cloudflare.CatchAll,
-			"rateLimit":    c.Cloudflare.RateLimit,
-			"maxRetries":   c.Cloudflare.MaxRetries,
-			"retryDelay":   c.Cloudflare.RetryDelay,
+			"accountId":     c.Cloudflare.AccountID,
+			"tunnelId":      c.Cloudflare.TunnelID,
+			"tunnelName":    c.Cloudflare.TunnelName,
+			"catchAll":      c.Cloudflare.CatchAll,
+			"rateLimit":     c.Cloudflare.RateLimit,
+			"maxRetries":    c.Cloudflare.MaxRetries,
+			"retryDelay":    c.Cloudflare.RetryDelay,
 			"maxRetryDelay": c.Cloudflare.MaxRetryDelay,
 			// APIToken is intentionally omitted for security
 			"apiToken": "[REDACTED]",
@@ -248,10 +264,14 @@ func (c *Config) SanitizeForLog() map[string]interface{} {
 			"coolingPeriod":     c.Controller.CoolingPeriod,
 			"maxCoolingPeriod":  c.Controller.MaxCoolingPeriod,
 			"debounceDuration":  c.Controller.DebounceDuration,
+			"reconcileEnabled":  c.Controller.ReconcileEnabled,
+			"reconcileInterval": c.Controller.ReconcileInterval,
 		},
 		"cleanup": map[string]interface{}{
 			"onExit":    c.Cleanup.OnExit,
 			"stateFile": c.Cleanup.StateFile,
+			"strategy":  c.Cleanup.Strategy,
+			"timeout":   c.Cleanup.Timeout,
 		},
 		"defaults": map[string]interface{}{
 			"scheme": c.Defaults.Scheme,
