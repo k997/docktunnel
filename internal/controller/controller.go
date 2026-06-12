@@ -333,7 +333,6 @@ func (c *Controller) ForceSaveState() error {
 
 // handleContainerStop 处理容器停止事件
 func (c *Controller) handleContainerStop(ctx context.Context, event events.Event) error {
-	// Check if we have rules for this container (reliable even without ContainerInfo)
 	c.mu.RLock()
 	_, hasRules := c.containerRules[event.ContainerID]
 	c.mu.RUnlock()
@@ -344,23 +343,33 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 
 	slog.Info("Handling container stop event", "containerID", event.ContainerID)
 
-	// 检查容器是否处于抖动状态
 	if c.isFlapping(event.ContainerID) {
 		slog.Warn("Container is flapping, ignoring stop event", "containerID", event.ContainerID)
 		return nil
 	}
 
-	// 获取要删除的规则
-	c.mu.Lock()
-	hostnamesToRemove := c.containerRules[event.ContainerID]
-
-	// Get retention policy: prefer stateManager (persisted on start),
-	// fallback to event labels, then default to Immediate.
+	// Get retention policy: prefer stateManager, fallback to labels, then Immediate
 	var policy types.RetentionPolicy
 	if activeEntry, exists := c.stateManager.GetActiveTunnel(event.ContainerID); exists {
 		policy = activeEntry.RetentionPolicy
 	} else if event.ContainerInfo != nil && event.ContainerInfo.Config != nil && event.ContainerInfo.Config.Labels != nil {
 		policy = c.getContainerRetentionPolicy(event)
+		// Ensure active entry exists for Transition (fallback path)
+		now := time.Now()
+		c.mu.RLock()
+		hostnames := c.containerRules[event.ContainerID]
+		c.mu.RUnlock()
+		entry := &types.TunnelEntry{
+			ContainerID:     event.ContainerID,
+			RetentionPolicy: policy,
+			Status:          types.StatusActive,
+			CreatedAt:       now,
+			LastSyncAt:      now,
+		}
+		if len(hostnames) > 0 {
+			entry.Config.Hostname = hostnames[0]
+		}
+		c.stateManager.AddActiveTunnel(entry)
 	} else {
 		policy = types.RetentionPolicy{Type: types.Immediate}
 	}
@@ -370,81 +379,24 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 		"policyType", policy.Type,
 		"duration", policy.Duration)
 
-	now := time.Now()
-
-	// Handle based on retention policy
-	if policy.Type == types.Immediate {
-		// Immediate deletion - existing behavior
-		slog.Info("Immediate deletion for container", "containerID", event.ContainerID)
-
-		// 从容器规则映射中删除
-		delete(c.containerRules, event.ContainerID)
-
-		// 从ingress规则中删除对应的规则
-		for _, hostname := range hostnamesToRemove {
-			delete(c.ingressRules, hostname)
-		}
-	} else {
-		// Timed or Forever - move to pending deletions
-		slog.Info("Moving container to pending deletions",
-			"containerID", event.ContainerID,
-			"policy", policy.Type,
-			"duration", policy.Duration)
-
-		// Move from active tunnels to pending deletions
-		// If we have an active entry (from start event), move it to pending deletion
-		if activeEntry, exists := c.stateManager.GetActiveTunnel(event.ContainerID); exists {
-			// Move the active entry to pending deletion
-			activeEntry.Status = types.StatusPendingDelete
-			activeEntry.DeletedAt = &now
-			activeEntry.LastSyncAt = now
-			c.stateManager.AddPendingDeletion(activeEntry)
-			c.stateManager.RemoveActiveTunnel(event.ContainerID)
-		} else if event.ContainerInfo != nil {
-			parsedRules, err := label.Parse(event.ContainerInfo)
-			if err != nil {
-				c.mu.Unlock()
-				return fmt.Errorf("failed to parse labels for pending deletion: %w", err)
-			}
-
-			// Add each service to state manager with pending deletion status
-			for serviceName, rule := range parsedRules {
-				entry := &types.TunnelEntry{
-					ContainerID: event.ContainerID,
-					TunnelID:    c.cloudflareManager.GetTunnel().ID,
-					ServiceName: serviceName,
-					Config: types.TunnelConfiguration{
-						Hostname:   rule.Hostname.Value,
-						ServiceURL: rule.Service.Value,
-					},
-					RetentionPolicy: policy,
-					Status:          types.StatusPendingDelete,
-					CreatedAt:       now,
-					DeletedAt:       &now,
-					LastSyncAt:      now,
-				}
-				c.stateManager.AddPendingDeletion(entry)
-			}
-		}
-
-		// Remove from containerRules but keep in ingressRules (route still active)
-		delete(c.containerRules, event.ContainerID)
-		slog.Info("Routes kept active during retention period",
-			"containerID", event.ContainerID,
-			"hostnames", hostnamesToRemove,
-			"retention", policy.Duration)
+	// Transition state machine
+	actions, err := c.stateManager.Transition(event.ContainerID, types.EventContainerStopped, &policy)
+	if err != nil {
+		return fmt.Errorf("state transition failed: %w", err)
 	}
 
-	// 更新容器健康状态
+	// Execute actions: clear containerRules, handle ingress based on actions
+	c.mu.Lock()
+	delete(c.containerRules, event.ContainerID)
+	for _, action := range actions {
+		if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
+			delete(c.ingressRules, action.Hostname)
+		}
+	}
 	c.updateContainerHealth(event.ContainerID, false)
 	c.mu.Unlock()
 
-	// 同步更新后的规则到Cloudflare
-	if err := c.syncToCloudflare(ctx); err != nil {
-		return err
-	}
-
-	return nil
+	return c.syncToCloudflare(ctx)
 }
 
 // Sync 同步Docker容器状态到Cloudflare Tunnel配置

@@ -703,3 +703,100 @@ func TestReconcileAccessors(t *testing.T) {
 		t.Errorf("expected ReconcileInterval 60s, got %v", ctrl.ReconcileInterval())
 	}
 }
+
+func TestStop_Immediate_DeletesRouteViaTransition(t *testing.T) {
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "test-tunnel"},
+	}, ControllerOptions{
+		DebounceDuration: 2 * time.Second,
+	})
+
+	// Set up: container has rules and active tunnel with Immediate policy
+	ctrl.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("app.example.com"),
+		Service:  cloudflare.F("http://localhost:8080"),
+	}
+	ctrl.containerRules["c1"] = []string{"app.example.com"}
+	ctrl.stateManager.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID:     "c1",
+		RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+		Status:          types.StatusActive,
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+	})
+
+	stopEvent := events.Event{Type: "stop", ContainerID: "c1", ContainerInfo: nil}
+	err := ctrl.Dispatch(context.Background(), stopEvent)
+	if err != nil {
+		t.Fatalf("stop dispatch failed: %v", err)
+	}
+
+	// Ingress should be deleted
+	ctrl.mu.RLock()
+	_, ingressExists := ctrl.ingressRules["app.example.com"]
+	ctrl.mu.RUnlock()
+	if ingressExists {
+		t.Error("ingress should be deleted for Immediate retention")
+	}
+
+	// Container rules should be cleared
+	ctrl.mu.RLock()
+	_, rulesExist := ctrl.containerRules["c1"]
+	ctrl.mu.RUnlock()
+	if rulesExist {
+		t.Error("containerRules should be cleared")
+	}
+
+	// State should be PendingDelete
+	pending, _ := ctrl.stateManager.GetPendingDeletion("c1")
+	if pending != nil && pending.Status != types.StatusPendingDelete {
+		t.Errorf("expected StatusPendingDelete, got %d", pending.Status)
+	}
+}
+
+func TestStop_Timed_KeepsRouteViaTransition(t *testing.T) {
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "test-tunnel"},
+	}, ControllerOptions{
+		DebounceDuration: 2 * time.Second,
+	})
+
+	ctrl.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("app.example.com"),
+		Service:  cloudflare.F("http://localhost:8080"),
+	}
+	ctrl.containerRules["c1"] = []string{"app.example.com"}
+	ctrl.stateManager.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID:     "c1",
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+		Status:          types.StatusActive,
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+	})
+
+	stopEvent := events.Event{Type: "stop", ContainerID: "c1", ContainerInfo: nil}
+	err := ctrl.Dispatch(context.Background(), stopEvent)
+	if err != nil {
+		t.Fatalf("stop dispatch failed: %v", err)
+	}
+
+	// Ingress should be KEPT (Timed retention)
+	ctrl.mu.RLock()
+	_, ingressExists := ctrl.ingressRules["app.example.com"]
+	ctrl.mu.RUnlock()
+	if !ingressExists {
+		t.Error("ingress should be kept for Timed retention")
+	}
+
+	// Container rules should be cleared
+	ctrl.mu.RLock()
+	_, rulesExist := ctrl.containerRules["c1"]
+	ctrl.mu.RUnlock()
+	if rulesExist {
+		t.Error("containerRules should be cleared for Timed retention")
+	}
+
+	// State should be Retaining
+	pending, _ := ctrl.stateManager.GetPendingDeletion("c1")
+	if pending != nil && pending.Status != types.StatusRetaining {
+		t.Errorf("expected StatusRetaining, got %d", pending.Status)
+	}
+}
