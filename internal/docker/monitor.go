@@ -160,8 +160,22 @@ func (m *Manager) listenOnce(ctx context.Context, eventChannel chan<- events.Eve
 				}
 			case message.Action == "stop":
 				event.Type = eventTypes.ActionStop
+				containerInfo, err := m.client.ContainerInspect(ctx, event.ContainerID)
+				if err != nil {
+					slog.Warn("Failed to inspect container on stop event",
+						"containerID", event.ContainerID, "error", err)
+				} else {
+					event.ContainerInfo = &containerInfo
+				}
 			case message.Action == eventTypes.ActionDie:
 				event.Type = eventTypes.ActionDie
+				containerInfo, err := m.client.ContainerInspect(ctx, event.ContainerID)
+				if err != nil {
+					slog.Warn("Failed to inspect container on die event",
+						"containerID", event.ContainerID, "error", err)
+				} else {
+					event.ContainerInfo = &containerInfo
+				}
 			case message.Action == "health_status: healthy":
 				event.Type = events.ActionHealthHealthy
 				containerInfo, err := m.client.ContainerInspect(ctx, event.ContainerID)

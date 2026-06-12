@@ -24,8 +24,8 @@ import (
 )
 
 var (
-	cpuprofile  = flag.String("cpuprofile", "", "write cpu profile to `file`")
-	memprofile  = flag.String("memprofile", "", "write memory profile to `file`")
+	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
+	memprofile = flag.String("memprofile", "", "write memory profile to `file`")
 )
 
 func main() {
@@ -153,6 +153,10 @@ func main() {
 				if err := controller.RunGarbageCollection(ctx); err != nil {
 					appLogger.Error("Garbage collection failed", "error", err)
 				}
+				// Periodically persist state to disk
+				if err := controller.SaveStateIfDirty(); err != nil {
+					appLogger.Error("Failed to save state", "error", err)
+				}
 			case <-ctx.Done():
 				appLogger.Info("Garbage collection ticker stopped")
 				return
@@ -180,13 +184,22 @@ func main() {
 	}
 
 shutdown:
+	// Force save state before shutdown
+	if err := controller.ForceSaveState(); err != nil {
+		appLogger.Warn("Failed to save state before shutdown", "error", err)
+	}
+
 	// 取消上下文以通知所有goroutine关闭
 	cancel()
 
 	// 如果配置要求清理资源，则执行清理操作
 	if cfg.Cleanup.OnExit {
+		// Use a fresh context for cleanup — the main ctx is already cancelled
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+
 		appLogger.Info("Cleaning up resources as requested in configuration")
-		if err := controller.CleanupResources(ctx); err != nil {
+		if err := controller.CleanupResources(cleanupCtx); err != nil {
 			appLogger.Error("Failed to cleanup resources", "error", err)
 		} else {
 			appLogger.Info("Resources cleaned up successfully")

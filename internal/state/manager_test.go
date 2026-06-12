@@ -106,6 +106,49 @@ func TestAddPendingDeletion(t *testing.T) {
 	assert.Equal(t, types.StatusPendingDelete, retrieved.Status)
 }
 
+func TestAddPendingDeletion_MultiService(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+
+	webEntry := &types.TunnelEntry{
+		ContainerID: "container-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	apiEntry := &types.TunnelEntry{
+		ContainerID: "container-1",
+		ServiceName: "api",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		Config:      types.TunnelConfiguration{Hostname: "api.example.com"},
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+
+	sm.AddPendingDeletion(webEntry)
+	sm.AddPendingDeletion(apiEntry)
+
+	// Both services should be retrievable
+	entries := sm.GetPendingDeletionsByContainer("container-1")
+	assert.Len(t, entries, 2, "Both services should be stored, not overwritten")
+
+	hostnames := map[string]bool{}
+	for _, e := range entries {
+		hostnames[e.Config.Hostname] = true
+	}
+	assert.True(t, hostnames["web.example.com"])
+	assert.True(t, hostnames["api.example.com"])
+}
+
 func TestRestoreActiveTunnel(t *testing.T) {
 	sm := NewManager(slog.Default())
 
@@ -177,6 +220,16 @@ func TestFlappingExpiration(t *testing.T) {
 	assert.False(t, sm.CheckFlapping(containerID))
 }
 
+// containsExpiredEntry checks if the expired entries contain one for the given containerID
+func containsExpiredEntry(entries []*types.TunnelEntry, containerID string) bool {
+	for _, e := range entries {
+		if e.ContainerID == containerID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestGetSnapshot(t *testing.T) {
 	sm := NewManager(slog.Default())
 
@@ -191,6 +244,7 @@ func TestGetSnapshot(t *testing.T) {
 	now := time.Now()
 	pendingEntry := &types.TunnelEntry{
 		ContainerID: "pending-1",
+		ServiceName: "web",
 		Status:      types.StatusPendingDelete,
 		DeletedAt:   &now,
 	}
@@ -204,13 +258,14 @@ func TestGetSnapshot(t *testing.T) {
 	assert.Len(t, snapshot.ActiveTunnels, 1)
 	assert.Len(t, snapshot.PendingDeletions, 1)
 	assert.Contains(t, snapshot.ActiveTunnels, "active-1")
-	assert.Contains(t, snapshot.PendingDeletions, "pending-1")
+	// Key is compound: "pending-1:web"
+	assert.Contains(t, snapshot.PendingDeletions, "pending-1:web")
 }
 
 func TestLoadFromSnapshot(t *testing.T) {
 	sm := NewManager(slog.Default())
 
-	// Create a snapshot
+	// Create a snapshot with compound keys
 	now := time.Now()
 	snapshot := &types.StateSnapshot{
 		Version:   1,
@@ -222,8 +277,9 @@ func TestLoadFromSnapshot(t *testing.T) {
 			},
 		},
 		PendingDeletions: map[string]*types.TunnelEntry{
-			"pending-1": {
+			"pending-1:web": {
 				ContainerID: "pending-1",
+				ServiceName: "web",
 				Status:      types.StatusPendingDelete,
 				DeletedAt:   &now,
 			},
@@ -269,7 +325,7 @@ func TestRunGC_ImmediatePolicy(t *testing.T) {
 
 	expired, err := sm.RunGC(context.Background())
 	require.NoError(t, err)
-	assert.Contains(t, expired, "immediate-1")
+	assert.True(t, containsExpiredEntry(expired, "immediate-1"), "Immediate entry should be expired")
 
 	// Should be removed
 	_, ok := sm.GetPendingDeletion("immediate-1")
@@ -295,7 +351,7 @@ func TestRunGC_TimedPolicy(t *testing.T) {
 
 	expired, err := sm.RunGC(context.Background())
 	require.NoError(t, err)
-	assert.Contains(t, expired, "timed-1")
+	assert.True(t, containsExpiredEntry(expired, "timed-1"), "Expired timed entry should be expired")
 
 	// Should be removed
 	_, ok := sm.GetPendingDeletion("timed-1")
@@ -321,7 +377,7 @@ func TestRunGC_TimedPolicyNotExpired(t *testing.T) {
 
 	expired, err := sm.RunGC(context.Background())
 	require.NoError(t, err)
-	assert.NotContains(t, expired, "timed-not-expired")
+	assert.False(t, containsExpiredEntry(expired, "timed-not-expired"), "Unexpired entry should not be expired")
 
 	// Should still be present
 	_, ok := sm.GetPendingDeletion("timed-not-expired")
@@ -345,7 +401,7 @@ func TestRunGC_ForeverPolicy(t *testing.T) {
 
 	expired, err := sm.RunGC(context.Background())
 	require.NoError(t, err)
-	assert.NotContains(t, expired, "forever-1")
+	assert.False(t, containsExpiredEntry(expired, "forever-1"), "Forever entries should not be expired")
 
 	// Should still be present (forever policy)
 	_, ok := sm.GetPendingDeletion("forever-1")
@@ -363,6 +419,7 @@ func TestGetStats(t *testing.T) {
 	now := time.Now()
 	sm.AddPendingDeletion(&types.TunnelEntry{
 		ContainerID: "pending-1",
+		ServiceName: "web",
 		Status:      types.StatusPendingDelete,
 		DeletedAt:   &now,
 	})
@@ -483,7 +540,7 @@ func TestGC_PreservesForeverEntries(t *testing.T) {
 	require.NoError(t, err)
 
 	// Forever entry should NOT be expired
-	assert.NotContains(t, expired, "forever-entry", "Forever entries should not be garbage collected")
+	assert.False(t, containsExpiredEntry(expired, "forever-entry"), "Forever entries should not be garbage collected")
 
 	// Should still be in pending deletions
 	_, ok := sm.GetPendingDeletion("forever-entry")
@@ -514,7 +571,7 @@ func TestGC_ExpireTimedEntries(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be expired
-	assert.Contains(t, expired, "expired-timed", "Expired timed entry should be garbage collected")
+	assert.True(t, containsExpiredEntry(expired, "expired-timed"), "Expired timed entry should be garbage collected")
 
 	// Should no longer be in pending deletions
 	_, ok := sm.GetPendingDeletion("expired-timed")
@@ -545,7 +602,7 @@ func TestGC_PreserveUnexpiredTimedEntries(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should NOT be expired
-	assert.NotContains(t, expired, "unexpired-timed", "Unexpired timed entry should not be garbage collected")
+	assert.False(t, containsExpiredEntry(expired, "unexpired-timed"), "Unexpired timed entry should not be garbage collected")
 
 	// Should still be in pending deletions
 	_, ok := sm.GetPendingDeletion("unexpired-timed")

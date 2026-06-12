@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,15 +25,30 @@ const (
 
 // Manager manages the state of all tunnel entries
 type Manager struct {
-	mu                sync.RWMutex
-	activeTunnels     map[string]*types.TunnelEntry     // key: containerID
-	pendingDeletes    map[string]*types.TunnelEntry     // key: containerID
-	flappingContainers map[string]types.FlappingState   // key: containerID
+	mu                 sync.RWMutex
+	activeTunnels      map[string]*types.TunnelEntry  // key: containerID
+	pendingDeletes     map[string]*types.TunnelEntry  // key: containerID:serviceName (compound)
+	flappingContainers map[string]types.FlappingState // key: containerID
 
-	logger      *slog.Logger
-	statePath   string
-	lastSaved   time.Time
-	dirty       bool // true if state has changed since last save
+	logger    *slog.Logger
+	statePath string
+	lastSaved time.Time
+	dirty     bool // true if state has changed since last save
+}
+
+// pendingDeleteKey generates a unique map key for pending deletions using
+// containerID and serviceName, allowing multiple services per container.
+func pendingDeleteKey(containerID, serviceName string) string {
+	return containerID + ":" + serviceName
+}
+
+// containerIDFromKey extracts the container ID from a pending delete key.
+func containerIDFromKey(key string) string {
+	idx := strings.Index(key, ":")
+	if idx == -1 {
+		return key
+	}
+	return key[:idx]
 }
 
 // NewManager creates a new state manager
@@ -169,8 +185,9 @@ func (sm *Manager) AddPendingDeletion(entry *types.TunnelEntry) {
 	// Remove from active if present
 	delete(sm.activeTunnels, entry.ContainerID)
 
-	// Add to pending deletions
-	sm.pendingDeletes[entry.ContainerID] = entry
+	// Add to pending deletions with compound key (containerID:serviceName)
+	key := pendingDeleteKey(entry.ContainerID, entry.ServiceName)
+	sm.pendingDeletes[key] = entry
 	sm.markDirty()
 	sm.logger.Info("Moved tunnel to pending deletion",
 		"container_id", entry.ContainerID,
@@ -179,25 +196,50 @@ func (sm *Manager) AddPendingDeletion(entry *types.TunnelEntry) {
 	)
 }
 
-// RemovePendingDeletion removes a tunnel from the pending deletion map
-func (sm *Manager) RemovePendingDeletion(containerID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if _, exists := sm.pendingDeletes[containerID]; exists {
-		delete(sm.pendingDeletes, containerID)
-		sm.markDirty()
-		sm.logger.Debug("Removed pending deletion", "container_id", containerID)
-	}
-}
-
-// GetPendingDeletion retrieves a pending deletion entry by container ID
+// GetPendingDeletion retrieves a pending deletion entry by container ID.
+// Returns the first matching entry for the container.
 func (sm *Manager) GetPendingDeletion(containerID string) (*types.TunnelEntry, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	entry, ok := sm.pendingDeletes[containerID]
-	return entry, ok
+	for key, entry := range sm.pendingDeletes {
+		if containerIDFromKey(key) == containerID {
+			return entry, true
+		}
+	}
+	return nil, false
+}
+
+// GetPendingDeletionsByContainer returns all pending deletion entries for a container.
+func (sm *Manager) GetPendingDeletionsByContainer(containerID string) []*types.TunnelEntry {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	var entries []*types.TunnelEntry
+	for key, entry := range sm.pendingDeletes {
+		if containerIDFromKey(key) == containerID {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// RemovePendingDeletion removes all pending deletion entries for a container.
+func (sm *Manager) RemovePendingDeletion(containerID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	removed := false
+	for key := range sm.pendingDeletes {
+		if containerIDFromKey(key) == containerID {
+			delete(sm.pendingDeletes, key)
+			removed = true
+		}
+	}
+	if removed {
+		sm.markDirty()
+		sm.logger.Debug("Removed pending deletions", "container_id", containerID)
+	}
 }
 
 // GetAllPendingDeletions returns a copy of all pending deletions
@@ -212,27 +254,28 @@ func (sm *Manager) GetAllPendingDeletions() map[string]*types.TunnelEntry {
 	return result
 }
 
-// RestoreActiveTunnel moves a tunnel from pending deletion back to active
+// RestoreActiveTunnel moves all pending deletion entries for a container back to active
 func (sm *Manager) RestoreActiveTunnel(containerID string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	entry, exists := sm.pendingDeletes[containerID]
-	if !exists {
-		return nil // Not in pending deletions, nothing to restore
+	var found bool
+	for key, entry := range sm.pendingDeletes {
+		if containerIDFromKey(key) == containerID {
+			delete(sm.pendingDeletes, key)
+			entry.Status = types.StatusActive
+			entry.DeletedAt = nil
+			sm.activeTunnels[containerID] = entry
+			found = true
+		}
 	}
 
-	// Move back to active
-	delete(sm.pendingDeletes, containerID)
-	entry.Status = types.StatusActive
-	entry.DeletedAt = nil
-	sm.activeTunnels[containerID] = entry
-	sm.markDirty()
-
-	sm.logger.Info("Restored tunnel to active",
-		"container_id", containerID,
-		"service_name", entry.ServiceName,
-	)
+	if found {
+		sm.markDirty()
+		sm.logger.Info("Restored tunnel to active",
+			"container_id", containerID,
+		)
+	}
 
 	return nil
 }
@@ -392,16 +435,16 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 	)
 }
 
-// RunGC runs garbage collection for expired pending deletions
-// This should be called periodically (e.g., every 60 seconds)
-func (sm *Manager) RunGC(ctx context.Context) ([]string, error) {
+// RunGC runs garbage collection for expired pending deletions.
+// Returns the expired entries (with hostname info) so the caller can clean up ingress rules.
+func (sm *Manager) RunGC(ctx context.Context) ([]*types.TunnelEntry, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	now := time.Now()
-	var expiredContainers []string
+	var expiredEntries []*types.TunnelEntry
 
-	for containerID, entry := range sm.pendingDeletes {
+	for key, entry := range sm.pendingDeletes {
 		shouldDelete := false
 
 		switch entry.RetentionPolicy.Type {
@@ -415,25 +458,23 @@ func (sm *Manager) RunGC(ctx context.Context) ([]string, error) {
 					shouldDelete = true
 				}
 			} else {
-				// DeletedAt not set, delete now
 				shouldDelete = true
 			}
 
 		case types.Forever:
-			// Never auto-delete
 			continue
 		}
 
 		if shouldDelete {
-			expiredContainers = append(expiredContainers, containerID)
 			entry.Status = types.StatusDeleted
 			sm.logger.Info("Garbage collected tunnel entry",
-				"container_id", containerID,
+				"container_id", entry.ContainerID,
 				"service_name", entry.ServiceName,
 				"retention_type", entry.RetentionPolicy.Type,
 			)
-			delete(sm.pendingDeletes, containerID)
+			delete(sm.pendingDeletes, key)
 			sm.markDirty()
+			expiredEntries = append(expiredEntries, entry)
 		}
 	}
 
@@ -447,7 +488,7 @@ func (sm *Manager) RunGC(ctx context.Context) ([]string, error) {
 		}
 	}
 
-	return expiredContainers, nil
+	return expiredEntries, nil
 }
 
 // GetStats returns statistics about the current state
