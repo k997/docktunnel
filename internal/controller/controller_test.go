@@ -632,3 +632,74 @@ func TestStopUsesStoredRetentionPolicyWithoutContainerInfo(t *testing.T) {
 		t.Errorf("expected Timed retention in pending deletion, got %d", pending.RetentionPolicy.Type)
 	}
 }
+
+func TestReconcile_NoDriftWithNilDockerManager(t *testing.T) {
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "test-tunnel"},
+	}, ControllerOptions{
+		DebounceDuration: 2 * time.Second,
+	})
+
+	// Set up current state with a retaining rule
+	ctrl.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("app.example.com"),
+		Service:  cloudflare.F("http://localhost:8080"),
+	}
+	ctrl.containerRules["container-1"] = []string{"app.example.com"}
+
+	// Reconcile with no Docker manager → returns nil early
+	err := ctrl.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	// Rules should be unchanged
+	ctrl.mu.RLock()
+	_, exists := ctrl.ingressRules["app.example.com"]
+	ctrl.mu.RUnlock()
+	if !exists {
+		t.Error("expected app.example.com to remain in ingressRules")
+	}
+}
+
+func TestReconcile_RetainingRulesPreserved(t *testing.T) {
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "test-tunnel"},
+	}, ControllerOptions{
+		DebounceDuration: 2 * time.Second,
+	})
+
+	// Set up a retaining rule: in ingressRules but NOT in containerRules
+	ctrl.ingressRules["retained.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("retained.example.com"),
+		Service:  cloudflare.F("http://localhost:8080"),
+	}
+	// No containerRules entry for this hostname — it's a retaining rule
+
+	// Reconcile with nil dockerManager returns early, no changes
+	err := ctrl.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	ctrl.mu.RLock()
+	_, exists := ctrl.ingressRules["retained.example.com"]
+	ctrl.mu.RUnlock()
+	if !exists {
+		t.Error("retaining rule should be preserved")
+	}
+}
+
+func TestReconcileAccessors(t *testing.T) {
+	ctrl := NewController(nil, nil, ControllerOptions{
+		ReconcileEnabled:  true,
+		ReconcileInterval: 60 * time.Second,
+	})
+
+	if !ctrl.ReconcileEnabled() {
+		t.Error("expected ReconcileEnabled to be true")
+	}
+	if ctrl.ReconcileInterval() != 60*time.Second {
+		t.Errorf("expected ReconcileInterval 60s, got %v", ctrl.ReconcileInterval())
+	}
+}
