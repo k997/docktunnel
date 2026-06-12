@@ -243,10 +243,26 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 		return nil
 	}
 
-	if _, err := c.registerContainerRules(ctx, event); err != nil {
+	hostnames, err := c.registerContainerRules(ctx, event)
+	if err != nil {
 		slog.Error("Failed to register container rules", "error", err, "containerID", event.ContainerID)
 		return err
 	}
+
+	// Persist retention policy in state manager for idempotent stop behavior
+	policy := c.getContainerRetentionPolicy(event)
+	now := time.Now()
+	tunnelEntry := &types.TunnelEntry{
+		ContainerID:     event.ContainerID,
+		RetentionPolicy: policy,
+		Status:          types.StatusActive,
+		CreatedAt:       now,
+		LastSyncAt:      now,
+	}
+	if len(hostnames) > 0 {
+		tunnelEntry.Config.Hostname = hostnames[0]
+	}
+	c.stateManager.AddActiveTunnel(tunnelEntry)
 
 	c.mu.Lock()
 	c.updateContainerHealth(event.ContainerID, true)

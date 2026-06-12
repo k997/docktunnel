@@ -524,3 +524,58 @@ func TestDispatch_HealthEventsDoNotTriggerFlapping(t *testing.T) {
 		t.Error("health events should not trigger flapping - container should still have rules")
 	}
 }
+
+func TestRetentionPolicyPersistedOnStart(t *testing.T) {
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "test-tunnel"},
+	}, ControllerOptions{
+		FlappingWindow:    60 * time.Second,
+		FlappingThreshold: 5,
+		CoolingPeriod:     5 * time.Minute,
+		MaxCoolingPeriod:  30 * time.Minute,
+		DebounceDuration:  2 * time.Second,
+	})
+
+	containerInfo := &containerTypes.InspectResponse{
+		ContainerJSONBase: &containerTypes.ContainerJSONBase{
+			HostConfig: &containerTypes.HostConfig{NetworkMode: "bridge"},
+		},
+		Config: &containerTypes.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":        "true",
+				"docktunnel.web.hostname":  "app.example.com",
+				"docktunnel.web.service":   "http://localhost:8080",
+				"docktunnel.web.retention": "1h",
+			},
+		},
+		NetworkSettings: &containerTypes.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	startEvent := events.Event{
+		Type:          "start",
+		ContainerID:   "retain-container",
+		ContainerInfo: containerInfo,
+	}
+
+	err := ctrl.Dispatch(context.Background(), startEvent)
+	if err != nil {
+		t.Fatalf("start dispatch failed: %v", err)
+	}
+
+	entry, exists := ctrl.stateManager.GetActiveTunnel("retain-container")
+	if !exists {
+		t.Fatal("expected active tunnel entry after start with retention label")
+	}
+
+	if entry.RetentionPolicy.Type != types.Timed {
+		t.Errorf("expected Timed retention, got %d", entry.RetentionPolicy.Type)
+	}
+
+	if entry.RetentionPolicy.Duration != 1*time.Hour {
+		t.Errorf("expected 1h retention duration, got %v", entry.RetentionPolicy.Duration)
+	}
+}
