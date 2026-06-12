@@ -12,9 +12,17 @@ import (
 	"docktunnel/internal/events"
 )
 
+// dockerClient abstracts the Docker API methods used by Manager.
+type dockerClient interface {
+	ContainerList(ctx context.Context, options containerTypes.ListOptions) ([]containerTypes.Summary, error)
+	ContainerInspect(ctx context.Context, containerID string) (containerTypes.InspectResponse, error)
+	Events(ctx context.Context, options eventTypes.ListOptions) (<-chan eventTypes.Message, <-chan error)
+	Close() error
+}
+
 // Manager 封装了所有Docker相关的操作
 type Manager struct {
-	client *client.Client
+	client dockerClient
 }
 
 // NewManager 创建一个新的Docker Manager实例
