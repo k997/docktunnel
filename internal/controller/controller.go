@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"docktunnel/internal/label"
 	"docktunnel/internal/state"
 	"docktunnel/pkg/types"
 
@@ -183,7 +184,7 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	}
 
 	// 解析容器标签生成规则
-	parsedRules, err := parseLabelsToIngress(event.ContainerInfo)
+	parsedRules, err := label.Parse(event.ContainerInfo)
 	if err != nil {
 		slog.Error("Failed to parse container labels", "error", err, "containerID", event.ContainerID)
 		return fmt.Errorf("failed to parse container labels for container %s: %w", event.ContainerID, err)
@@ -251,7 +252,7 @@ func (c *Controller) getContainerRetentionPolicy(event events.Event) types.Reten
 		return types.RetentionPolicy{Type: types.Immediate}
 	}
 
-	policy, err := ParseRetentionPolicy(retentionLabel)
+	policy, err := label.ParseRetentionPolicy(retentionLabel)
 	if err != nil {
 		slog.Warn("Invalid retention policy, defaulting to immediate",
 			"containerID", event.ContainerID,
@@ -330,7 +331,7 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 			"duration", policy.Duration)
 
 		// Create tunnel entries for state manager
-		parsedRules, err := parseLabelsToIngress(event.ContainerInfo)
+		parsedRules, err := label.Parse(event.ContainerInfo)
 		if err != nil {
 			c.mu.Unlock()
 			return fmt.Errorf("failed to parse labels for pending deletion: %w", err)
@@ -437,7 +438,7 @@ func (c *Controller) Sync(ctx context.Context) error {
 		}
 
 		// 解析标签获取主机名
-		parsedRules, err := parseLabelsToIngress(event.ContainerInfo)
+		parsedRules, err := label.Parse(event.ContainerInfo)
 		if err != nil {
 			slog.Error("Failed to parse container labels during sync", "containerID", event.ContainerID, "error", err)
 			continue
