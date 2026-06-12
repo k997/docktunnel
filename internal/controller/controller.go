@@ -354,9 +354,12 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 	c.mu.Lock()
 	hostnamesToRemove := c.containerRules[event.ContainerID]
 
-	// Get retention policy from labels if available, default to Immediate
+	// Get retention policy: prefer stateManager (persisted on start),
+	// fallback to event labels, then default to Immediate.
 	var policy types.RetentionPolicy
-	if event.ContainerInfo != nil && event.ContainerInfo.Config != nil && event.ContainerInfo.Config.Labels != nil {
+	if activeEntry, exists := c.stateManager.GetActiveTunnel(event.ContainerID); exists {
+		policy = activeEntry.RetentionPolicy
+	} else if event.ContainerInfo != nil && event.ContainerInfo.Config != nil && event.ContainerInfo.Config.Labels != nil {
 		policy = c.getContainerRetentionPolicy(event)
 	} else {
 		policy = types.RetentionPolicy{Type: types.Immediate}
@@ -388,8 +391,16 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 			"policy", policy.Type,
 			"duration", policy.Duration)
 
-		// Create tunnel entries for state manager
-		if event.ContainerInfo != nil {
+		// Move from active tunnels to pending deletions
+		// If we have an active entry (from start event), move it to pending deletion
+		if activeEntry, exists := c.stateManager.GetActiveTunnel(event.ContainerID); exists {
+			// Move the active entry to pending deletion
+			activeEntry.Status = types.StatusPendingDelete
+			activeEntry.DeletedAt = &now
+			activeEntry.LastSyncAt = now
+			c.stateManager.AddPendingDeletion(activeEntry)
+			c.stateManager.RemoveActiveTunnel(event.ContainerID)
+		} else if event.ContainerInfo != nil {
 			parsedRules, err := label.Parse(event.ContainerInfo)
 			if err != nil {
 				c.mu.Unlock()

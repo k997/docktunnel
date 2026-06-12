@@ -579,3 +579,56 @@ func TestRetentionPolicyPersistedOnStart(t *testing.T) {
 		t.Errorf("expected 1h retention duration, got %v", entry.RetentionPolicy.Duration)
 	}
 }
+
+func TestStopUsesStoredRetentionPolicyWithoutContainerInfo(t *testing.T) {
+	ctrl := NewController(nil, &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "test-tunnel"},
+	}, ControllerOptions{
+		FlappingWindow:    60 * time.Second,
+		FlappingThreshold: 5,
+		CoolingPeriod:     5 * time.Minute,
+		MaxCoolingPeriod:  30 * time.Minute,
+		DebounceDuration:  2 * time.Second,
+	})
+
+	// Manually set up state: container with rules and a Timed retention policy
+	ctrl.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("app.example.com"),
+		Service:  cloudflare.F("http://localhost:8080"),
+	}
+	ctrl.containerRules["stop-container"] = []string{"app.example.com"}
+
+	// Store retention policy in state manager (simulating what handleContainerStart does)
+	now := time.Now()
+	ctrl.stateManager.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "stop-container",
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 1 * time.Hour,
+		},
+		Status:    types.StatusActive,
+		CreatedAt: now,
+	})
+
+	// Stop event WITHOUT ContainerInfo (simulates stop/die with nil info)
+	stopEvent := events.Event{
+		Type:          "stop",
+		ContainerID:   "stop-container",
+		ContainerInfo: nil,
+	}
+
+	err := ctrl.Dispatch(context.Background(), stopEvent)
+	if err != nil {
+		t.Fatalf("stop dispatch failed: %v", err)
+	}
+
+	// Should have moved to pending deletion (Timed), not Immediate deletion
+	pending, exists := ctrl.stateManager.GetPendingDeletion("stop-container")
+	if !exists {
+		t.Fatal("expected pending deletion for Timed retention policy")
+	}
+
+	if pending.RetentionPolicy.Type != types.Timed {
+		t.Errorf("expected Timed retention in pending deletion, got %d", pending.RetentionPolicy.Type)
+	}
+}
