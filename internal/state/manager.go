@@ -445,36 +445,44 @@ func (sm *Manager) RunGC(ctx context.Context) ([]*types.TunnelEntry, error) {
 	var expiredEntries []*types.TunnelEntry
 
 	for key, entry := range sm.pendingDeletes {
-		shouldDelete := false
-
-		switch entry.RetentionPolicy.Type {
-		case types.Immediate:
-			shouldDelete = true
-
-		case types.Timed:
-			if entry.DeletedAt != nil {
-				elapsed := now.Sub(*entry.DeletedAt)
-				if elapsed >= entry.RetentionPolicy.Duration {
-					shouldDelete = true
-				}
-			} else {
-				shouldDelete = true
-			}
-
-		case types.Forever:
-			continue
-		}
-
-		if shouldDelete {
+		switch entry.Status {
+		case types.StatusPendingDelete:
+			// Immediate or already expired — clean up
 			entry.Status = types.StatusDeleted
-			sm.logger.Info("Garbage collected tunnel entry",
+			sm.logger.Info("Garbage collected PendingDelete entry",
 				"container_id", entry.ContainerID,
 				"service_name", entry.ServiceName,
-				"retention_type", entry.RetentionPolicy.Type,
 			)
 			delete(sm.pendingDeletes, key)
 			sm.markDirty()
 			expiredEntries = append(expiredEntries, entry)
+
+		case types.StatusRetaining:
+			switch entry.RetentionPolicy.Type {
+			case types.Timed:
+				if entry.DeletedAt != nil {
+					elapsed := now.Sub(*entry.DeletedAt)
+					if elapsed >= entry.RetentionPolicy.Duration {
+						entry.Status = types.StatusDeleted
+						sm.logger.Info("Garbage collected expired Retaining entry",
+							"container_id", entry.ContainerID,
+							"service_name", entry.ServiceName,
+							"hostname", entry.Config.Hostname,
+						)
+						delete(sm.pendingDeletes, key)
+						sm.markDirty()
+						expiredEntries = append(expiredEntries, entry)
+					}
+				} else {
+					// No DeletedAt — treat as expired
+					entry.Status = types.StatusDeleted
+					delete(sm.pendingDeletes, key)
+					sm.markDirty()
+					expiredEntries = append(expiredEntries, entry)
+				}
+			case types.Forever:
+				// Never auto-clean
+			}
 		}
 	}
 

@@ -340,7 +340,7 @@ func TestRunGC_TimedPolicy(t *testing.T) {
 	entry := &types.TunnelEntry{
 		ContainerID: "timed-1",
 		ServiceName: "web",
-		Status:      types.StatusPendingDelete,
+		Status:      types.StatusRetaining,
 		DeletedAt:   &past,
 		RetentionPolicy: types.RetentionPolicy{
 			Type:     types.Timed,
@@ -366,7 +366,7 @@ func TestRunGC_TimedPolicyNotExpired(t *testing.T) {
 	entry := &types.TunnelEntry{
 		ContainerID: "timed-not-expired",
 		ServiceName: "web",
-		Status:      types.StatusPendingDelete,
+		Status:      types.StatusRetaining,
 		DeletedAt:   &recent,
 		RetentionPolicy: types.RetentionPolicy{
 			Type:     types.Timed,
@@ -391,7 +391,7 @@ func TestRunGC_ForeverPolicy(t *testing.T) {
 	entry := &types.TunnelEntry{
 		ContainerID: "forever-1",
 		ServiceName: "web",
-		Status:      types.StatusPendingDelete,
+		Status:      types.StatusRetaining,
 		DeletedAt:   &now,
 		RetentionPolicy: types.RetentionPolicy{
 			Type: types.Forever,
@@ -527,7 +527,7 @@ func TestGC_PreservesForeverEntries(t *testing.T) {
 	foreverEntry := &types.TunnelEntry{
 		ContainerID: "forever-entry",
 		ServiceName: "web",
-		Status:      types.StatusPendingDelete,
+		Status:      types.StatusRetaining,
 		DeletedAt:   &now,
 		RetentionPolicy: types.RetentionPolicy{
 			Type: types.Forever,
@@ -557,7 +557,7 @@ func TestGC_ExpireTimedEntries(t *testing.T) {
 	expiredEntry := &types.TunnelEntry{
 		ContainerID: "expired-timed",
 		ServiceName: "web",
-		Status:      types.StatusPendingDelete,
+		Status:      types.StatusRetaining,
 		DeletedAt:   &oldTime,
 		RetentionPolicy: types.RetentionPolicy{
 			Type:     types.Timed,
@@ -588,7 +588,7 @@ func TestGC_PreserveUnexpiredTimedEntries(t *testing.T) {
 	unexpiredEntry := &types.TunnelEntry{
 		ContainerID: "unexpired-timed",
 		ServiceName: "web",
-		Status:      types.StatusPendingDelete,
+		Status:      types.StatusRetaining,
 		DeletedAt:   &recentTime,
 		RetentionPolicy: types.RetentionPolicy{
 			Type:     types.Timed,
@@ -607,4 +607,108 @@ func TestGC_PreserveUnexpiredTimedEntries(t *testing.T) {
 	// Should still be in pending deletions
 	_, ok := sm.GetPendingDeletion("unexpired-timed")
 	assert.True(t, ok, "Unexpired entry should still be in pending deletions")
+}
+
+func TestRunGC_RetainingTimed_Expired(t *testing.T) {
+	sm := NewManager(slog.Default())
+	past := time.Now().Add(-2 * time.Hour)
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+		DeletedAt:       &past,
+	})
+
+	expired, err := sm.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	if len(expired) != 1 {
+		t.Fatalf("expected 1 expired entry, got %d", len(expired))
+	}
+	if expired[0].ContainerID != "c1" {
+		t.Errorf("expected c1, got %s", expired[0].ContainerID)
+	}
+
+	_, exists := sm.GetPendingDeletion("c1")
+	if exists {
+		t.Error("expired entry should be removed")
+	}
+}
+
+func TestRunGC_RetainingTimed_NotExpired(t *testing.T) {
+	sm := NewManager(slog.Default())
+	recent := time.Now().Add(-5 * time.Minute)
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+		DeletedAt:       &recent,
+	})
+
+	expired, err := sm.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	if len(expired) != 0 {
+		t.Fatalf("expected 0 expired entries, got %d", len(expired))
+	}
+
+	_, exists := sm.GetPendingDeletion("c1")
+	if !exists {
+		t.Error("non-expired Retaining entry should still exist")
+	}
+}
+
+func TestRunGC_RetainingForever_NeverExpires(t *testing.T) {
+	sm := NewManager(slog.Default())
+	past := time.Now().Add(-365 * 24 * time.Hour)
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Forever},
+		DeletedAt:       &past,
+	})
+
+	expired, err := sm.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	if len(expired) != 0 {
+		t.Fatalf("Forever entries should never expire, got %d expired", len(expired))
+	}
+}
+
+func TestRunGC_PendingDelete_CleanedUp(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusPendingDelete,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+	})
+
+	expired, err := sm.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	if len(expired) != 1 {
+		t.Fatalf("expected 1 expired entry, got %d", len(expired))
+	}
+
+	_, exists := sm.GetPendingDeletion("c1")
+	if exists {
+		t.Error("PendingDelete entry should be removed")
+	}
 }
