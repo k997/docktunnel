@@ -51,10 +51,10 @@ func (m *mockCloudflareManager) UpsertDNSRecords(ctx context.Context, hostnames 
 func TestNewController(t *testing.T) {
 	// 测试创建控制器实例
 	controller := &Controller{
-		ingressRules:   make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress),
-		containerRules: make(map[string][]string),
+		ingressRules:    make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress),
+		containerRules:  make(map[string][]string),
 		containerHealth: make(map[string]*ContainerHealth),
-		ruleValidator:  NewCompositeValidator(),
+		ruleValidator:   NewCompositeValidator(),
 	}
 
 	if controller == nil {
@@ -65,14 +65,14 @@ func TestNewController(t *testing.T) {
 	if len(controller.ingressRules) != 0 {
 		t.Errorf("Expected no rules initially, got %d", len(controller.ingressRules))
 	}
-	
+
 	// 检查通过GetIngressRules方法可以获取到catch-all规则
 	rules := controller.GetIngressRules()
 	if len(rules) == 0 {
 		t.Error("Expected to get rules from GetIngressRules, got none")
 		return
 	}
-	
+
 	// 检查最后一个规则是否为catch-all规则
 	lastRule := rules[len(rules)-1]
 	if lastRule.Service.Value != "http_status:404" {
@@ -122,14 +122,14 @@ func TestNewControllerWithOptions(t *testing.T) {
 	if len(controller.ingressRules) != 0 {
 		t.Errorf("Expected no rules initially, got %d", len(controller.ingressRules))
 	}
-	
+
 	// 检查通过GetIngressRules方法可以获取到catch-all规则
 	rules := controller.GetIngressRules()
 	if len(rules) == 0 {
 		t.Error("Expected to get rules from GetIngressRules, got none")
 		return
 	}
-	
+
 	// 检查最后一个规则是否为catch-all规则
 	lastRule := rules[len(rules)-1]
 	if lastRule.Service.Value != "http_status:404" {
@@ -214,7 +214,6 @@ func TestCleanupResourcesLogic(t *testing.T) {
 	if len(rules) != 1 { // 只应该保留动态添加的catch-all规则
 		t.Errorf("Expected 1 ingress rule after cleanup (catch-all), got %d", len(rules))
 	}
-
 
 	// 检查containerRules是否被清空
 	if len(controller.containerRules) != 0 {

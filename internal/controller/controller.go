@@ -54,7 +54,7 @@ type ContainerHealth struct {
 type Controller struct {
 	dockerManager     *docker.Manager
 	cloudflareManager CloudflareManager
-	stateManager      *state.Manager // State manager for retention policies
+	stateManager      *state.Manager                                                                // State manager for retention policies
 	ingressRules      map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress // hostname -> rule map
 	containerRules    map[string][]string                                                           // containerID -> hostnames map
 	containerHealth   map[string]*ContainerHealth                                                   // containerID -> health info
@@ -359,7 +359,7 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 				TunnelID:    c.cloudflareManager.GetTunnel().ID,
 				ServiceName: serviceName,
 				Config: types.TunnelConfiguration{
-					Hostname:  rule.Hostname.Value,
+					Hostname:   rule.Hostname.Value,
 					ServiceURL: rule.Service.Value,
 				},
 				RetentionPolicy: policy,
@@ -632,7 +632,7 @@ func (c *Controller) syncDNSRecords(ctx context.Context) error {
 		}
 	}
 
-	slog.Info("DNS sync operations", 
+	slog.Info("DNS sync operations",
 		"toUpsert", len(upsertHostnames), "upsertList", upsertHostnames,
 		"toDelete", len(deleteHostnames), "deleteList", deleteHostnames)
 
