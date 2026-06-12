@@ -3,6 +3,8 @@ package docker
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"time"
 
 	containerTypes "github.com/docker/docker/api/types/container"
 	eventTypes "github.com/docker/docker/api/types/events"
@@ -73,50 +75,117 @@ func (m *Manager) ScanRunningContainers(ctx context.Context) ([]events.Event, er
 	return result, nil
 }
 
-// ListenForEvents 监听Docker事件并在相关事件发生时通过channel发送通知
+// ListenForEvents listens to Docker events with automatic reconnection.
 func (m *Manager) ListenForEvents(ctx context.Context, eventChannel chan<- events.Event) error {
-	// 创建过滤器，只监听容器相关的事件
+	backoff := 1 * time.Second
+	const maxBackoff = 60 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		connectedAt := time.Now()
+		err := m.listenOnce(ctx, eventChannel)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+
+		// If connection lasted >30s, reset backoff
+		if time.Since(connectedAt) > 30*time.Second {
+			backoff = 1 * time.Second
+		}
+
+		slog.Warn("Docker event stream disconnected, reconnecting",
+			"backoff", backoff, "error", err)
+
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		backoff = min(backoff*2, maxBackoff)
+
+		// Emit resync event after reconnect
+		slog.Info("Reconnected to Docker daemon, triggering resync")
+		select {
+		case eventChannel <- events.Event{Type: events.ActionResync}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// listenOnce connects to the Docker event stream and processes events until
+// the stream closes or the context is cancelled.
+func (m *Manager) listenOnce(ctx context.Context, eventChannel chan<- events.Event) error {
 	filter := filters.NewArgs()
 	filter.Add("type", "container")
 	filter.Add("label", "docktunnel.enable=true")
 
-	// 监听事件
 	messages, errs := m.client.Events(ctx, eventTypes.ListOptions{
 		Filters: filter,
 	})
 
-	// 处理事件和错误
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-errs:
 			if err != nil {
-				return fmt.Errorf("docker event error: %w", err)
+				return fmt.Errorf("docker event stream error: %w", err)
 			}
 		case message := <-messages:
-			// 只处理我们关心的事件类型
 			if message.Type != "container" {
 				continue
 			}
 
 			event := events.Event{
-				Type:        eventTypes.Action(message.Action),
 				ContainerID: message.Actor.ID,
 			}
 
-			// 如果是启动事件，获取容器详细信息
-			if event.Type == eventTypes.ActionStart {
+			// Translate Docker actions to internal actions
+			switch {
+			case message.Action == eventTypes.ActionStart:
+				event.Type = eventTypes.ActionStart
 				containerInfo, err := m.client.ContainerInspect(ctx, event.ContainerID)
 				if err != nil {
-					// 即使无法获取容器信息，也发送事件，但不包含详细信息
-					// 上层处理逻辑需要处理ContainerInfo为nil的情况
+					slog.Warn("Failed to inspect container on start event",
+						"containerID", event.ContainerID, "error", err)
 				} else {
 					event.ContainerInfo = &containerInfo
 				}
+			case message.Action == "stop":
+				event.Type = eventTypes.ActionStop
+			case message.Action == eventTypes.ActionDie:
+				event.Type = eventTypes.ActionDie
+			case message.Action == "health_status: healthy":
+				event.Type = events.ActionHealthHealthy
+				containerInfo, err := m.client.ContainerInspect(ctx, event.ContainerID)
+				if err != nil {
+					slog.Warn("Failed to inspect container on health event",
+						"containerID", event.ContainerID, "error", err)
+				} else {
+					event.ContainerInfo = &containerInfo
+				}
+			case message.Action == "health_status: unhealthy":
+				event.Type = events.ActionHealthUnhealthy
+				containerInfo, err := m.client.ContainerInspect(ctx, event.ContainerID)
+				if err != nil {
+					slog.Warn("Failed to inspect container on health event",
+						"containerID", event.ContainerID, "error", err)
+				} else {
+					event.ContainerInfo = &containerInfo
+				}
+			case message.Action == "health_status: starting":
+				event.Type = events.ActionHealthStarting
+			default:
+				continue
 			}
 
-			// 当监听到相关事件时，发送通知
 			select {
 			case eventChannel <- event:
 			case <-ctx.Done():
