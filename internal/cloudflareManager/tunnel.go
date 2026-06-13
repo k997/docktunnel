@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"docktunnel/internal/metrics"
 	"docktunnel/pkg/types"
 	"golang.org/x/time/rate"
 
@@ -451,10 +452,19 @@ func (m *Manager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, err
 }
 
 // UpsertDNSRecords 批量创建或更新DNS记录
-func (m *Manager) UpsertDNSRecords(ctx context.Context, hostnames []string) error {
+func (m *Manager) UpsertDNSRecords(ctx context.Context, hostnames []string) (err error) {
 	if len(hostnames) == 0 {
 		return nil
 	}
+
+	// Record outcome for /metrics (Phase 6)
+	defer func() {
+		result := "success"
+		if err != nil {
+			result = "failure"
+		}
+		metrics.RecordDNSSync("upsert", result)
+	}()
 
 	// 确保tunnel存在
 	if m.tunnel == nil {
@@ -506,11 +516,20 @@ func (m *Manager) UpsertDNSRecords(ctx context.Context, hostnames []string) erro
 }
 
 // DeleteDNSRecords 批量删除DNS记录
-func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) error {
+func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) (err error) {
 	if len(hostnames) == 0 {
 		slog.Debug("No hostnames to delete")
 		return nil
 	}
+
+	// Record outcome for /metrics (Phase 6)
+	defer func() {
+		result := "success"
+		if err != nil {
+			result = "failure"
+		}
+		metrics.RecordDNSSync("delete", result)
+	}()
 
 	slog.Info("Deleting DNS records", "hostnames", hostnames)
 
