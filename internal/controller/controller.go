@@ -451,7 +451,26 @@ func (c *Controller) RunCompensationLoop(ctx context.Context) {
 	executor := func(action types.Action) error {
 		return c.ExecuteAction(ctx, action)
 	}
+
+	// Set up a gauge updater that runs alongside the compensation loop.
+	gaugeDone := make(chan struct{})
+	go func() {
+		defer close(gaugeDone)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				pending := c.stateManager.GetAllPendingActions()
+				metrics.SetCompensationQueueLength(len(pending))
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	c.stateManager.RunCompensation(ctx, executor)
+	<-gaugeDone
 }
 
 // SetCompensationConfig configures the compensation queue parameters.
