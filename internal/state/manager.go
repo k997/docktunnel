@@ -452,9 +452,38 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	sm.activeTunnels = snapshot.ActiveTunnels
+	// Degrade to empty state on nil snapshot
+	if snapshot == nil {
+		sm.activeTunnels = make(map[string]*types.TunnelEntry)
+		sm.pendingDeletes = make(map[string]*types.TunnelEntry)
+		sm.flappingContainers = make(map[string]types.FlappingState)
+		sm.logger.Warn("Nil snapshot received, starting with empty state")
+		return
+	}
+
+	// Migration: v1 activeTunnels keys (bare containerID) → v2 compound keys
+	if snapshot.Version < 2 {
+		migrated := make(map[string]*types.TunnelEntry, len(snapshot.ActiveTunnels))
+		for _, entry := range snapshot.ActiveTunnels {
+			serviceName := entry.ServiceName
+			if serviceName == "" {
+				serviceName = "default"
+				entry.ServiceName = serviceName
+				sm.logger.Warn("Migrating v1 active entry with empty ServiceName",
+					"container_id", entry.ContainerID,
+					"assigned_service", serviceName)
+			}
+			newKey := activeTunnelKey(entry.ContainerID, serviceName)
+			migrated[newKey] = entry
+		}
+		sm.activeTunnels = migrated
+		sm.logger.Info("Migrated activeTunnels from v1 to v2 compound keys",
+			"entries", len(migrated))
+	} else {
+		sm.activeTunnels = snapshot.ActiveTunnels
+	}
+
 	sm.pendingDeletes = snapshot.PendingDeletions
-	sm.flappingContainers = snapshot.FlappingContainers
 
 	// Migrate Phase 1 PendingDelete entries with Timed/Forever to StatusRetaining
 	for _, entry := range sm.pendingDeletes {
@@ -464,6 +493,8 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 			}
 		}
 	}
+
+	sm.flappingContainers = snapshot.FlappingContainers
 
 	sm.logger.Info("Loaded state from snapshot",
 		"version", snapshot.Version,

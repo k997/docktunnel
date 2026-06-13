@@ -854,3 +854,58 @@ func TestRestoreActiveTunnel_MultiService(t *testing.T) {
 		t.Error("pending deletes should be empty after restoration")
 	}
 }
+
+func TestLoadFromSnapshot_MigratesV1ToV2Keys(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	snapshot := &types.StateSnapshot{
+		Version: 1,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			// v1 key: bare containerID
+			"container-1": {
+				ContainerID: "container-1",
+				ServiceName: "web",
+				Status:      types.StatusActive,
+				Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+			},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{},
+	}
+
+	sm.LoadFromSnapshot(snapshot)
+
+	// Should be accessible with compound key
+	entry, ok := sm.GetActiveTunnel("container-1", "web")
+	if !ok {
+		t.Fatal("expected entry with compound key after v1 migration")
+	}
+	if entry.Config.Hostname != "web.example.com" {
+		t.Errorf("expected web.example.com, got %s", entry.Config.Hostname)
+	}
+}
+
+func TestLoadFromSnapshot_MigratesV1EmptyServiceName(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	snapshot := &types.StateSnapshot{
+		Version: 1,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"container-1": {
+				ContainerID: "container-1",
+				ServiceName: "", // Empty — should be assigned "default"
+				Status:      types.StatusActive,
+			},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{},
+	}
+
+	sm.LoadFromSnapshot(snapshot)
+
+	entry, ok := sm.GetActiveTunnel("container-1", "default")
+	if !ok {
+		t.Fatal("expected entry with 'default' service name after v1 migration")
+	}
+	if entry.ServiceName != "default" {
+		t.Errorf("expected ServiceName='default', got %s", entry.ServiceName)
+	}
+}

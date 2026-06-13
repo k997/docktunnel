@@ -19,7 +19,7 @@ const (
 	// StateFileJSON is the JSON fallback path
 	StateFileJSON = "/var/lib/docktunnel/state.json"
 	// StateVersion is the current state format version
-	StateVersion = 1
+	StateVersion = 2
 )
 
 // Save persists the state manager's snapshot to disk (T070)
@@ -132,9 +132,9 @@ func (sm *Manager) loadGob(statePath string) error {
 		return fmt.Errorf("failed to decode gob state: %w", err)
 	}
 
-	// Validate version
-	if snapshot.Version != StateVersion {
-		return fmt.Errorf("unsupported state version: %d (expected: %d)", snapshot.Version, StateVersion)
+	// Validate version (allow backward compatibility for migration)
+	if snapshot.Version > StateVersion {
+		return fmt.Errorf("unsupported state version: %d (max supported: %d)", snapshot.Version, StateVersion)
 	}
 
 	// Load into state manager
@@ -166,9 +166,9 @@ func (sm *Manager) loadJSON(statePath string) error {
 		return fmt.Errorf("failed to decode JSON state: %w", err)
 	}
 
-	// Validate version
-	if snapshot.Version != StateVersion {
-		return fmt.Errorf("unsupported state version: %d (expected: %d)", snapshot.Version, StateVersion)
+	// Validate version (allow backward compatibility for migration)
+	if snapshot.Version > StateVersion {
+		return fmt.Errorf("unsupported state version: %d (max supported: %d)", snapshot.Version, StateVersion)
 	}
 
 	// Load into state manager
