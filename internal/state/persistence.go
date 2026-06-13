@@ -19,7 +19,7 @@ const (
 	// StateFileJSON is the JSON fallback path
 	StateFileJSON = "/var/lib/docktunnel/state.json"
 	// StateVersion is the current state format version
-	StateVersion = 2
+	StateVersion = 3
 )
 
 // Save persists the state manager's snapshot to disk (T070)
@@ -257,4 +257,6 @@ func RegisterGobTypes() {
 	gob.Register(types.TransitionEvent(0))
 	gob.Register(types.ActionKind(0))
 	gob.Register(types.Action{})
+	gob.Register(types.CompensationRecord{})
+	gob.Register(map[string]*types.CompensationRecord{})
 }

@@ -449,12 +449,18 @@ func (sm *Manager) GetSnapshot() *types.StateSnapshot {
 		flappingContainers[k] = v
 	}
 
+	pendingActions := make(map[string]*types.CompensationRecord, len(sm.pendingActions))
+	for k, v := range sm.pendingActions {
+		pendingActions[k] = v
+	}
+
 	return &types.StateSnapshot{
-		Version:            2,
+		Version:            3,
 		Timestamp:          time.Now().UTC(),
 		ActiveTunnels:      activeTunnels,
 		PendingDeletions:   pendingDeletions,
 		FlappingContainers: flappingContainers,
+		PendingActions:     pendingActions,
 	}
 }
 
@@ -506,6 +512,13 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 	}
 
 	sm.flappingContainers = snapshot.FlappingContainers
+
+	// Restore pending actions (migrate v2 → v3)
+	if snapshot.PendingActions != nil {
+		sm.pendingActions = snapshot.PendingActions
+	} else {
+		sm.pendingActions = make(map[string]*types.CompensationRecord)
+	}
 
 	sm.logger.Info("Loaded state from snapshot",
 		"version", snapshot.Version,

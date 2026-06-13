@@ -255,7 +255,7 @@ func TestGetSnapshot(t *testing.T) {
 	snapshot := sm.GetSnapshot()
 
 	assert.NotNil(t, snapshot)
-	assert.Equal(t, 2, snapshot.Version)
+	assert.Equal(t, 3, snapshot.Version)
 	assert.Len(t, snapshot.ActiveTunnels, 1)
 	assert.Len(t, snapshot.PendingDeletions, 1)
 	assert.Contains(t, snapshot.ActiveTunnels, "active-1:web")

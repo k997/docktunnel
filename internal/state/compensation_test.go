@@ -221,3 +221,59 @@ func TestRunCompensation_ExhaustedRetriesMarksDead(t *testing.T) {
 		t.Fatalf("expected 1 dead action, got %d", len(dead))
 	}
 }
+
+func TestSnapshotIncludesPendingActions(t *testing.T) {
+	sm := NewManager(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	sm.EnqueueAction(types.Action{
+		Kind:     types.ActionDeleteRoute,
+		Hostname: "app.example.com",
+	}, &types.RetryableError{Err: errors.New("503")})
+
+	snap := sm.GetSnapshot()
+	if len(snap.PendingActions) != 1 {
+		t.Fatalf("expected 1 pending action in snapshot, got %d", len(snap.PendingActions))
+	}
+}
+
+func TestLoadFromSnapshot_RestoresPendingActions(t *testing.T) {
+	sm := NewManager(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c1",
+		ServiceName: "web",
+		Hostname:    "app.example.com",
+	}, &types.RetryableError{Err: errors.New("503")})
+
+	snap := sm.GetSnapshot()
+
+	sm2 := NewManager(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	sm2.LoadFromSnapshot(snap)
+
+	records := sm2.GetAllPendingActions()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 pending action after load, got %d", len(records))
+	}
+}
+
+func TestLoadFromSnapshot_MigratesV2ToV3(t *testing.T) {
+	sm := NewManager(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+
+	snap := &types.StateSnapshot{
+		Version:            2,
+		Timestamp:          time.Now().UTC(),
+		ActiveTunnels:      map[string]*types.TunnelEntry{},
+		PendingDeletions:   map[string]*types.TunnelEntry{},
+		FlappingContainers: map[string]types.FlappingState{},
+		PendingActions:     nil,
+	}
+
+	sm.LoadFromSnapshot(snap)
+
+	records := sm.GetAllPendingActions()
+	if len(records) != 0 {
+		t.Fatalf("expected 0 pending actions for v2 migration, got %d", len(records))
+	}
+	if sm.pendingActions == nil {
+		t.Error("pendingActions should be initialized, not nil")
+	}
+}
