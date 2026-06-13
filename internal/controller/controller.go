@@ -860,6 +860,8 @@ func (c *Controller) RunGarbageCollection(ctx context.Context) error {
 
 	// If no expired entries, return early
 	if len(expiredEntries) == 0 {
+		// Update retention gauge for /metrics (Phase 6)
+		c.updateRetentionGauge()
 		return nil
 	}
 
@@ -888,7 +890,37 @@ func (c *Controller) RunGarbageCollection(ctx context.Context) error {
 	slog.Info("Garbage collection completed successfully",
 		"expired_count", len(expiredEntries))
 
+	// Update retention gauge for /metrics (Phase 6)
+	c.updateRetentionGauge()
+
 	return nil
+}
+
+// updateRetentionGauge counts entries by lifecycle status and updates
+// the docktunnel_retention_entries gauge.
+func (c *Controller) updateRetentionGauge() {
+	snapshot := c.stateManager.GetSnapshot()
+	counts := map[string]int{
+		"Active":        0,
+		"Retaining":     0,
+		"PendingDelete": 0,
+	}
+	for _, entry := range snapshot.ActiveTunnels {
+		if entry.Status == types.StatusActive {
+			counts["Active"]++
+		}
+	}
+	for _, entry := range snapshot.PendingDeletions {
+		switch entry.Status {
+		case types.StatusRetaining:
+			counts["Retaining"]++
+		case types.StatusPendingDelete:
+			counts["PendingDelete"]++
+		}
+	}
+	for status, n := range counts {
+		metrics.SetRetentionEntries(status, n)
+	}
 }
 
 // handleHealthHealthy re-exposes a container's services when it becomes healthy.

@@ -20,6 +20,7 @@ import (
 	"docktunnel/internal/docker"
 	"docktunnel/internal/events"
 	"docktunnel/internal/logger"
+	"docktunnel/internal/metrics"
 	"docktunnel/internal/server"
 	"docktunnel/internal/state"
 )
@@ -189,9 +190,11 @@ func main() {
 
 			case <-reconcileTicker.C:
 				appLogger.Debug("Running periodic reconciliation")
+				reconcileStart := time.Now()
 				if err := controller.Reconcile(ctx); err != nil {
 					appLogger.Error("Periodic reconciliation failed", "error", err)
 				}
+				metrics.ObserveReconcile(time.Since(reconcileStart).Seconds())
 
 			case <-ctx.Done():
 				appLogger.Info("Garbage collection and reconcile ticker stopped")
