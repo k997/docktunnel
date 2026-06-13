@@ -90,6 +90,10 @@ func main() {
 	}
 	controller.SetStatePath(statePath)
 
+	// Configure compensation queue parameters
+	initialDelay, maxDelay, maxRetries, pollInterval := cfg.GetCompensationConfig()
+	controller.SetCompensationConfig(initialDelay, maxDelay, maxRetries, pollInterval)
+
 	appLogger.Info("Loading persisted state", "path", statePath)
 	if err := controller.LoadState(); err != nil {
 		appLogger.Warn("Failed to load persisted state, starting with clean state",
@@ -179,6 +183,14 @@ func main() {
 				return
 			}
 		}
+	}()
+
+	// Start compensation queue background loop
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		appLogger.Info("Starting compensation queue background loop")
+		controller.RunCompensationLoop(ctx)
 	}()
 
 	// 设置系统信号处理
