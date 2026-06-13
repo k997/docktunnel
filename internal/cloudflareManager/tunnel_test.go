@@ -1,8 +1,13 @@
 package cloudflareManager
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"docktunnel/pkg/types"
+	"golang.org/x/time/rate"
 )
 
 func TestNewManager(t *testing.T) {
@@ -149,4 +154,57 @@ func TestDeleteDNSRecords(t *testing.T) {
 	// TODO: 实现DeleteDNSRecords方法的测试
 	// 由于需要有效的Cloudflare账户和API令牌，这部分测试需要在集成测试环境中进行
 	t.Log("DeleteDNSRecords test placeholder")
+}
+
+func TestCallWithRetry_ReturnsRetryableError(t *testing.T) {
+	m := &Manager{
+		rateLimiter:   rate.NewLimiter(rate.Inf, 0),
+		maxRetries:    1,
+		retryDelay:    1 * time.Millisecond,
+		maxRetryDelay: 1 * time.Millisecond,
+	}
+
+	err := m.callWithRetry(context.Background(), func() error {
+		return errors.New("server error: 503 service unavailable")
+	})
+
+	var re *types.RetryableError
+	if !errors.As(err, &re) {
+		t.Errorf("expected RetryableError, got %T: %v", err, err)
+	}
+}
+
+func TestCallWithRetry_ReturnsPermanentError(t *testing.T) {
+	m := &Manager{
+		rateLimiter:   rate.NewLimiter(rate.Inf, 0),
+		maxRetries:    1,
+		retryDelay:    1 * time.Millisecond,
+		maxRetryDelay: 1 * time.Millisecond,
+	}
+
+	err := m.callWithRetry(context.Background(), func() error {
+		return errors.New("authentication error: 401 unauthorized")
+	})
+
+	var pe *types.PermanentError
+	if !errors.As(err, &pe) {
+		t.Errorf("expected PermanentError, got %T: %v", err, err)
+	}
+}
+
+func TestCallWithRetry_ReturnsNilOnSuccess(t *testing.T) {
+	m := &Manager{
+		rateLimiter:   rate.NewLimiter(rate.Inf, 0),
+		maxRetries:    1,
+		retryDelay:    1 * time.Millisecond,
+		maxRetryDelay: 1 * time.Millisecond,
+	}
+
+	err := m.callWithRetry(context.Background(), func() error {
+		return nil
+	})
+
+	if err != nil {
+		t.Errorf("expected nil, got %v", err)
+	}
 }

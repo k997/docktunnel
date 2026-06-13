@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"docktunnel/pkg/types"
 	"golang.org/x/time/rate"
 
 	"github.com/cloudflare/cloudflare-go/v5"
@@ -147,7 +148,7 @@ func (m *Manager) callWithRetry(ctx context.Context, operation func() error) err
 
 		// 检查是否是可重试的错误
 		if !m.isRetriableError(err) {
-			return err
+			return m.classifyError(err)
 		}
 
 		// 如果不是最后一次重试，等待一段时间后重试
@@ -177,7 +178,7 @@ func (m *Manager) callWithRetry(ctx context.Context, operation func() error) err
 		}
 	}
 
-	return fmt.Errorf("operation failed after %d retries: %w", m.maxRetries, lastErr)
+	return m.classifyError(lastErr)
 }
 
 // isRetriableError 检查错误是否应该重试
@@ -202,6 +203,15 @@ func (m *Manager) isRetriableError(err error) bool {
 	}
 
 	return false
+}
+
+// classifyError wraps an error as RetryableError or PermanentError based on
+// whether it would normally be retried.
+func (m *Manager) classifyError(err error) error {
+	if m.isRetriableError(err) {
+		return &types.RetryableError{Err: err}
+	}
+	return &types.PermanentError{Err: err}
 }
 
 // getOrCreateTunnel 获取或创建Cloudflare Tunnel
