@@ -78,7 +78,7 @@ type Config struct {
 		PollInterval time.Duration `mapstructure:"pollInterval"`
 	} `mapstructure:"compensation"`
 	Persistence struct {
-		BackupCount    int `mapstructure:"backupCount"`
+		BackupCount    int  `mapstructure:"backupCount"`
 		ValidateOnLoad bool `mapstructure:"validateOnLoad"`
 	} `mapstructure:"persistence"`
 }
@@ -336,9 +336,9 @@ func (c *Config) SanitizeForLog() map[string]interface{} {
 			"maxRetries":   c.Compensation.MaxRetries,
 			"pollInterval": c.Compensation.PollInterval,
 		},
-			"persistence": map[string]interface{}{
-				"backupCount":    c.Persistence.BackupCount,
-				"validateOnLoad": c.Persistence.ValidateOnLoad,
-			},
+		"persistence": map[string]interface{}{
+			"backupCount":    c.Persistence.BackupCount,
+			"validateOnLoad": c.Persistence.ValidateOnLoad,
+		},
 	}
 }

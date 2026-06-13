@@ -336,7 +336,7 @@ func validateSnapshot(snapshot *types.StateSnapshot) error {
 	// 1. Timestamp check
 	if snapshot.Timestamp.IsZero() {
 		errs = append(errs, "timestamp is zero")
-	} else if snapshot.Timestamp.After(time.Now().UTC().Add(5*time.Minute)) {
+	} else if snapshot.Timestamp.After(time.Now().UTC().Add(5 * time.Minute)) {
 		errs = append(errs, fmt.Sprintf("timestamp is in the future: %v", snapshot.Timestamp))
 	}
 
