@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -29,6 +30,11 @@ type Manager struct {
 	activeTunnels      map[string]*types.TunnelEntry  // key: containerID:serviceName (compound)
 	pendingDeletes     map[string]*types.TunnelEntry  // key: containerID:serviceName (compound)
 	flappingContainers map[string]types.FlappingState // key: containerID
+	pendingActions     map[string]*types.CompensationRecord
+	compInitialDelay   time.Duration
+	compMaxDelay       time.Duration
+	compMaxRetries     int
+	compPollInterval   time.Duration
 
 	logger    *slog.Logger
 	statePath string
@@ -63,10 +69,15 @@ func NewManager(logger *slog.Logger) *Manager {
 		activeTunnels:      make(map[string]*types.TunnelEntry),
 		pendingDeletes:     make(map[string]*types.TunnelEntry),
 		flappingContainers: make(map[string]types.FlappingState),
+		pendingActions:     make(map[string]*types.CompensationRecord),
 		logger:             logger,
 		statePath:          "",
 		lastSaved:          time.Time{},
 		dirty:              false,
+		compInitialDelay:   30 * time.Second,
+		compMaxDelay:       30 * time.Minute,
+		compMaxRetries:     10,
+		compPollInterval:   30 * time.Second,
 	}
 }
 
@@ -579,4 +590,74 @@ func (sm *Manager) GetStats() map[string]int {
 		"pending_deletions":   len(sm.pendingDeletes),
 		"flapping_containers": len(sm.flappingContainers),
 	}
+}
+
+// SetCompensationConfig configures retry parameters for the compensation queue.
+func (sm *Manager) SetCompensationConfig(initialDelay, maxDelay time.Duration, maxRetries int, pollInterval time.Duration) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.compInitialDelay = initialDelay
+	sm.compMaxDelay = maxDelay
+	sm.compMaxRetries = maxRetries
+	sm.compPollInterval = pollInterval
+}
+
+// EnqueueAction records a failed action for retry. It classifies the error
+// to decide whether the action is retryable or permanently dead.
+func (sm *Manager) EnqueueAction(action types.Action, err error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	now := time.Now().UTC()
+	// Use nanosecond precision for uniqueness when ContainerID/ServiceName are empty
+	id := action.ContainerID + ":" + action.ServiceName + ":" + now.Format("20060102150405.000000000")
+
+	rec := &types.CompensationRecord{
+		ID:          id,
+		Action:      action,
+		RetryCount:  0,
+		MaxRetries:  sm.compMaxRetries,
+		NextRetryAt: now.Add(sm.compInitialDelay),
+		LastError:   err.Error(),
+		CreatedAt:   now,
+		Dead:        false,
+	}
+
+	var permanent *types.PermanentError
+	if errors.As(err, &permanent) {
+		rec.Dead = true
+		sm.logger.Error("Action permanently failed, marking dead",
+			"action", action.Kind,
+			"hostname", action.Hostname,
+			"error", err)
+	}
+
+	sm.pendingActions[id] = rec
+	sm.markDirty()
+}
+
+// GetAllPendingActions returns a copy of all compensation records.
+func (sm *Manager) GetAllPendingActions() []*types.CompensationRecord {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	result := make([]*types.CompensationRecord, 0, len(sm.pendingActions))
+	for _, rec := range sm.pendingActions {
+		result = append(result, rec)
+	}
+	return result
+}
+
+// GetDeadActions returns compensation records that are permanently failed.
+func (sm *Manager) GetDeadActions() []types.CompensationRecord {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	var dead []types.CompensationRecord
+	for _, rec := range sm.pendingActions {
+		if rec.Dead {
+			dead = append(dead, *rec)
+		}
+	}
+	return dead
 }
