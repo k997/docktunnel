@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +34,9 @@ func (sm *Manager) Save(statePath string) error {
 	// Get snapshot from state manager
 	// Note: GetSnapshot acquires its own lock, so we shouldn't hold sm.mu here
 	snapshot := sm.GetSnapshot()
+
+	// Rotate backups before writing new state
+	sm.rotateBackups(statePath)
 
 	// Ensure directory exists
 	stateDir := filepath.Dir(statePath)
@@ -332,4 +336,61 @@ func validateSnapshot(snapshot *types.StateSnapshot) error {
 		return fmt.Errorf("snapshot validation failed: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// rotateBackups renames the current state file to a timestamped backup
+// and prunes old backups beyond backupCount. Returns the first error encountered,
+// but continues on individual failures.
+func (sm *Manager) rotateBackups(statePath string) error {
+	sm.mu.RLock()
+	count := sm.backupCount
+	sm.mu.RUnlock()
+
+	if count <= 0 {
+		return nil
+	}
+
+	// Only rotate if the current state file exists
+	if _, err := os.Stat(statePath); err != nil {
+		return nil // no file to rotate
+	}
+
+	// Rename current file to timestamped backup
+	ts := time.Now().UTC().Format("20060102-150405")
+	backupPath := statePath + ".bak." + ts
+	if err := os.Rename(statePath, backupPath); err != nil {
+		sm.logger.Warn("Failed to rotate state file to backup",
+			"from", statePath,
+			"to", backupPath,
+			"error", err)
+		return err
+	}
+
+	// Prune old backups beyond backupCount
+	sm.pruneBackups(statePath, count)
+	return nil
+}
+
+// pruneBackups removes the oldest backup files, keeping at most count.
+func (sm *Manager) pruneBackups(statePath string, count int) {
+	pattern := statePath + ".bak.*"
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		sm.logger.Warn("Failed to glob backup files", "pattern", pattern, "error", err)
+		return
+	}
+
+	if len(matches) <= count {
+		return
+	}
+
+	// Sort newest first (lexicographic works because timestamp is fixed-width)
+	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+
+	// Delete oldest files beyond count
+	for _, path := range matches[count:] {
+		if err := os.Remove(path); err != nil {
+			sm.logger.Warn("Failed to remove old backup", "path", path, "error", err)
+		}
+	}
 }

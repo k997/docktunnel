@@ -500,3 +500,76 @@ func TestLoadGob_ValidationSkippedWhenDisabled(t *testing.T) {
 	_, ok := sm.GetActiveTunnel("abc", "web")
 	assert.True(t, ok, "entry should be loaded despite invalid timestamp")
 }
+
+func TestRotateBackups_CreatesTimestampedBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Create initial state file
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+	require.NoError(t, sm.Save(statePath))
+	require.FileExists(t, statePath)
+
+	// Save again — should create a backup
+	require.NoError(t, sm.Save(statePath))
+	require.FileExists(t, statePath)
+
+	// Check that a backup file was created
+	matches, err := filepath.Glob(statePath + ".bak.*")
+	require.NoError(t, err)
+	assert.Len(t, matches, 1, "should have exactly one backup")
+	assert.Contains(t, filepath.Base(matches[0]), ".bak.")
+}
+
+func TestRotateBackups_PrunesOldBackups(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetBackupCount(2)
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+
+	// Save 4 times — should only keep 2 backups
+	for i := 0; i < 4; i++ {
+		time.Sleep(1100 * time.Millisecond) // ensure different timestamps
+		require.NoError(t, sm.Save(statePath))
+	}
+
+	matches, err := filepath.Glob(statePath + ".bak.*")
+	require.NoError(t, err)
+	assert.Len(t, matches, 2, "should have exactly 2 backups (backupCount=2)")
+}
+
+func TestRotateBackups_DisabledWhenZero(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetBackupCount(0)
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+
+	require.NoError(t, sm.Save(statePath))
+
+	matches, err := filepath.Glob(statePath + ".bak.*")
+	require.NoError(t, err)
+	assert.Len(t, matches, 0, "no backups when backupCount=0")
+}
