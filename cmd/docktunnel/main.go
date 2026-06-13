@@ -20,6 +20,7 @@ import (
 	"docktunnel/internal/docker"
 	"docktunnel/internal/events"
 	"docktunnel/internal/logger"
+	"docktunnel/internal/server"
 	"docktunnel/internal/state"
 )
 
@@ -124,6 +125,16 @@ func main() {
 				appLogger.Info("Event processing loop stopped")
 				return
 			}
+		}
+	}()
+	// Start HTTP server for metrics and diagnostics (Phase 6)
+	debugServer := server.New(cfg.GetServerAddr(), controller.GetDebugState)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		appLogger.Info("Starting diagnostics HTTP server", "addr", cfg.GetServerAddr())
+		if err := debugServer.Start(ctx); err != nil {
+			appLogger.Error("Diagnostics HTTP server stopped with error", "error", err)
 		}
 	}()
 
