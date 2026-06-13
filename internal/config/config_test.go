@@ -308,3 +308,21 @@ func TestSanitizeForLog(t *testing.T) {
 		t.Errorf("Log level should be preserved, got: %s", level)
 	}
 }
+
+func TestServerDefaults(t *testing.T) {
+	cfg := &Config{}
+	addr := cfg.GetServerAddr()
+	if addr != "127.0.0.1:9100" {
+		t.Errorf("default addr = %q, want 127.0.0.1:9100", addr)
+	}
+}
+
+func TestServerOverride(t *testing.T) {
+	cfg := &Config{}
+	cfg.Server.BindAddr = "0.0.0.0"
+	cfg.Server.Port = 8080
+	addr := cfg.GetServerAddr()
+	if addr != "0.0.0.0:8080" {
+		t.Errorf("override addr = %q, want 0.0.0.0:8080", addr)
+	}
+}

@@ -81,6 +81,10 @@ type Config struct {
 		BackupCount    int  `mapstructure:"backupCount"`
 		ValidateOnLoad bool `mapstructure:"validateOnLoad"`
 	} `mapstructure:"persistence"`
+	Server struct {
+		BindAddr string `mapstructure:"bindAddr"`
+		Port     int    `mapstructure:"port"`
+	} `mapstructure:"server"`
 }
 
 // GetCloudflareOptions 从配置中获取Cloudflare选项
@@ -143,6 +147,19 @@ func (c *Config) GetPersistenceConfig() (backupCount int, validateOnLoad bool) {
 		validateOnLoad = true
 	}
 	return backupCount, validateOnLoad
+}
+
+// GetServerAddr returns the configured "host:port" for the diagnostics/metrics server.
+func (c *Config) GetServerAddr() string {
+	addr := c.Server.BindAddr
+	if addr == "" {
+		addr = "127.0.0.1"
+	}
+	port := c.Server.Port
+	if port == 0 {
+		port = 9100
+	}
+	return fmt.Sprintf("%s:%d", addr, port)
 }
 
 // GetOriginRequestDefaults 获取OriginRequest默认配置 (T082)
@@ -237,6 +254,10 @@ func New() (*Config, error) {
 	// Persistence defaults
 	v.SetDefault("persistence.backupCount", 3)
 	v.SetDefault("persistence.validateOnLoad", true)
+
+	// Server defaults
+	v.SetDefault("server.bindAddr", "127.0.0.1")
+	v.SetDefault("server.port", 9100)
 
 	// 2. 设置配置文件
 	v.SetConfigName("config")
@@ -339,6 +360,10 @@ func (c *Config) SanitizeForLog() map[string]interface{} {
 		"persistence": map[string]interface{}{
 			"backupCount":    c.Persistence.BackupCount,
 			"validateOnLoad": c.Persistence.ValidateOnLoad,
+		},
+		"server": map[string]interface{}{
+			"bindAddr": c.Server.BindAddr,
+			"port":     c.Server.Port,
 		},
 	}
 }
