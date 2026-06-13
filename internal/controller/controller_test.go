@@ -63,10 +63,6 @@ func TestNewController(t *testing.T) {
 		ruleValidator:   NewCompositeValidator(),
 	}
 
-	if controller == nil {
-		t.Error("Controller should not be nil")
-	}
-
 	// 检查初始状态（不再存储catch-all规则）
 	if len(controller.ingressRules) != 0 {
 		t.Errorf("Expected no rules initially, got %d", len(controller.ingressRules))
@@ -100,10 +96,6 @@ func TestNewControllerWithOptions(t *testing.T) {
 	}
 
 	controller := NewController(nil, nil, opts)
-
-	if controller == nil {
-		t.Error("Controller should not be nil")
-	}
 
 	// 检查配置选项是否正确应用
 	if controller.flappingWindow != 60*time.Second {

@@ -288,7 +288,7 @@ func TestSanitizeForLog(t *testing.T) {
 	sanitized := cfg.SanitizeForLog()
 
 	// Verify API token is redacted
-	if apiToken, ok := sanitized["cloudflare"].(map[string]interface{})["apiToken"]; ok {
+	if apiToken, ok := sanitized["cloudflare"].(map[string]any)["apiToken"]; ok {
 		if apiToken != "[REDACTED]" {
 			t.Errorf("API token not redacted, got: %v", apiToken)
 		}
@@ -297,13 +297,13 @@ func TestSanitizeForLog(t *testing.T) {
 	}
 
 	// Verify other sensitive fields are not leaked
-	cfConfig := sanitized["cloudflare"].(map[string]interface{})
+	cfConfig := sanitized["cloudflare"].(map[string]any)
 	if accountId, ok := cfConfig["accountId"].(string); ok && accountId != "test-account-id" {
 		t.Errorf("Account ID should be preserved in sanitized config, got: %s", accountId)
 	}
 
 	// Verify log level is preserved
-	logConfig := sanitized["log"].(map[string]interface{})
+	logConfig := sanitized["log"].(map[string]any)
 	if level, ok := logConfig["level"].(string); ok && level != "debug" {
 		t.Errorf("Log level should be preserved, got: %s", level)
 	}

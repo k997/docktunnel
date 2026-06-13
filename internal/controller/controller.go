@@ -871,10 +871,7 @@ func (c *Controller) updateContainerHealth(containerID string, isStartEvent bool
 				health.IsFlapping = true
 				// 计算冷却期（指数退避，但不超过最大冷却期）
 				coolingMultiplier := 1 << uint(health.RestartCount-c.flappingThreshold)
-				coolingDuration := time.Duration(coolingMultiplier) * c.coolingPeriod
-				if coolingDuration > c.maxCoolingPeriod {
-					coolingDuration = c.maxCoolingPeriod
-				}
+				coolingDuration := min(time.Duration(coolingMultiplier)*c.coolingPeriod, c.maxCoolingPeriod)
 				health.CoolingUntil = now.Add(coolingDuration)
 
 				slog.Warn("Container marked as flapping",

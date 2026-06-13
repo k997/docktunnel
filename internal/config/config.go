@@ -163,8 +163,8 @@ func (c *Config) GetServerAddr() string {
 }
 
 // GetOriginRequestDefaults 获取OriginRequest默认配置 (T082)
-func (c *Config) GetOriginRequestDefaults() map[string]interface{} {
-	defaults := make(map[string]interface{})
+func (c *Config) GetOriginRequestDefaults() map[string]any {
+	defaults := make(map[string]any)
 
 	// Only include non-zero/non-empty values
 	if c.Cloudflare.OriginRequest.NoTLSVerify {
@@ -313,13 +313,13 @@ func (c *Config) ValidateAPIToken() error {
 }
 
 // SanitizeForLog returns a log-safe version of config with sensitive fields redacted (T104)
-func (c *Config) SanitizeForLog() map[string]interface{} {
-	return map[string]interface{}{
-		"log": map[string]interface{}{
+func (c *Config) SanitizeForLog() map[string]any {
+	return map[string]any{
+		"log": map[string]any{
 			"level":  c.Log.Level,
 			"format": c.Log.Format,
 		},
-		"cloudflare": map[string]interface{}{
+		"cloudflare": map[string]any{
 			"accountId":     c.Cloudflare.AccountID,
 			"tunnelId":      c.Cloudflare.TunnelID,
 			"tunnelName":    c.Cloudflare.TunnelName,
@@ -331,7 +331,7 @@ func (c *Config) SanitizeForLog() map[string]interface{} {
 			// APIToken is intentionally omitted for security
 			"apiToken": "[REDACTED]",
 		},
-		"controller": map[string]interface{}{
+		"controller": map[string]any{
 			"flappingWindow":    c.Controller.FlappingWindow,
 			"flappingThreshold": c.Controller.FlappingThreshold,
 			"coolingPeriod":     c.Controller.CoolingPeriod,
@@ -340,28 +340,28 @@ func (c *Config) SanitizeForLog() map[string]interface{} {
 			"reconcileEnabled":  c.Controller.ReconcileEnabled,
 			"reconcileInterval": c.Controller.ReconcileInterval,
 		},
-		"cleanup": map[string]interface{}{
+		"cleanup": map[string]any{
 			"onExit":    c.Cleanup.OnExit,
 			"stateFile": c.Cleanup.StateFile,
 			"strategy":  c.Cleanup.Strategy,
 			"timeout":   c.Cleanup.Timeout,
 		},
-		"defaults": map[string]interface{}{
+		"defaults": map[string]any{
 			"scheme": c.Defaults.Scheme,
 			"port":   c.Defaults.Port,
 			"path":   c.Defaults.Path,
 		},
-		"compensation": map[string]interface{}{
+		"compensation": map[string]any{
 			"initialDelay": c.Compensation.InitialDelay,
 			"maxDelay":     c.Compensation.MaxDelay,
 			"maxRetries":   c.Compensation.MaxRetries,
 			"pollInterval": c.Compensation.PollInterval,
 		},
-		"persistence": map[string]interface{}{
+		"persistence": map[string]any{
 			"backupCount":    c.Persistence.BackupCount,
 			"validateOnLoad": c.Persistence.ValidateOnLoad,
 		},
-		"server": map[string]interface{}{
+		"server": map[string]any{
 			"bindAddr": c.Server.BindAddr,
 			"port":     c.Server.Port,
 		},

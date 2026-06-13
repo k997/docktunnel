@@ -155,10 +155,7 @@ func (m *Manager) callWithRetry(ctx context.Context, operation func() error) err
 		// 如果不是最后一次重试，等待一段时间后重试
 		if i < m.maxRetries {
 			// 计算退避时间（指数退避加抖动）
-			backoff := m.retryDelay * time.Duration(1<<uint(i))
-			if backoff > m.maxRetryDelay {
-				backoff = m.maxRetryDelay
-			}
+			backoff := min(m.retryDelay*time.Duration(1<<uint(i)), m.maxRetryDelay)
 
 			// 添加随机抖动（±10%）
 			jitter := time.Duration(float64(backoff) * 0.1 * (0.5 - mathrand.Float64()))
