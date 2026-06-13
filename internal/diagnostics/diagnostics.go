@@ -1,7 +1,11 @@
 // Package diagnostics provides types and helpers for the /debug/state endpoint.
 package diagnostics
 
-import "time"
+import (
+    "encoding/json"
+    "net/http"
+    "time"
+)
 
 // RuleView is a single ingress rule as exposed in the debug response.
 type RuleView struct {
@@ -53,4 +57,17 @@ func ComputeDiff(desired, actual []RuleView) StateDiff {
         }
     }
     return diff
+}
+
+// Handler returns an http.HandlerFunc that serves the current debug state.
+// The snapshot function is called on every request; it must be safe to call
+// from any goroutine.
+func Handler(snapshot func() DebugStateResponse) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        resp := snapshot()
+        w.Header().Set("Content-Type", "application/json")
+        if err := json.NewEncoder(w).Encode(resp); err != nil {
+            http.Error(w, "failed to encode response", http.StatusInternalServerError)
+        }
+    }
 }

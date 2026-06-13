@@ -1,9 +1,13 @@
 package diagnostics
 
 import (
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
     "reflect"
     "sort"
     "testing"
+    "time"
 )
 
 func TestComputeDiff_Identical(t *testing.T) {
@@ -69,4 +73,39 @@ func sorted(s []string) []string {
     out := append([]string(nil), s...)
     sort.Strings(out)
     return out
+}
+
+func TestHandler_ReturnsJSON(t *testing.T) {
+    snapshot := func() DebugStateResponse {
+        return DebugStateResponse{
+            Timestamp:    time.Date(2026, 6, 13, 14, 30, 0, 0, time.UTC),
+            DesiredState: []RuleView{{Hostname: "a.com", Service: "http://localhost:80"}},
+            ActualState:  []RuleView{{Hostname: "a.com", Service: "http://localhost:80"}},
+            Source:       "live_cache",
+            Diff:         StateDiff{Matching: 1},
+        }
+    }
+
+    req := httptest.NewRequest(http.MethodGet, "/debug/state", nil)
+    rec := httptest.NewRecorder()
+
+    Handler(snapshot).ServeHTTP(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+    }
+    if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+        t.Errorf("Content-Type = %q, want application/json", ct)
+    }
+
+    var resp DebugStateResponse
+    if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+        t.Fatalf("failed to unmarshal response: %v", err)
+    }
+    if resp.Source != "live_cache" {
+        t.Errorf("Source = %q, want live_cache", resp.Source)
+    }
+    if len(resp.DesiredState) != 1 || resp.DesiredState[0].Hostname != "a.com" {
+        t.Errorf("DesiredState = %+v, want single a.com entry", resp.DesiredState)
+    }
 }
