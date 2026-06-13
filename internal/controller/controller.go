@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"docktunnel/internal/diagnostics"
+	"docktunnel/internal/events"
 	"docktunnel/internal/label"
+	"docktunnel/internal/metrics"
 	"docktunnel/internal/state"
 	"docktunnel/pkg/types"
 
@@ -19,7 +21,6 @@ import (
 	eventTypes "github.com/docker/docker/api/types/events"
 
 	"docktunnel/internal/docker"
-	"docktunnel/internal/events"
 )
 
 // CloudflareManager defines the interface for Cloudflare tunnel management
@@ -131,6 +132,20 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 
 // Dispatch 是所有事件处理的统一入口
 func (c *Controller) Dispatch(ctx context.Context, event events.Event) error {
+	err := c.dispatchInner(ctx, event)
+
+	// Record outcome for /metrics (Phase 6)
+	result := "success"
+	if err != nil {
+		result = "failure"
+	}
+	metrics.RecordEvent(string(event.Type), result)
+
+	return err
+}
+
+// dispatchInner is the original dispatch switch.
+func (c *Controller) dispatchInner(ctx context.Context, event events.Event) error {
 	switch event.Type {
 	case eventTypes.ActionStart:
 		return c.handleContainerStart(ctx, event)
