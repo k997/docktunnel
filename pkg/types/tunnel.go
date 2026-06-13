@@ -22,6 +22,24 @@ const (
 	StatusFlapping                         // In cooling period
 )
 
+// String returns the human-readable name of the status.
+func (s EntryStatus) String() string {
+	switch s {
+	case StatusActive:
+		return "Active"
+	case StatusPendingDelete:
+		return "PendingDelete"
+	case StatusRetaining:
+		return "Retaining"
+	case StatusDeleted:
+		return "Deleted"
+	case StatusFlapping:
+		return "Flapping"
+	default:
+		return "Unknown"
+	}
+}
+
 // PolicyType represents retention policy types
 type PolicyType int
 

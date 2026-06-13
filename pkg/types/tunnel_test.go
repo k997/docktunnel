@@ -25,3 +25,23 @@ func TestEntryStatusRetaining(t *testing.T) {
 		t.Error("StatusRetaining must be distinct from other statuses")
 	}
 }
+
+func TestEntryStatus_String(t *testing.T) {
+	tests := []struct {
+		status EntryStatus
+		want   string
+	}{
+		{StatusActive, "Active"},
+		{StatusPendingDelete, "PendingDelete"},
+		{StatusRetaining, "Retaining"},
+		{StatusDeleted, "Deleted"},
+		{StatusFlapping, "Flapping"},
+		{EntryStatus(99), "Unknown"},
+	}
+	for _, tt := range tests {
+		got := tt.status.String()
+		if got != tt.want {
+			t.Errorf("EntryStatus(%d).String() = %q, want %q", tt.status, got, tt.want)
+		}
+	}
+}
