@@ -71,6 +71,12 @@ type Config struct {
 		Port   int    `mapstructure:"port"`
 		Path   string `mapstructure:"path"`
 	} `mapstructure:"defaults"`
+	Compensation struct {
+		InitialDelay  time.Duration `mapstructure:"initialDelay"`
+		MaxDelay      time.Duration `mapstructure:"maxDelay"`
+		MaxRetries    int           `mapstructure:"maxRetries"`
+		PollInterval  time.Duration `mapstructure:"pollInterval"`
+	} `mapstructure:"compensation"`
 }
 
 // GetCloudflareOptions 从配置中获取Cloudflare选项
@@ -99,6 +105,27 @@ func (c *Config) GetControllerOptions() controller.ControllerOptions {
 		ReconcileEnabled:  c.Controller.ReconcileEnabled,
 		ReconcileInterval: c.Controller.ReconcileInterval,
 	}
+}
+
+// GetCompensationConfig returns compensation configuration with defaults applied
+func (c *Config) GetCompensationConfig() (initialDelay, maxDelay time.Duration, maxRetries int, pollInterval time.Duration) {
+	initialDelay = c.Compensation.InitialDelay
+	if initialDelay == 0 {
+		initialDelay = 30 * time.Second
+	}
+	maxDelay = c.Compensation.MaxDelay
+	if maxDelay == 0 {
+		maxDelay = 30 * time.Minute
+	}
+	maxRetries = c.Compensation.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = 10
+	}
+	pollInterval = c.Compensation.PollInterval
+	if pollInterval == 0 {
+		pollInterval = 30 * time.Second
+	}
+	return
 }
 
 // GetOriginRequestDefaults 获取OriginRequest默认配置 (T082)
@@ -185,6 +212,11 @@ func New() (*Config, error) {
 	v.SetDefault("defaults.scheme", "http") // 默认scheme (http, https, tcp)
 	v.SetDefault("defaults.port", 80)       // 默认端口
 	v.SetDefault("defaults.path", "")       // 默认路径
+	// Compensation defaults
+	v.SetDefault("compensation.initialDelay", 30*time.Second)
+	v.SetDefault("compensation.maxDelay", 30*time.Minute)
+	v.SetDefault("compensation.maxRetries", 10)
+	v.SetDefault("compensation.pollInterval", 30*time.Second)
 
 	// 2. 设置配置文件
 	v.SetConfigName("config")
@@ -277,6 +309,12 @@ func (c *Config) SanitizeForLog() map[string]interface{} {
 			"scheme": c.Defaults.Scheme,
 			"port":   c.Defaults.Port,
 			"path":   c.Defaults.Path,
+		},
+		"compensation": map[string]interface{}{
+			"initialDelay": c.Compensation.InitialDelay,
+			"maxDelay":     c.Compensation.MaxDelay,
+			"maxRetries":   c.Compensation.MaxRetries,
+			"pollInterval": c.Compensation.PollInterval,
 		},
 	}
 }
