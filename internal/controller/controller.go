@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"docktunnel/internal/diagnostics"
 	"docktunnel/internal/label"
 	"docktunnel/internal/state"
 	"docktunnel/pkg/types"
@@ -77,6 +78,11 @@ type Controller struct {
 	// 对账配置
 	reconcileEnabled  bool
 	reconcileInterval time.Duration
+
+	// Cached actual state for /debug/state diagnostics endpoint.
+	// Updated after successful UpdateConfiguration calls.
+	actualStateMu        sync.RWMutex
+	lastKnownActualRules []diagnostics.RuleView
 }
 
 // NewController 创建一个新的控制器实例
@@ -1019,4 +1025,48 @@ func (c *Controller) ReconcileInterval() time.Duration {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.reconcileInterval
+}
+
+// GetDebugState returns the current desired vs actual state for the /debug/state endpoint.
+// Safe to call from any goroutine. Uses cached state — never makes Cloudflare API calls.
+func (c *Controller) GetDebugState() diagnostics.DebugStateResponse {
+	c.actualStateMu.RLock()
+	defer c.actualStateMu.RUnlock()
+
+	desired := c.snapshotRuleViewsLocked()
+	actual := c.lastKnownActualRules
+	source := "empty"
+	if actual != nil {
+		source = "live_cache"
+	}
+
+	return diagnostics.DebugStateResponse{
+		Timestamp:    time.Now(),
+		DesiredState: desired,
+		ActualState:  actual,
+		Source:       source,
+		Diff:         diagnostics.ComputeDiff(desired, actual),
+	}
+}
+
+// setLastKnownActualRules replaces the cached actual-state snapshot.
+// Called by Sync/Reconcile after a successful UpdateConfiguration push.
+func (c *Controller) setLastKnownActualRules(rules []diagnostics.RuleView) {
+	c.actualStateMu.Lock()
+	c.lastKnownActualRules = rules
+	c.actualStateMu.Unlock()
+}
+
+// snapshotRuleViewsLocked builds a slice of RuleView from c.ingressRules.
+// Caller must hold c.mu (read or write).
+func (c *Controller) snapshotRuleViewsLocked() []diagnostics.RuleView {
+	views := make([]diagnostics.RuleView, 0, len(c.ingressRules))
+	for _, rule := range c.ingressRules {
+		views = append(views, diagnostics.RuleView{
+			Hostname: rule.Hostname.Value,
+			Service:  rule.Service.Value,
+			Path:     rule.Path.Value,
+		})
+	}
+	return views
 }

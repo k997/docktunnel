@@ -9,6 +9,7 @@ import (
 	containerTypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 
+	"docktunnel/internal/diagnostics"
 	"docktunnel/internal/events"
 	"docktunnel/internal/state"
 	"docktunnel/pkg/types"
@@ -859,5 +860,32 @@ func TestStart_RestoresFromRetainingViaTransition(t *testing.T) {
 	_, pendingExists := ctrl.stateManager.GetPendingDeletion("c1")
 	if pendingExists {
 		t.Error("entry should not be in pending deletes after restart")
+	}
+}
+
+func TestGetDebugState_InitialState(t *testing.T) {
+	c := &Controller{}
+	resp := c.GetDebugState()
+	if resp.Source != "empty" {
+		t.Errorf("initial Source = %q, want empty", resp.Source)
+	}
+	if len(resp.DesiredState) != 0 {
+		t.Errorf("initial DesiredState = %v, want empty", resp.DesiredState)
+	}
+}
+
+func TestSetLastKnownActualRules_UpdatesCache(t *testing.T) {
+	c := &Controller{}
+	rules := []diagnostics.RuleView{
+		{Hostname: "a.com", Service: "http://localhost:80"},
+	}
+	c.setLastKnownActualRules(rules)
+
+	resp := c.GetDebugState()
+	if resp.Source != "live_cache" {
+		t.Errorf("Source = %q, want live_cache", resp.Source)
+	}
+	if len(resp.ActualState) != 1 || resp.ActualState[0].Hostname != "a.com" {
+		t.Errorf("ActualState = %v, want single a.com", resp.ActualState)
 	}
 }
