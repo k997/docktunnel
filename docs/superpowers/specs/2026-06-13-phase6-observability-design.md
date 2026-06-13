@@ -289,17 +289,33 @@ func Handler(snapshot func() DebugStateResponse) http.HandlerFunc {
 
 **Controller integration:**
 
-The controller caches the last-known actual state at the end of successful `Sync()` and `Reconcile()` cycles (the controller already fetches the current tunnel config from Cloudflare during these — we just stash the result):
+The controller does NOT currently read the live tunnel config from Cloudflare — it only pushes via `UpdateConfiguration`. Phase 6 adds a `GetConfiguration(ctx)` method to `cloudflareManager.Manager` (and the `CloudflareManager` interface) that performs a single GET against `client.ZeroTrust.Tunnels.Cloudflared.Configurations.Get`. The controller calls this at the end of successful `Sync()` and `Reconcile()` cycles and caches the result. Failure to fetch is non-fatal — the cache simply stays stale, and the `Source` field will continue to read `"live_cache"` since the previous successful fetch (or `"empty"` if no fetch has ever succeeded).
 
 ```go
 // In Controller struct:
-actualStateMu       sync.RWMutex
+actualStateMu        sync.RWMutex
 lastKnownActualRules []diagnostics.RuleView
 
-// At end of Sync/Reconcile, after fetching tunnel config:
-c.actualStateMu.Lock()
-c.lastKnownActualRules = toRuleViews(tunnelConfig.Ingress)
-c.actualStateMu.Unlock()
+// refreshActualState is called at end of Sync/Reconcile.
+func (c *Controller) refreshActualState(ctx context.Context) {
+    ingress, err := c.cloudflareManager.GetConfiguration(ctx)
+    if err != nil {
+        slog.Warn("Failed to fetch live tunnel config for diagnostics", "error", err)
+        return
+    }
+    views := make([]diagnostics.RuleView, 0, len(ingress))
+    for _, rule := range ingress {
+        if rule.Hostname == "" {
+            continue // skip catch-all rules like http_status:404
+        }
+        views = append(views, diagnostics.RuleView{
+            Hostname: rule.Hostname,
+            Service:  rule.Service,
+            Path:     rule.Path,
+        })
+    }
+    c.setLastKnownActualRules(views)
+}
 ```
 
 New public method:
