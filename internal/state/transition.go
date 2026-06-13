@@ -6,40 +6,40 @@ import (
 	"docktunnel/pkg/types"
 )
 
-// Transition handles state transitions for a container based on events and retention policy.
+// Transition handles state transitions for a container service based on events and retention policy.
 // Returns actions for the controller to execute (e.g., delete routes, DNS records).
 // Thread-safe: acquires lock and delegates to transitionLocked.
-func (sm *Manager) Transition(containerID string, event types.TransitionEvent, policy *types.RetentionPolicy) ([]types.Action, error) {
+func (sm *Manager) Transition(containerID, serviceName string, event types.TransitionEvent, policy *types.RetentionPolicy) ([]types.Action, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	return sm.transitionLocked(containerID, event, policy)
+	return sm.transitionLocked(containerID, serviceName, event, policy)
 }
 
 // transitionLocked performs the actual state transition logic.
 // Assumes mu is already held.
-func (sm *Manager) transitionLocked(containerID string, event types.TransitionEvent, policy *types.RetentionPolicy) ([]types.Action, error) {
+func (sm *Manager) transitionLocked(containerID, serviceName string, event types.TransitionEvent, policy *types.RetentionPolicy) ([]types.Action, error) {
 	switch event {
 	case types.EventContainerStopped:
-		return sm.transitionStoppedLocked(containerID, policy)
+		return sm.transitionStoppedLocked(containerID, serviceName, policy)
 	case types.EventContainerStarted:
-		return sm.transitionStartedLocked(containerID)
+		return sm.transitionStartedLocked(containerID, serviceName)
 	case types.EventRetentionExpired:
-		return sm.transitionRetentionExpiredLocked(containerID)
+		return sm.transitionRetentionExpiredLocked(containerID, serviceName)
 	case types.EventCleanupComplete:
-		return sm.transitionCleanupCompleteLocked(containerID)
+		return sm.transitionCleanupCompleteLocked(containerID, serviceName)
 	default:
-		sm.logger.Warn("Unknown transition event", "event", event, "container_id", containerID)
+		sm.logger.Warn("Unknown transition event", "event", event, "container_id", containerID, "service_name", serviceName)
 		return nil, nil
 	}
 }
 
 // transitionStoppedLocked handles container stop events with retention policy.
 // Assumes mu is already held.
-func (sm *Manager) transitionStoppedLocked(containerID string, policy *types.RetentionPolicy) ([]types.Action, error) {
-	entry, exists := sm.activeTunnels[containerID]
+func (sm *Manager) transitionStoppedLocked(containerID, serviceName string, policy *types.RetentionPolicy) ([]types.Action, error) {
+	key := activeTunnelKey(containerID, serviceName)
+	entry, exists := sm.activeTunnels[key]
 	if !exists {
-		// No entry to transition - container may not have docktunnel labels
 		return nil, nil
 	}
 
@@ -47,28 +47,25 @@ func (sm *Manager) transitionStoppedLocked(containerID string, policy *types.Ret
 	entry.DeletedAt = &now
 	entry.RetentionPolicy = *policy
 
-	// Determine actions based on policy type
+	pendingKey := pendingDeleteKey(containerID, serviceName)
+
 	if policy != nil && (policy.Type == types.Timed || policy.Type == types.Forever) {
-		// Move to retaining state - no immediate deletion
 		entry.Status = types.StatusRetaining
-		key := pendingDeleteKey(entry.ContainerID, entry.ServiceName)
-		delete(sm.activeTunnels, containerID)
-		sm.pendingDeletes[key] = entry
+		delete(sm.activeTunnels, key)
+		sm.pendingDeletes[pendingKey] = entry
 		sm.markDirty()
 		sm.logger.Info("Transitioned to retaining",
 			"container_id", containerID,
-			"service_name", entry.ServiceName,
+			"service_name", serviceName,
 			"retention_type", policy.Type,
 			"duration", policy.Duration,
 		)
 		return nil, nil
 	}
 
-	// Immediate or nil policy - move to pending delete
 	entry.Status = types.StatusPendingDelete
-	key := pendingDeleteKey(entry.ContainerID, entry.ServiceName)
-	delete(sm.activeTunnels, containerID)
-	sm.pendingDeletes[key] = entry
+	delete(sm.activeTunnels, key)
+	sm.pendingDeletes[pendingKey] = entry
 	sm.markDirty()
 
 	action := types.Action{
@@ -80,130 +77,99 @@ func (sm *Manager) transitionStoppedLocked(containerID string, policy *types.Ret
 
 	sm.logger.Info("Transitioned to pending delete",
 		"container_id", containerID,
-		"service_name", entry.ServiceName,
+		"service_name", serviceName,
 		"hostname", entry.Config.Hostname,
 	)
 
 	return []types.Action{action}, nil
 }
 
-// transitionStartedLocked handles container start events.
-// Restores entries from pending deletes back to active state.
+// transitionStartedLocked handles container start events for a specific service.
+// Restores entry from pending deletes back to active state.
 // Assumes mu is already held.
-func (sm *Manager) transitionStartedLocked(containerID string) ([]types.Action, error) {
-	// Find any pending delete entries for this container
-	var foundKey string
-	var foundEntry *types.TunnelEntry
-
-	for key, entry := range sm.pendingDeletes {
-		if containerIDFromKey(key) == containerID {
-			foundKey = key
-			foundEntry = entry
-			break
-		}
-	}
-
-	if foundEntry == nil {
-		// No pending entry - new container or already active
+func (sm *Manager) transitionStartedLocked(containerID, serviceName string) ([]types.Action, error) {
+	pendingKey := pendingDeleteKey(containerID, serviceName)
+	entry, exists := sm.pendingDeletes[pendingKey]
+	if !exists {
 		sm.logger.Debug("No pending entry to restore",
 			"container_id", containerID,
+			"service_name", serviceName,
 		)
 		return nil, nil
 	}
 
-	// Restore to active state
-	foundEntry.Status = types.StatusActive
-	foundEntry.DeletedAt = nil
+	entry.Status = types.StatusActive
+	entry.DeletedAt = nil
 
-	// Move back to active tunnels
-	delete(sm.pendingDeletes, foundKey)
-	sm.activeTunnels[containerID] = foundEntry
+	delete(sm.pendingDeletes, pendingKey)
+	activeKey := activeTunnelKey(containerID, serviceName)
+	sm.activeTunnels[activeKey] = entry
 	sm.markDirty()
 
 	sm.logger.Info("Restored tunnel to active",
 		"container_id", containerID,
-		"service_name", foundEntry.ServiceName,
-		"hostname", foundEntry.Config.Hostname,
+		"service_name", serviceName,
+		"hostname", entry.Config.Hostname,
 	)
 
 	return nil, nil
 }
 
-// transitionRetentionExpiredLocked handles retention timer expiry events.
-// Transitions entries from retaining to pending delete.
+// transitionRetentionExpiredLocked handles retention timer expiry for a specific service.
+// Transitions entry from retaining to pending delete.
 // Assumes mu is already held.
-func (sm *Manager) transitionRetentionExpiredLocked(containerID string) ([]types.Action, error) {
-	// Find retaining entry for this container
-	var foundEntry *types.TunnelEntry
-
-	for _, entry := range sm.pendingDeletes {
-		if entry.Status == types.StatusRetaining && entry.ContainerID == containerID {
-			foundEntry = entry
-			break
-		}
-	}
-
-	if foundEntry == nil {
-		// No retaining entry found
+func (sm *Manager) transitionRetentionExpiredLocked(containerID, serviceName string) ([]types.Action, error) {
+	pendingKey := pendingDeleteKey(containerID, serviceName)
+	entry, exists := sm.pendingDeletes[pendingKey]
+	if !exists || entry.Status != types.StatusRetaining {
 		sm.logger.Debug("No retaining entry found for expiry",
 			"container_id", containerID,
+			"service_name", serviceName,
 		)
 		return nil, nil
 	}
 
-	// Transition to pending delete
-	foundEntry.Status = types.StatusPendingDelete
+	entry.Status = types.StatusPendingDelete
 	sm.markDirty()
 
 	action := types.Action{
 		Kind:        types.ActionDeleteRoute,
-		ContainerID: foundEntry.ContainerID,
-		ServiceName: foundEntry.ServiceName,
-		Hostname:    foundEntry.Config.Hostname,
+		ContainerID: entry.ContainerID,
+		ServiceName: entry.ServiceName,
+		Hostname:    entry.Config.Hostname,
 	}
 
 	sm.logger.Info("Retention expired, transitioned to pending delete",
 		"container_id", containerID,
-		"service_name", foundEntry.ServiceName,
-		"hostname", foundEntry.Config.Hostname,
+		"service_name", serviceName,
+		"hostname", entry.Config.Hostname,
 	)
 
 	return []types.Action{action}, nil
 }
 
-// transitionCleanupCompleteLocked handles cleanup completion events.
-// Removes entries that have been fully cleaned up.
+// transitionCleanupCompleteLocked handles cleanup completion for a specific service.
+// Removes entry that has been fully cleaned up.
 // Assumes mu is already held.
-func (sm *Manager) transitionCleanupCompleteLocked(containerID string) ([]types.Action, error) {
-	// Find pending delete entry for this container
-	var foundKey string
-	var foundEntry *types.TunnelEntry
-
-	for key, entry := range sm.pendingDeletes {
-		if containerIDFromKey(key) == containerID && entry.Status == types.StatusPendingDelete {
-			foundKey = key
-			foundEntry = entry
-			break
-		}
-	}
-
-	if foundEntry == nil {
-		// No pending delete entry found
+func (sm *Manager) transitionCleanupCompleteLocked(containerID, serviceName string) ([]types.Action, error) {
+	pendingKey := pendingDeleteKey(containerID, serviceName)
+	entry, exists := sm.pendingDeletes[pendingKey]
+	if !exists || entry.Status != types.StatusPendingDelete {
 		sm.logger.Debug("No pending delete entry found for cleanup",
 			"container_id", containerID,
+			"service_name", serviceName,
 		)
 		return nil, nil
 	}
 
-	// Mark as deleted and remove from state
-	foundEntry.Status = types.StatusDeleted
-	delete(sm.pendingDeletes, foundKey)
+	entry.Status = types.StatusDeleted
+	delete(sm.pendingDeletes, pendingKey)
 	sm.markDirty()
 
 	sm.logger.Info("Cleanup complete, entry removed",
 		"container_id", containerID,
-		"service_name", foundEntry.ServiceName,
-		"hostname", foundEntry.Config.Hostname,
+		"service_name", serviceName,
+		"hostname", entry.Config.Hostname,
 	)
 
 	return nil, nil

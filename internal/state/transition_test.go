@@ -10,7 +10,6 @@ import (
 )
 
 func setupTestManager() *Manager {
-	// Create a logger that writes to stdout for test visibility
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	return NewManager(logger)
 }
@@ -24,7 +23,7 @@ func TestTransition_Stopped_Immediate(t *testing.T) {
 		Status:      types.StatusActive,
 	})
 
-	actions, err := sm.Transition("c1", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Immediate})
+	actions, err := sm.Transition("c1", "web", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Immediate})
 	if err != nil {
 		t.Fatalf("Transition failed: %v", err)
 	}
@@ -59,7 +58,7 @@ func TestTransition_Stopped_Timed(t *testing.T) {
 		Status:      types.StatusActive,
 	})
 
-	actions, err := sm.Transition("c1", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour})
+	actions, err := sm.Transition("c1", "web", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour})
 	if err != nil {
 		t.Fatalf("Transition failed: %v", err)
 	}
@@ -89,7 +88,7 @@ func TestTransition_Stopped_Forever(t *testing.T) {
 		Status:      types.StatusActive,
 	})
 
-	actions, err := sm.Transition("c1", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Forever})
+	actions, err := sm.Transition("c1", "web", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Forever})
 	if err != nil {
 		t.Fatalf("Transition failed: %v", err)
 	}
@@ -119,7 +118,7 @@ func TestTransition_Started_FromRetaining(t *testing.T) {
 		DeletedAt:       &now,
 	})
 
-	actions, err := sm.Transition("c1", types.EventContainerStarted, nil)
+	actions, err := sm.Transition("c1", "web", types.EventContainerStarted, nil)
 	if err != nil {
 		t.Fatalf("Transition failed: %v", err)
 	}
@@ -157,7 +156,7 @@ func TestTransition_RetentionExpired(t *testing.T) {
 		DeletedAt:       &past,
 	})
 
-	actions, err := sm.Transition("c1", types.EventRetentionExpired, nil)
+	actions, err := sm.Transition("c1", "web", types.EventRetentionExpired, nil)
 	if err != nil {
 		t.Fatalf("Transition failed: %v", err)
 	}
@@ -184,7 +183,7 @@ func TestTransition_CleanupComplete(t *testing.T) {
 		Status:      types.StatusPendingDelete,
 	})
 
-	actions, err := sm.Transition("c1", types.EventCleanupComplete, nil)
+	actions, err := sm.Transition("c1", "web", types.EventCleanupComplete, nil)
 	if err != nil {
 		t.Fatalf("Transition failed: %v", err)
 	}
@@ -202,7 +201,7 @@ func TestTransition_CleanupComplete(t *testing.T) {
 func TestTransition_Stopped_NoEntry(t *testing.T) {
 	sm := setupTestManager()
 
-	actions, err := sm.Transition("nonexistent", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Immediate})
+	actions, err := sm.Transition("nonexistent", "web", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Immediate})
 	if err != nil {
 		t.Fatalf("Transition failed: %v", err)
 	}
@@ -221,9 +220,57 @@ func TestTransition_MarksDirty(t *testing.T) {
 		Status:      types.StatusActive,
 	})
 
-	_, _ = sm.Transition("c1", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Immediate})
+	_, _ = sm.Transition("c1", "web", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Immediate})
 
 	if !sm.IsDirty() {
 		t.Error("Transition should mark state as dirty")
+	}
+}
+
+func TestTransition_Stopped_MultiService_Independent(t *testing.T) {
+	sm := setupTestManager()
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "c1", ServiceName: "web",
+		Config:          types.TunnelConfiguration{Hostname: "web.example.com"},
+		Status:          types.StatusActive,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+	})
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "c1", ServiceName: "api",
+		Config:          types.TunnelConfiguration{Hostname: "api.example.com"},
+		Status:          types.StatusActive,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+	})
+
+	// Stop web with Timed — should retain
+	webActions, _ := sm.Transition("c1", "web", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour})
+	if len(webActions) != 0 {
+		t.Fatalf("expected 0 actions for Timed web, got %v", webActions)
+	}
+
+	// Stop api with Immediate — should delete
+	apiActions, _ := sm.Transition("c1", "api", types.EventContainerStopped, &types.RetentionPolicy{Type: types.Immediate})
+	if len(apiActions) != 1 || apiActions[0].Kind != types.ActionDeleteRoute {
+		t.Fatalf("expected 1 ActionDeleteRoute for Immediate api, got %v", apiActions)
+	}
+	if apiActions[0].Hostname != "api.example.com" {
+		t.Errorf("expected api.example.com, got %s", apiActions[0].Hostname)
+	}
+
+	// Verify: web in Retaining, api in PendingDelete
+	entries := sm.GetPendingDeletionsByContainer("c1")
+	retainingCount := 0
+	pendingDeleteCount := 0
+	for _, e := range entries {
+		if e.Status == types.StatusRetaining {
+			retainingCount++
+		}
+		if e.Status == types.StatusPendingDelete {
+			pendingDeleteCount++
+		}
+	}
+	if retainingCount != 1 || pendingDeleteCount != 1 {
+		t.Errorf("expected 1 Retaining + 1 PendingDelete, got %d Retaining + %d PendingDelete",
+			retainingCount, pendingDeleteCount)
 	}
 }
