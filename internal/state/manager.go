@@ -35,6 +35,8 @@ type Manager struct {
 	compMaxDelay       time.Duration
 	compMaxRetries     int
 	compPollInterval   time.Duration
+	backupCount        int
+	validateOnLoad     bool
 
 	logger    *slog.Logger
 	statePath string
@@ -78,6 +80,8 @@ func NewManager(logger *slog.Logger) *Manager {
 		compMaxDelay:       30 * time.Minute,
 		compMaxRetries:     10,
 		compPollInterval:   30 * time.Second,
+		backupCount:        3,
+		validateOnLoad:     true,
 	}
 }
 
@@ -86,6 +90,34 @@ func (sm *Manager) SetStatePath(path string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.statePath = path
+}
+
+// BackupCount returns the number of backup files to keep
+func (sm *Manager) BackupCount() int {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.backupCount
+}
+
+// ValidateOnLoad returns whether state validation should be performed on load
+func (sm *Manager) ValidateOnLoad() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.validateOnLoad
+}
+
+// SetBackupCount sets the number of backup files to keep
+func (sm *Manager) SetBackupCount(n int) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.backupCount = n
+}
+
+// SetValidateOnLoad sets whether state validation should be performed on load
+func (sm *Manager) SetValidateOnLoad(enabled bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.validateOnLoad = enabled
 }
 
 // markDirty marks the state as changed and potentially saves

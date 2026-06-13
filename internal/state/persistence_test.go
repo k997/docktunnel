@@ -340,3 +340,29 @@ func TestVersionMismatch(t *testing.T) {
 	// Should succeed with current version
 	assert.NoError(t, err)
 }
+
+// TestNewManager_DefaultBackupCount tests default backupCount value
+func TestNewManager_DefaultBackupCount(t *testing.T) {
+	sm := NewManager(slog.Default())
+	assert.Equal(t, 3, sm.BackupCount(), "default backupCount should be 3")
+}
+
+// TestNewManager_DefaultValidateOnLoad tests default validateOnLoad value
+func TestNewManager_DefaultValidateOnLoad(t *testing.T) {
+	sm := NewManager(slog.Default())
+	assert.True(t, sm.ValidateOnLoad(), "default validateOnLoad should be true")
+}
+
+// TestSetBackupCount tests setting backupCount value
+func TestSetBackupCount(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.SetBackupCount(5)
+	assert.Equal(t, 5, sm.BackupCount())
+}
+
+// TestSetValidateOnLoad tests setting validateOnLoad value
+func TestSetValidateOnLoad(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.SetValidateOnLoad(false)
+	assert.False(t, sm.ValidateOnLoad())
+}
