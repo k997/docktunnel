@@ -94,6 +94,10 @@ func main() {
 	initialDelay, maxDelay, maxRetries, pollInterval := cfg.GetCompensationConfig()
 	controller.SetCompensationConfig(initialDelay, maxDelay, maxRetries, pollInterval)
 
+	// Configure persistence settings
+	backupCount, validateOnLoad := cfg.GetPersistenceConfig()
+	controller.SetPersistenceConfig(backupCount, validateOnLoad)
+
 	appLogger.Info("Loading persisted state", "path", statePath)
 	if err := controller.LoadState(); err != nil {
 		appLogger.Warn("Failed to load persisted state, starting with clean state",

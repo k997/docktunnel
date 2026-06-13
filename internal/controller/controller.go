@@ -437,6 +437,12 @@ func (c *Controller) SetCompensationConfig(initialDelay, maxDelay time.Duration,
 	c.stateManager.SetCompensationConfig(initialDelay, maxDelay, maxRetries, pollInterval)
 }
 
+// SetPersistenceConfig configures backup and validation settings.
+func (c *Controller) SetPersistenceConfig(backupCount int, validateOnLoad bool) {
+	c.stateManager.SetBackupCount(backupCount)
+	c.stateManager.SetValidateOnLoad(validateOnLoad)
+}
+
 // Sync 同步Docker容器状态到Cloudflare Tunnel配置
 func (c *Controller) Sync(ctx context.Context) error {
 	// 从cloudflareManager获取tunnel信息
