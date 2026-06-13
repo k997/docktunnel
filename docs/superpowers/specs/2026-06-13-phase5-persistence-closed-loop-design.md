@@ -22,11 +22,10 @@ Scope is limited to the gob persistence path. The JSON fallback remains as-is (m
 
 Before every `Save()`, rotate existing state files:
 
-1. Delete `.bak.{backupCount}` (oldest, e.g., `.bak.3`)
-2. Rename `.bak.{n-1}` → `.bak.{n}` (shift chain upward)
-3. Rename `.bak.1` → `.bak.2`
-4. Rename current state file → `.bak.1`
-5. Write new state file via existing tmp + rename
+1. Rename current state file → `.bak.{timestamp}` (e.g., `.bak.20260613-143052`)
+2. Scan directory for all `.bak.*` files matching the state file name
+3. Sort by timestamp (newest first), delete oldest entries beyond `backupCount`
+4. Write new state file via existing tmp + rename
 
 **New method:**
 
@@ -35,6 +34,10 @@ func (sm *Manager) rotateBackups(statePath string) error
 ```
 
 Called at the start of `Save()`, after acquiring the snapshot but before writing the tmp file. Rotation failures are logged as warnings but do not prevent the save from proceeding — a failed rename of an old backup should not block state persistence.
+
+**Backup filename format:** `state.bin.bak.{YYYYMMDD-HHmmSS}` — uses the current time at rotation moment. Example: `/var/lib/docktunnel/state.bin.bak.20260613-143052`.
+
+**Cleanup logic:** After creating a new backup, glob for `{statePath}.bak.*` files, sort by timestamp suffix (lexicographic sort works since format is fixed-width), and delete the oldest files exceeding `backupCount`. This naturally prunes old backups on each save cycle.
 
 **Config:**
 
@@ -82,13 +85,13 @@ Returns a multi-error describing all validation failures, or nil if valid.
 **Fallback chain in `Load()`:**
 
 ```
-primary gob → .bak.1 → .bak.2 → .bak.3 → JSON fallback → empty state
+primary gob → .bak.* (newest first) → JSON fallback → empty state
 ```
 
 Modified `Load()` logic:
 
 1. Try `loadGob(statePath)` — primary file.
-2. On failure, iterate `.bak.1` through `.bak.{backupCount}`, calling `loadGob()` on each. Stop on first success.
+2. On failure, glob for `{statePath}.bak.*` files, sort by timestamp suffix (newest first), and try `loadGob()` on each. Stop on first success.
 3. If all backups fail, try JSON fallback (existing behavior).
 4. If JSON also fails, degrade to empty state.
 
