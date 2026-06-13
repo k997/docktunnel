@@ -34,6 +34,11 @@ func (m *mockCloudflareManager) UpdateConfiguration(ctx context.Context, ingress
 	return nil
 }
 
+// GetConfiguration 模拟获取配置
+func (m *mockCloudflareManager) GetConfiguration(ctx context.Context) ([]zero_trust.TunnelCloudflaredConfigurationGetResponseConfigIngress, error) {
+	return nil, nil
+}
+
 // ListDNSRecords 模拟列出DNS记录
 func (m *mockCloudflareManager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, error) {
 	return []dns.RecordResponse{}, nil

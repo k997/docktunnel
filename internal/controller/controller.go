@@ -25,6 +25,7 @@ import (
 // CloudflareManager defines the interface for Cloudflare tunnel management
 type CloudflareManager interface {
 	GetTunnel() *zero_trust.TunnelCloudflaredGetResponse
+	GetConfiguration(ctx context.Context) ([]zero_trust.TunnelCloudflaredConfigurationGetResponseConfigIngress, error)
 	UpdateConfiguration(ctx context.Context, ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error
 	ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, error)
 	DeleteDNSRecords(ctx context.Context, hostnames []string) error

@@ -320,6 +320,33 @@ func (m *Manager) UpdateConfiguration(ctx context.Context, ingressRules []zero_t
 	return nil
 }
 
+// GetConfiguration fetches the current tunnel configuration from Cloudflare.
+// Returns the ingress rules currently configured on the tunnel.
+func (m *Manager) GetConfiguration(ctx context.Context) ([]zero_trust.TunnelCloudflaredConfigurationGetResponseConfigIngress, error) {
+	if m.tunnel == nil {
+		return nil, fmt.Errorf("tunnel is not available")
+	}
+
+	params := zero_trust.TunnelCloudflaredConfigurationGetParams{
+		AccountID: cloudflare.F(m.account),
+	}
+
+	var result []zero_trust.TunnelCloudflaredConfigurationGetResponseConfigIngress
+	err := m.callWithRetry(ctx, func() error {
+		resp, err := m.client.ZeroTrust.Tunnels.Cloudflared.Configurations.Get(ctx, m.tunnel.ID, params)
+		if err != nil {
+			return err
+		}
+		result = resp.Config.Ingress
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tunnel configuration: %w", err)
+	}
+
+	return result, nil
+}
+
 // getZoneIDForHostname 获取主机名对应的zone ID
 func (m *Manager) getZoneIDForHostname(ctx context.Context, hostname string) (string, error) {
 	// 检查缓存
