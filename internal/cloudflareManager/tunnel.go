@@ -531,7 +531,9 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) (err
 		metrics.RecordDNSSync("delete", result)
 	}()
 
-	slog.Info("Deleting DNS records", "hostnames", hostnames)
+	slog.Info("Deleting DNS records",
+		"action", "dns_delete",
+		"hostnames", hostnames)
 
 	// 按zone分组主机名
 	zoneHostnames := make(map[string][]string)

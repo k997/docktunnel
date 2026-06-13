@@ -179,7 +179,7 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 
 	// 调用performSync同步空的规则集（这将删除所有DNS记录）
 	if err := c.performSync(ctx); err != nil {
-		slog.Error("Failed to perform cleanup sync", "error", err)
+		slog.Error("Failed to perform cleanup sync", "error", err, "result", "failure")
 		return err
 	}
 
@@ -245,7 +245,10 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	if !c.isDocktunnelEnabled(event) {
 		return nil
 	}
-	slog.Info("Handling container start event", "containerID", event.ContainerID)
+	slog.Info("Handling container start event",
+		"action", "dispatch_start",
+		"containerID", event.ContainerID,
+		"type", event.Type)
 
 	// Restore any retaining/pending entries for this container's services
 	c.stateManager.RestoreActiveTunnel(event.ContainerID)
@@ -258,7 +261,11 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 
 	serviceHostnames, err := c.registerContainerRules(ctx, event)
 	if err != nil {
-		slog.Error("Failed to register container rules", "error", err, "containerID", event.ContainerID)
+		slog.Error("Failed to register container rules",
+			"action", "register_rules",
+			"result", "failure",
+			"error", err,
+			"containerID", event.ContainerID)
 		return err
 	}
 
@@ -342,7 +349,10 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 		return nil
 	}
 
-	slog.Info("Handling container stop event", "containerID", event.ContainerID)
+	slog.Info("Handling container stop event",
+		"action", "dispatch_start",
+		"containerID", event.ContainerID,
+		"type", event.Type)
 
 	if c.isFlapping(event.ContainerID) {
 		slog.Warn("Container is flapping, ignoring stop event", "containerID", event.ContainerID)
@@ -403,6 +413,8 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 		)
 		if err != nil {
 			slog.Error("State transition failed",
+				"action", "state_transition",
+				"result", "failure",
 				"container_id", event.ContainerID,
 				"service_name", entry.ServiceName,
 				"error", err)
@@ -492,7 +504,7 @@ func (c *Controller) Sync(ctx context.Context) error {
 		return fmt.Errorf("tunnel is not available")
 	}
 
-	slog.Info("Starting synchronization", "tunnelID", tunnel.ID)
+	slog.Info("Starting synchronization", "action", "sync", "tunnelID", tunnel.ID)
 
 	// 扫描运行中的容器
 	eventsList, err := c.dockerManager.ScanRunningContainers(ctx)
@@ -547,7 +559,11 @@ func (c *Controller) Sync(ctx context.Context) error {
 		// 解析标签获取主机名
 		parsedRules, err := label.Parse(event.ContainerInfo)
 		if err != nil {
-			slog.Error("Failed to parse container labels during sync", "containerID", event.ContainerID, "error", err)
+			slog.Error("Failed to parse container labels during sync",
+			"action", "parse_labels",
+			"result", "failure",
+			"containerID", event.ContainerID,
+			"error", err)
 			continue
 		}
 
@@ -593,7 +609,10 @@ func (c *Controller) Sync(ctx context.Context) error {
 
 	// 验证所有规则
 	if err := c.ruleValidator.Validate(allParsedRules, nil); err != nil {
-		slog.Error("Invalid ingress rules during sync", "error", err)
+		slog.Error("Invalid ingress rules during sync",
+			"action", "validate_rules",
+			"result", "failure",
+			"error", err)
 		return fmt.Errorf("invalid ingress rules during sync: %w", err)
 	}
 
@@ -664,7 +683,9 @@ func (c *Controller) performSync(ctx context.Context) error {
 	// 从cloudflareManager获取tunnel信息
 	tunnel := c.cloudflareManager.GetTunnel()
 	if tunnel == nil {
-		slog.Error("Tunnel is not available")
+		slog.Error("Tunnel is not available",
+			"action", "sync",
+			"result", "failure")
 		return fmt.Errorf("tunnel is not available")
 	}
 
@@ -672,7 +693,10 @@ func (c *Controller) performSync(ctx context.Context) error {
 
 	// 更新配置（保持原始的ingress规则，不需要修改Service字段）
 	if err := c.cloudflareManager.UpdateConfiguration(ctx, ingressRules); err != nil {
-		slog.Error("Failed to update tunnel configuration", "error", err)
+		slog.Error("Failed to update tunnel configuration",
+			"action", "update_config",
+			"result", "failure",
+			"error", err)
 		return fmt.Errorf("failed to update tunnel configuration: %w", err)
 	}
 
@@ -680,7 +704,10 @@ func (c *Controller) performSync(ctx context.Context) error {
 
 	// 同步DNS记录
 	if err := c.syncDNSRecords(ctx); err != nil {
-		slog.Error("Failed to sync DNS records", "error", err)
+		slog.Error("Failed to sync DNS records",
+			"action", "sync_dns",
+			"result", "failure",
+			"error", err)
 		return fmt.Errorf("failed to sync DNS records: %w", err)
 	}
 
@@ -759,7 +786,10 @@ func (c *Controller) syncDNSRecords(ctx context.Context) error {
 	if len(deleteHostnames) > 0 {
 		slog.Debug("Deleting DNS records", "hostnames", deleteHostnames)
 		if err := c.cloudflareManager.DeleteDNSRecords(ctx, deleteHostnames); err != nil {
-			slog.Error("Failed to batch delete DNS records", "error", err)
+			slog.Error("Failed to batch delete DNS records",
+				"action", "dns_delete",
+				"result", "failure",
+				"error", err)
 			return err
 		}
 		slog.Info("Batch deleted DNS records", "count", len(deleteHostnames))
@@ -768,7 +798,10 @@ func (c *Controller) syncDNSRecords(ctx context.Context) error {
 	// 执行批量创建/更新操作
 	if len(upsertHostnames) > 0 {
 		if err := c.cloudflareManager.UpsertDNSRecords(ctx, upsertHostnames); err != nil {
-			slog.Error("Failed to batch upsert DNS records", "error", err)
+			slog.Error("Failed to batch upsert DNS records",
+				"action", "dns_upsert",
+				"result", "failure",
+				"error", err)
 			return err
 		}
 		slog.Info("Batch upserted DNS records", "count", len(upsertHostnames))
@@ -957,7 +990,10 @@ func (c *Controller) handleHealthHealthy(ctx context.Context, event events.Event
 
 	if _, err := c.registerContainerRules(ctx, event); err != nil {
 		slog.Error("Failed to register container rules on health event",
-			"error", err, "containerID", event.ContainerID)
+			"action", "register_rules",
+			"result", "failure",
+			"error", err,
+			"containerID", event.ContainerID)
 		return err
 	}
 
@@ -1023,7 +1059,10 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		parsedRules, err := label.Parse(event.ContainerInfo)
 		if err != nil {
 			slog.Error("Failed to parse labels during reconcile",
-				"containerID", event.ContainerID, "error", err)
+				"action", "parse_labels",
+				"result", "failure",
+				"containerID", event.ContainerID,
+				"error", err)
 			continue
 		}
 
