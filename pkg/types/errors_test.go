@@ -3,6 +3,7 @@ package types
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestRetryableError(t *testing.T) {
@@ -42,5 +43,28 @@ func TestAsPermanentError(t *testing.T) {
 	var pe *PermanentError
 	if !errors.As(err, &pe) {
 		t.Error("expected errors.As to match PermanentError")
+	}
+}
+
+func TestCompensationRecordFields(t *testing.T) {
+	now := time.Now().UTC()
+	rec := CompensationRecord{
+		ID:          "rec-1",
+		Action:      Action{Kind: ActionDeleteRoute, Hostname: "app.example.com"},
+		RetryCount:  0,
+		MaxRetries:  10,
+		NextRetryAt: now.Add(30 * time.Second),
+		LastError:   "",
+		CreatedAt:   now,
+		Dead:        false,
+	}
+	if rec.ID != "rec-1" {
+		t.Errorf("expected ID rec-1, got %s", rec.ID)
+	}
+	if rec.Action.Kind != ActionDeleteRoute {
+		t.Errorf("expected ActionDeleteRoute, got %d", rec.Action.Kind)
+	}
+	if rec.Dead {
+		t.Error("expected Dead to be false")
 	}
 }

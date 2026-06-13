@@ -134,6 +134,18 @@ type Action struct {
 	Hostname    string
 }
 
+// CompensationRecord represents a failed action awaiting retry.
+type CompensationRecord struct {
+	ID          string        // unique record ID
+	Action      Action        // the action to retry
+	RetryCount  int
+	MaxRetries  int
+	NextRetryAt time.Time
+	LastError   string
+	CreatedAt   time.Time
+	Dead        bool // true if permanently failed or retries exhausted
+}
+
 // StateSnapshot represents the persisted state of the controller for recovery after restart
 type StateSnapshot struct {
 	Version            int
@@ -141,4 +153,5 @@ type StateSnapshot struct {
 	ActiveTunnels      map[string]*TunnelEntry
 	PendingDeletions   map[string]*TunnelEntry
 	FlappingContainers map[string]FlappingState
+	PendingActions     map[string]*CompensationRecord
 }
