@@ -661,3 +661,97 @@ func (sm *Manager) GetDeadActions() []types.CompensationRecord {
 	}
 	return dead
 }
+
+// RunCompensation runs a background loop that retries failed actions.
+// Blocks until ctx is cancelled.
+func (sm *Manager) RunCompensation(ctx context.Context, executor func(types.Action) error) {
+	for {
+		sm.mu.RLock()
+		interval := sm.compPollInterval
+		sm.mu.RUnlock()
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		sm.processCompensationQueue(executor)
+	}
+}
+
+// processCompensationQueue processes due compensation records.
+func (sm *Manager) processCompensationQueue(executor func(types.Action) error) {
+	sm.mu.Lock()
+
+	now := time.Now()
+	for id, rec := range sm.pendingActions {
+		if rec.Dead {
+			continue
+		}
+		if now.Before(rec.NextRetryAt) {
+			continue
+		}
+
+		action := rec.Action
+		sm.mu.Unlock()
+		err := executor(action)
+		sm.mu.Lock()
+
+		// After re-acquiring lock, re-fetch the record in case it was modified
+		rec, exists := sm.pendingActions[id]
+		if !exists {
+			continue
+		}
+
+		if err == nil {
+			delete(sm.pendingActions, id)
+			sm.markDirty()
+			sm.logger.Info("Compensation action succeeded",
+				"action", action.Kind,
+				"hostname", action.Hostname)
+			continue
+		}
+
+		rec.LastError = err.Error()
+
+		var permanent *types.PermanentError
+		if errors.As(err, &permanent) {
+			rec.Dead = true
+			sm.markDirty()
+			sm.logger.Error("Compensation action permanently failed",
+				"action", action.Kind,
+				"hostname", action.Hostname,
+				"error", err)
+			continue
+		}
+
+		rec.RetryCount++
+		if rec.RetryCount >= rec.MaxRetries {
+			rec.Dead = true
+			sm.markDirty()
+			sm.logger.Error("Compensation action exhausted retries",
+				"action", action.Kind,
+				"hostname", action.Hostname,
+				"retries", rec.RetryCount)
+			continue
+		}
+
+		backoff := sm.compInitialDelay * time.Duration(1<<uint(rec.RetryCount))
+		if backoff > sm.compMaxDelay {
+			backoff = sm.compMaxDelay
+		}
+		rec.NextRetryAt = now.Add(backoff)
+		sm.markDirty()
+		sm.logger.Warn("Compensation action failed, will retry",
+			"action", action.Kind,
+			"hostname", action.Hostname,
+			"retry_count", rec.RetryCount,
+			"next_retry_at", rec.NextRetryAt,
+			"error", err)
+	}
+
+	sm.mu.Unlock()
+}
