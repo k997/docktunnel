@@ -138,6 +138,20 @@ func (sm *Manager) loadGob(statePath string) error {
 		return fmt.Errorf("unsupported state version: %d (max supported: %d)", snapshot.Version, StateVersion)
 	}
 
+	// Validate snapshot if enabled
+	sm.mu.RLock()
+	shouldValidate := sm.validateOnLoad
+	sm.mu.RUnlock()
+
+	if shouldValidate {
+		if err := validateSnapshot(&snapshot); err != nil {
+			sm.logger.Warn("Snapshot validation failed",
+				"path", statePath,
+				"error", err)
+			return fmt.Errorf("snapshot validation failed: %w", err)
+		}
+	}
+
 	// Load into state manager
 	sm.LoadFromSnapshot(&snapshot)
 
@@ -170,6 +184,20 @@ func (sm *Manager) loadJSON(statePath string) error {
 	// Validate version (allow backward compatibility for migration)
 	if snapshot.Version > StateVersion {
 		return fmt.Errorf("unsupported state version: %d (max supported: %d)", snapshot.Version, StateVersion)
+	}
+
+	// Validate snapshot if enabled
+	sm.mu.RLock()
+	shouldValidate := sm.validateOnLoad
+	sm.mu.RUnlock()
+
+	if shouldValidate {
+		if err := validateSnapshot(&snapshot); err != nil {
+			sm.logger.Warn("Snapshot validation failed",
+				"path", statePath,
+				"error", err)
+			return fmt.Errorf("snapshot validation failed: %w", err)
+		}
 	}
 
 	// Load into state manager

@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/gob"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -444,4 +445,58 @@ func TestValidateSnapshot_InvalidCompensationRecord(t *testing.T) {
 	err := validateSnapshot(snapshot)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "compensation record")
+}
+
+func TestLoadGob_ValidatesSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Save a valid snapshot
+	sm1 := NewManager(slog.Default())
+	sm1.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		LastSyncAt:  time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+	require.NoError(t, sm1.Save(statePath))
+
+	// Load with validation enabled (default)
+	sm2 := NewManager(slog.Default())
+	err := sm2.Load(statePath)
+	assert.NoError(t, err)
+
+	_, ok := sm2.GetActiveTunnel("abc", "web")
+	assert.True(t, ok, "valid snapshot should load successfully")
+}
+
+func TestLoadGob_ValidationSkippedWhenDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Create a snapshot with future timestamp manually
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Now().UTC().Add(1 * time.Hour), // far future
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"abc:web": {ContainerID: "abc", ServiceName: "web", Status: types.StatusActive},
+		},
+	}
+
+	// Write the gob file directly
+	file, err := os.Create(statePath)
+	require.NoError(t, err)
+	require.NoError(t, gob.NewEncoder(file).Encode(snapshot))
+	file.Close()
+
+	// Load with validation disabled — should succeed
+	sm := NewManager(slog.Default())
+	sm.SetValidateOnLoad(false)
+	err = sm.Load(statePath)
+	assert.NoError(t, err, "should load even with invalid data when validation disabled")
+
+	_, ok := sm.GetActiveTunnel("abc", "web")
+	assert.True(t, ok, "entry should be loaded despite invalid timestamp")
 }
