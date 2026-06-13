@@ -560,10 +560,10 @@ func (c *Controller) Sync(ctx context.Context) error {
 		parsedRules, err := label.Parse(event.ContainerInfo)
 		if err != nil {
 			slog.Error("Failed to parse container labels during sync",
-			"action", "parse_labels",
-			"result", "failure",
-			"containerID", event.ContainerID,
-			"error", err)
+				"action", "parse_labels",
+				"result", "failure",
+				"containerID", event.ContainerID,
+				"error", err)
 			continue
 		}
 
