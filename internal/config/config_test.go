@@ -4,6 +4,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -215,6 +217,26 @@ func TestValidateAPIToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPersistenceDefaults(t *testing.T) {
+	// Test that the default values are applied when no config is set
+	cfg := &Config{}
+
+	// Test default backupCount
+	if cfg.Persistence.BackupCount != 0 {
+		t.Errorf("Expected default backupCount to be 0, got %d", cfg.Persistence.BackupCount)
+	}
+
+	// Test default validateOnLoad
+	if cfg.Persistence.ValidateOnLoad != false {
+		t.Errorf("Expected default validateOnLoad to be false, got %v", cfg.Persistence.ValidateOnLoad)
+	}
+
+	// Test getter method with defaults
+	backupCount, validateOnLoad := cfg.GetPersistenceConfig()
+	assert.Equal(t, 3, backupCount, "default backupCount should be 3")
+	assert.True(t, validateOnLoad, "default validateOnLoad should be true")
 }
 
 func TestSanitizeForLog(t *testing.T) {

@@ -77,6 +77,10 @@ type Config struct {
 		MaxRetries   int           `mapstructure:"maxRetries"`
 		PollInterval time.Duration `mapstructure:"pollInterval"`
 	} `mapstructure:"compensation"`
+	Persistence struct {
+		BackupCount    int `mapstructure:"backupCount"`
+		ValidateOnLoad bool `mapstructure:"validateOnLoad"`
+	} `mapstructure:"persistence"`
 }
 
 // GetCloudflareOptions 从配置中获取Cloudflare选项
@@ -126,6 +130,19 @@ func (c *Config) GetCompensationConfig() (initialDelay, maxDelay time.Duration, 
 		pollInterval = 30 * time.Second
 	}
 	return
+}
+
+// GetPersistenceConfig returns persistence configuration with defaults applied.
+func (c *Config) GetPersistenceConfig() (backupCount int, validateOnLoad bool) {
+	backupCount = c.Persistence.BackupCount
+	if backupCount == 0 {
+		backupCount = 3
+	}
+	validateOnLoad = c.Persistence.ValidateOnLoad
+	if !validateOnLoad {
+		validateOnLoad = true
+	}
+	return backupCount, validateOnLoad
 }
 
 // GetOriginRequestDefaults 获取OriginRequest默认配置 (T082)
@@ -217,6 +234,9 @@ func New() (*Config, error) {
 	v.SetDefault("compensation.maxDelay", 30*time.Minute)
 	v.SetDefault("compensation.maxRetries", 10)
 	v.SetDefault("compensation.pollInterval", 30*time.Second)
+	// Persistence defaults
+	v.SetDefault("persistence.backupCount", 3)
+	v.SetDefault("persistence.validateOnLoad", true)
 
 	// 2. 设置配置文件
 	v.SetConfigName("config")
@@ -316,5 +336,9 @@ func (c *Config) SanitizeForLog() map[string]interface{} {
 			"maxRetries":   c.Compensation.MaxRetries,
 			"pollInterval": c.Compensation.PollInterval,
 		},
+			"persistence": map[string]interface{}{
+				"backupCount":    c.Persistence.BackupCount,
+				"validateOnLoad": c.Persistence.ValidateOnLoad,
+			},
 	}
 }
