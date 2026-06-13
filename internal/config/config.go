@@ -72,10 +72,10 @@ type Config struct {
 		Path   string `mapstructure:"path"`
 	} `mapstructure:"defaults"`
 	Compensation struct {
-		InitialDelay  time.Duration `mapstructure:"initialDelay"`
-		MaxDelay      time.Duration `mapstructure:"maxDelay"`
-		MaxRetries    int           `mapstructure:"maxRetries"`
-		PollInterval  time.Duration `mapstructure:"pollInterval"`
+		InitialDelay time.Duration `mapstructure:"initialDelay"`
+		MaxDelay     time.Duration `mapstructure:"maxDelay"`
+		MaxRetries   int           `mapstructure:"maxRetries"`
+		PollInterval time.Duration `mapstructure:"pollInterval"`
 	} `mapstructure:"compensation"`
 }
 

@@ -136,8 +136,8 @@ type Action struct {
 
 // CompensationRecord represents a failed action awaiting retry.
 type CompensationRecord struct {
-	ID          string        // unique record ID
-	Action      Action        // the action to retry
+	ID          string // unique record ID
+	Action      Action // the action to retry
 	RetryCount  int
 	MaxRetries  int
 	NextRetryAt time.Time
