@@ -43,3 +43,36 @@ func TestSetCompensationQueueLength_SetsGauge(t *testing.T) {
 		t.Errorf("expected 7, got %v", got)
 	}
 }
+
+func TestIncCompensationQueueOverflow_IncrementsCounter(t *testing.T) {
+	before := testutil.ToFloat64(CompensationQueueOverflow)
+	IncCompensationQueueOverflow()
+	IncCompensationQueueOverflow()
+	after := testutil.ToFloat64(CompensationQueueOverflow)
+	if after-before != 2 {
+		t.Errorf("expected delta=2, got %v", after-before)
+	}
+}
+
+func TestAddGCDeletions_AddsToCounter(t *testing.T) {
+	before := testutil.ToFloat64(GCDeletions)
+	AddGCDeletions(5)
+	after := testutil.ToFloat64(GCDeletions)
+	if after-before != 5 {
+		t.Errorf("expected delta=5, got %v", after-before)
+	}
+}
+
+func TestAddGCDeletions_IgnoresNonPositive(t *testing.T) {
+	before := testutil.ToFloat64(GCDeletions)
+	AddGCDeletions(0)
+	AddGCDeletions(-3)
+	after := testutil.ToFloat64(GCDeletions)
+	if after != before {
+		t.Errorf("expected no change, got delta=%v", after-before)
+	}
+}
+
+func TestObserveSyncDuration_RecordsDuration(t *testing.T) {
+	ObserveSyncDuration(0.456)
+}

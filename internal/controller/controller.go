@@ -490,6 +490,11 @@ func (c *Controller) SetCompensationConfig(initialDelay, maxDelay time.Duration,
 	c.stateManager.SetCompensationConfig(initialDelay, maxDelay, maxRetries, pollInterval)
 }
 
+// SetCompensationQueueCap sets the maximum compensation queue size.
+func (c *Controller) SetCompensationQueueCap(size int) {
+	c.stateManager.SetCompensationQueueCap(size)
+}
+
 // SetPersistenceConfig configures backup and validation settings.
 func (c *Controller) SetPersistenceConfig(backupCount int, validateOnLoad bool) {
 	c.stateManager.SetBackupCount(backupCount)
@@ -570,7 +575,7 @@ func (c *Controller) Sync(ctx context.Context) error {
 		// 合并规则，确保服务名唯一
 		for serviceName, rule := range parsedRules {
 			if _, exists := allParsedRules[serviceName]; exists {
-				slog.Warn("Duplicate service name found during sync, skipping.", "serviceName", serviceName, "containerID", event.ContainerID)
+				slog.Warn("Duplicate service name found during sync, skipping.", "service_name", serviceName, "container_id", event.ContainerID)
 				continue
 			}
 			allParsedRules[serviceName] = rule
@@ -675,6 +680,8 @@ func (c *Controller) syncToCloudflare(ctx context.Context) error {
 
 // performSync 执行实际的Cloudflare同步操作
 func (c *Controller) performSync(ctx context.Context) error {
+	syncStart := time.Now()
+
 	// 构建规则列表
 	ingressRules := c.GetIngressRules()
 
@@ -686,6 +693,7 @@ func (c *Controller) performSync(ctx context.Context) error {
 		slog.Error("Tunnel is not available",
 			"action", "sync",
 			"result", "failure")
+		metrics.ObserveSyncDuration(time.Since(syncStart).Seconds())
 		return fmt.Errorf("tunnel is not available")
 	}
 
@@ -697,6 +705,7 @@ func (c *Controller) performSync(ctx context.Context) error {
 			"action", "update_config",
 			"result", "failure",
 			"error", err)
+		metrics.ObserveSyncDuration(time.Since(syncStart).Seconds())
 		return fmt.Errorf("failed to update tunnel configuration: %w", err)
 	}
 
@@ -708,9 +717,11 @@ func (c *Controller) performSync(ctx context.Context) error {
 			"action", "sync_dns",
 			"result", "failure",
 			"error", err)
+		metrics.ObserveSyncDuration(time.Since(syncStart).Seconds())
 		return fmt.Errorf("failed to sync DNS records: %w", err)
 	}
 
+	metrics.ObserveSyncDuration(time.Since(syncStart).Seconds())
 	slog.Info("Sync operation completed successfully")
 	return nil
 }
@@ -917,19 +928,25 @@ func (c *Controller) RunGarbageCollection(ctx context.Context) error {
 	slog.Info("Garbage collection found expired entries", "count", len(expiredEntries))
 
 	// Remove expired entries from ingress rules
+	removed := 0
 	c.mu.Lock()
 	for _, entry := range expiredEntries {
 		hostname := entry.Config.Hostname
 		if hostname != "" {
 			if _, exists := c.ingressRules[hostname]; exists {
 				delete(c.ingressRules, hostname)
+				removed++
 				slog.Info("Removed expired route from ingress rules",
-					"containerID", entry.ContainerID,
+					"container_id", entry.ContainerID,
 					"hostname", hostname)
 			}
 		}
 	}
 	c.mu.Unlock()
+
+	if removed > 0 {
+		metrics.AddGCDeletions(removed)
+	}
 
 	// Sync updated rules to Cloudflare (outside lock to avoid deadlock)
 	if err := c.syncToCloudflare(ctx); err != nil {

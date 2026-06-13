@@ -2,12 +2,15 @@ package state
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"docktunnel/internal/metrics"
 	"docktunnel/pkg/types"
 )
 
@@ -35,6 +38,7 @@ type Manager struct {
 	compMaxDelay       time.Duration
 	compMaxRetries     int
 	compPollInterval   time.Duration
+	compMaxQueueSize   int
 	backupCount        int
 	validateOnLoad     bool
 
@@ -80,6 +84,7 @@ func NewManager(logger *slog.Logger) *Manager {
 		compMaxDelay:       30 * time.Minute,
 		compMaxRetries:     10,
 		compPollInterval:   30 * time.Second,
+		compMaxQueueSize:   1000,
 		backupCount:        3,
 		validateOnLoad:     true,
 	}
@@ -647,15 +652,66 @@ func (sm *Manager) SetCompensationConfig(initialDelay, maxDelay time.Duration, m
 	sm.compPollInterval = pollInterval
 }
 
+// SetCompensationQueueCap sets the maximum number of pending compensation records.
+// Enqueue requests beyond this cap are rejected and counted in the overflow metric.
+func (sm *Manager) SetCompensationQueueCap(size int) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if size > 0 {
+		sm.compMaxQueueSize = size
+	}
+}
+
+// classifyError returns a stable string label for use as the error_class log field.
+// Returns "permanent" for PermanentError, "retryable" for RetryableError, and
+// "unknown" for plain errors (which are treated as retryable but unclassified).
+func classifyError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var permanent *types.PermanentError
+	if errors.As(err, &permanent) {
+		return "permanent"
+	}
+	var retryable *types.RetryableError
+	if errors.As(err, &retryable) {
+		return "retryable"
+	}
+	return "unknown"
+}
+
+// newCompensationID returns a collision-resistant ID for a compensation record.
+// Uses crypto/rand so rapid enqueues for the same container/service cannot collide.
+func newCompensationID(action types.Action) string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// Fallback to timestamp if rand fails (should not happen in practice).
+		return action.ContainerID + ":" + action.ServiceName + ":" + time.Now().UTC().Format("20060102150405.000000000")
+	}
+	return action.ContainerID + ":" + action.ServiceName + ":" + hex.EncodeToString(buf[:])
+}
+
 // EnqueueAction records a failed action for retry. It classifies the error
-// to decide whether the action is retryable or permanently dead.
+// to decide whether the action is retryable or permanently dead. If the queue
+// is at capacity, the action is rejected and counted in the overflow metric.
 func (sm *Manager) EnqueueAction(action types.Action, err error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	if sm.compMaxQueueSize > 0 && len(sm.pendingActions) >= sm.compMaxQueueSize {
+		metrics.IncCompensationQueueOverflow()
+		sm.logger.Warn("Compensation queue full, rejecting enqueue",
+			"action", action.Kind,
+			"hostname", action.Hostname,
+			"queue_size", len(sm.pendingActions),
+			"queue_cap", sm.compMaxQueueSize,
+			"error_class", classifyError(err),
+			"error", err)
+		return
+	}
+
 	now := time.Now().UTC()
-	// Use nanosecond precision for uniqueness when ContainerID/ServiceName are empty
-	id := action.ContainerID + ":" + action.ServiceName + ":" + now.Format("20060102150405.000000000")
+	id := newCompensationID(action)
 
 	rec := &types.CompensationRecord{
 		ID:          id,
@@ -668,12 +724,19 @@ func (sm *Manager) EnqueueAction(action types.Action, err error) {
 		Dead:        false,
 	}
 
-	var permanent *types.PermanentError
-	if errors.As(err, &permanent) {
+	errorClass := classifyError(err)
+	if errorClass == "permanent" {
 		rec.Dead = true
 		sm.logger.Error("Action permanently failed, marking dead",
 			"action", action.Kind,
 			"hostname", action.Hostname,
+			"error_class", errorClass,
+			"error", err)
+	} else {
+		sm.logger.Warn("Action enqueued for compensation retry",
+			"action", action.Kind,
+			"hostname", action.Hostname,
+			"error_class", errorClass,
 			"error", err)
 	}
 
@@ -756,11 +819,13 @@ func (sm *Manager) processCompensationQueue(executor func(types.Action) error) {
 			sm.markDirty()
 			sm.logger.Info("Compensation action succeeded",
 				"action", action.Kind,
-				"hostname", action.Hostname)
+				"hostname", action.Hostname,
+				"error_class", "none")
 			continue
 		}
 
 		rec.LastError = err.Error()
+		errorClass := classifyError(err)
 
 		var permanent *types.PermanentError
 		if errors.As(err, &permanent) {
@@ -769,6 +834,7 @@ func (sm *Manager) processCompensationQueue(executor func(types.Action) error) {
 			sm.logger.Error("Compensation action permanently failed",
 				"action", action.Kind,
 				"hostname", action.Hostname,
+				"error_class", errorClass,
 				"error", err)
 			continue
 		}
@@ -780,7 +846,9 @@ func (sm *Manager) processCompensationQueue(executor func(types.Action) error) {
 			sm.logger.Error("Compensation action exhausted retries",
 				"action", action.Kind,
 				"hostname", action.Hostname,
-				"retries", rec.RetryCount)
+				"error_class", errorClass,
+				"retries", rec.RetryCount,
+				"error", err)
 			continue
 		}
 
@@ -793,6 +861,7 @@ func (sm *Manager) processCompensationQueue(executor func(types.Action) error) {
 		sm.logger.Warn("Compensation action failed, will retry",
 			"action", action.Kind,
 			"hostname", action.Hostname,
+			"error_class", errorClass,
 			"retry_count", rec.RetryCount,
 			"next_retry_at", rec.NextRetryAt,
 			"error", err)

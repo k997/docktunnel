@@ -239,6 +239,23 @@ func TestPersistenceDefaults(t *testing.T) {
 	assert.True(t, validateOnLoad, "default validateOnLoad should be true")
 }
 
+func TestCompensationQueueCapDefaults(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.GetCompensationQueueCap(); got != 1000 {
+		t.Errorf("expected default queue cap 1000, got %d", got)
+	}
+
+	cfg.Compensation.MaxQueueSize = 5000
+	if got := cfg.GetCompensationQueueCap(); got != 5000 {
+		t.Errorf("expected overridden queue cap 5000, got %d", got)
+	}
+
+	cfg.Compensation.MaxQueueSize = -1
+	if got := cfg.GetCompensationQueueCap(); got != 1000 {
+		t.Errorf("expected negative queue cap to fall back to 1000, got %d", got)
+	}
+}
+
 func TestSanitizeForLog(t *testing.T) {
 	cfg := &Config{
 		Log: struct {

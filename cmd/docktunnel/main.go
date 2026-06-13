@@ -95,6 +95,7 @@ func main() {
 	// Configure compensation queue parameters
 	initialDelay, maxDelay, maxRetries, pollInterval := cfg.GetCompensationConfig()
 	controller.SetCompensationConfig(initialDelay, maxDelay, maxRetries, pollInterval)
+	controller.SetCompensationQueueCap(cfg.GetCompensationQueueCap())
 
 	// Configure persistence settings
 	backupCount, validateOnLoad := cfg.GetPersistenceConfig()

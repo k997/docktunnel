@@ -76,6 +76,7 @@ type Config struct {
 		MaxDelay     time.Duration `mapstructure:"maxDelay"`
 		MaxRetries   int           `mapstructure:"maxRetries"`
 		PollInterval time.Duration `mapstructure:"pollInterval"`
+		MaxQueueSize int           `mapstructure:"maxQueueSize"`
 	} `mapstructure:"compensation"`
 	Persistence struct {
 		BackupCount    int  `mapstructure:"backupCount"`
@@ -134,6 +135,14 @@ func (c *Config) GetCompensationConfig() (initialDelay, maxDelay time.Duration, 
 		pollInterval = 30 * time.Second
 	}
 	return
+}
+
+// GetCompensationQueueCap returns the maximum compensation queue size with default applied.
+func (c *Config) GetCompensationQueueCap() int {
+	if c.Compensation.MaxQueueSize <= 0 {
+		return 1000
+	}
+	return c.Compensation.MaxQueueSize
 }
 
 // GetPersistenceConfig returns persistence configuration with defaults applied.
@@ -251,6 +260,7 @@ func New() (*Config, error) {
 	v.SetDefault("compensation.maxDelay", 30*time.Minute)
 	v.SetDefault("compensation.maxRetries", 10)
 	v.SetDefault("compensation.pollInterval", 30*time.Second)
+	v.SetDefault("compensation.maxQueueSize", 1000)
 	// Persistence defaults
 	v.SetDefault("persistence.backupCount", 3)
 	v.SetDefault("persistence.validateOnLoad", true)
@@ -356,6 +366,7 @@ func (c *Config) SanitizeForLog() map[string]any {
 			"maxDelay":     c.Compensation.MaxDelay,
 			"maxRetries":   c.Compensation.MaxRetries,
 			"pollInterval": c.Compensation.PollInterval,
+			"maxQueueSize": c.Compensation.MaxQueueSize,
 		},
 		"persistence": map[string]any{
 			"backupCount":    c.Persistence.BackupCount,

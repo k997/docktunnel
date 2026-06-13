@@ -277,3 +277,75 @@ func TestLoadFromSnapshot_MigratesV2ToV3(t *testing.T) {
 		t.Error("pendingActions should be initialized, not nil")
 	}
 }
+
+func TestEnqueueAction_RespectsQueueCap(t *testing.T) {
+	sm := NewManager(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	sm.SetCompensationQueueCap(2)
+
+	// First two should succeed
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "a.example.com"},
+		&types.RetryableError{Err: errors.New("503")})
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "b.example.com"},
+		&types.RetryableError{Err: errors.New("503")})
+
+	if got := len(sm.GetAllPendingActions()); got != 2 {
+		t.Fatalf("expected 2 pending actions, got %d", got)
+	}
+
+	// Third should be rejected (queue full)
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "c.example.com"},
+		&types.RetryableError{Err: errors.New("503")})
+
+	if got := len(sm.GetAllPendingActions()); got != 2 {
+		t.Fatalf("expected queue to remain at 2 after cap rejection, got %d", got)
+	}
+
+	for _, rec := range sm.GetAllPendingActions() {
+		if rec.Action.Hostname == "c.example.com" {
+			t.Error("rejected action should not be present in queue")
+		}
+	}
+}
+
+func TestEnqueueAction_GeneratesUniqueIDs(t *testing.T) {
+	sm := NewManager(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+
+	// Enqueue 100 rapid actions with identical container/service fields.
+	// Time-based IDs would risk collision; crypto/rand IDs must not.
+	for range 100 {
+		sm.EnqueueAction(types.Action{
+			Kind:        types.ActionDeleteRoute,
+			ContainerID: "c1",
+			ServiceName: "web",
+			Hostname:    "app.example.com",
+		}, &types.RetryableError{Err: errors.New("503")})
+	}
+
+	records := sm.GetAllPendingActions()
+	if len(records) != 100 {
+		t.Fatalf("expected 100 unique records, got %d", len(records))
+	}
+
+	seen := make(map[string]struct{}, len(records))
+	for _, rec := range records {
+		if _, dup := seen[rec.ID]; dup {
+			t.Errorf("duplicate ID generated: %s", rec.ID)
+		}
+		seen[rec.ID] = struct{}{}
+	}
+}
+
+func TestClassifyError(t *testing.T) {
+	if got := classifyError(nil); got != "" {
+		t.Errorf("expected empty string for nil error, got %q", got)
+	}
+	if got := classifyError(&types.PermanentError{Err: errors.New("403")}); got != "permanent" {
+		t.Errorf("expected permanent, got %q", got)
+	}
+	if got := classifyError(&types.RetryableError{Err: errors.New("503")}); got != "retryable" {
+		t.Errorf("expected retryable, got %q", got)
+	}
+	if got := classifyError(errors.New("unknown")); got != "unknown" {
+		t.Errorf("expected unknown, got %q", got)
+	}
+}
