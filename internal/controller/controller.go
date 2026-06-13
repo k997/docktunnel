@@ -400,7 +400,41 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 	c.updateContainerHealth(event.ContainerID, false)
 	c.mu.Unlock()
 
+	if err := c.syncToCloudflare(ctx); err != nil {
+		// Sync failed — enqueue actions for retry
+		for _, action := range allActions {
+			if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
+				c.stateManager.EnqueueAction(action, err)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+// ExecuteAction executes a single action (e.g., delete route and sync).
+// Used by the compensation queue to retry failed actions.
+func (c *Controller) ExecuteAction(ctx context.Context, action types.Action) error {
+	if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
+		c.mu.Lock()
+		delete(c.ingressRules, action.Hostname)
+		c.mu.Unlock()
+	}
 	return c.syncToCloudflare(ctx)
+}
+
+// RunCompensationLoop starts the compensation queue background loop.
+// Blocks until ctx is cancelled.
+func (c *Controller) RunCompensationLoop(ctx context.Context) {
+	executor := func(action types.Action) error {
+		return c.ExecuteAction(ctx, action)
+	}
+	c.stateManager.RunCompensation(ctx, executor)
+}
+
+// SetCompensationConfig configures the compensation queue parameters.
+func (c *Controller) SetCompensationConfig(initialDelay, maxDelay time.Duration, maxRetries int, pollInterval time.Duration) {
+	c.stateManager.SetCompensationConfig(initialDelay, maxDelay, maxRetries, pollInterval)
 }
 
 // Sync 同步Docker容器状态到Cloudflare Tunnel配置
