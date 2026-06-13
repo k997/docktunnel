@@ -181,7 +181,8 @@ func (c *Controller) isDocktunnelEnabled(event events.Event) bool {
 }
 
 // registerContainerRules parses labels, validates, and registers ingress rules for a container.
-func (c *Controller) registerContainerRules(ctx context.Context, event events.Event) ([]string, error) {
+// Returns a map of serviceName → hostname for per-service state management.
+func (c *Controller) registerContainerRules(ctx context.Context, event events.Event) (map[string]string, error) {
 	parsedRules, err := label.Parse(event.ContainerInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse container labels for container %s: %w", event.ContainerID, err)
@@ -194,23 +195,26 @@ func (c *Controller) registerContainerRules(ctx context.Context, event events.Ev
 	}
 	c.mu.RUnlock()
 
-	hostnames := make([]string, 0)
-	for _, rule := range parsedRules {
+	serviceHostnames := make(map[string]string)
+	for serviceName, rule := range parsedRules {
 		if rule.Hostname.Value != "" {
-			hostnames = append(hostnames, rule.Hostname.Value)
+			c.mu.Lock()
+			c.ingressRules[rule.Hostname.Value] = *rule
+			c.mu.Unlock()
+			serviceHostnames[serviceName] = rule.Hostname.Value
 		}
 	}
 
-	c.mu.Lock()
-	for _, rule := range parsedRules {
-		if rule.Hostname.Value != "" {
-			c.ingressRules[rule.Hostname.Value] = *rule
-		}
+	// Update containerRules for aggregate lookup
+	hostnames := make([]string, 0, len(serviceHostnames))
+	for _, h := range serviceHostnames {
+		hostnames = append(hostnames, h)
 	}
+	c.mu.Lock()
 	c.containerRules[event.ContainerID] = hostnames
 	c.mu.Unlock()
 
-	return hostnames, nil
+	return serviceHostnames, nil
 }
 
 // handleContainerStart 处理容器启动事件
@@ -221,8 +225,8 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	}
 	slog.Info("Handling container start event", "containerID", event.ContainerID)
 
-	// Restore from Retaining/PendingDelete via state machine
-	c.stateManager.Transition(event.ContainerID, types.EventContainerStarted, nil)
+	// Restore any retaining/pending entries for this container's services
+	c.stateManager.RestoreActiveTunnel(event.ContainerID)
 
 	// 检查容器是否处于抖动状态
 	if c.isFlapping(event.ContainerID) {
@@ -230,26 +234,28 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 		return nil
 	}
 
-	hostnames, err := c.registerContainerRules(ctx, event)
+	serviceHostnames, err := c.registerContainerRules(ctx, event)
 	if err != nil {
 		slog.Error("Failed to register container rules", "error", err, "containerID", event.ContainerID)
 		return err
 	}
 
-	// Persist retention policy in state manager for idempotent stop behavior
-	policy := c.getContainerRetentionPolicy(event)
+	// Create one TunnelEntry per service with per-service retention policy
+	labels := event.ContainerInfo.Config.Labels
 	now := time.Now()
-	tunnelEntry := &types.TunnelEntry{
-		ContainerID:     event.ContainerID,
-		RetentionPolicy: policy,
-		Status:          types.StatusActive,
-		CreatedAt:       now,
-		LastSyncAt:      now,
+	for serviceName, hostname := range serviceHostnames {
+		policy := c.getServiceRetentionPolicy(labels, serviceName)
+		tunnelEntry := &types.TunnelEntry{
+			ContainerID:     event.ContainerID,
+			ServiceName:     serviceName,
+			RetentionPolicy: policy,
+			Status:          types.StatusActive,
+			CreatedAt:       now,
+			LastSyncAt:      now,
+			Config:          types.TunnelConfiguration{Hostname: hostname},
+		}
+		c.stateManager.AddActiveTunnel(tunnelEntry)
 	}
-	if len(hostnames) > 0 {
-		tunnelEntry.Config.Hostname = hostnames[0]
-	}
-	c.stateManager.AddActiveTunnel(tunnelEntry)
 
 	c.mu.Lock()
 	c.updateContainerHealth(event.ContainerID, true)
@@ -258,39 +264,25 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 	return c.syncToCloudflare(ctx)
 }
 
-// getContainerRetentionPolicy parses the retention policy from container labels
-// Defaults to Immediate deletion if not specified
-func (c *Controller) getContainerRetentionPolicy(event events.Event) types.RetentionPolicy {
-	labels := event.ContainerInfo.Config.Labels
-
-	// Check for retention label
-	retentionLabel, exists := labels["docktunnel.retention"]
-	if !exists {
-		// Try per-service retention labels (use first service)
-		for key, value := range labels {
-			if strings.HasPrefix(key, "docktunnel.") && strings.HasSuffix(key, ".retention") {
-				retentionLabel = value
-				exists = true
-				break
-			}
+// getServiceRetentionPolicy parses the retention policy for a specific service.
+// Priority: docktunnel.<service>.retention > docktunnel.retention > Immediate.
+func (c *Controller) getServiceRetentionPolicy(labels map[string]string, serviceName string) types.RetentionPolicy {
+	// Check per-service retention: docktunnel.<serviceName>.retention
+	if v, ok := labels["docktunnel."+serviceName+".retention"]; ok {
+		if policy, err := label.ParseRetentionPolicy(v); err == nil {
+			return policy
 		}
 	}
 
-	if !exists {
-		// Default to immediate deletion
-		return types.RetentionPolicy{Type: types.Immediate}
+	// Check global retention: docktunnel.retention
+	if v, ok := labels["docktunnel.retention"]; ok {
+		if policy, err := label.ParseRetentionPolicy(v); err == nil {
+			return policy
+		}
 	}
 
-	policy, err := label.ParseRetentionPolicy(retentionLabel)
-	if err != nil {
-		slog.Warn("Invalid retention policy, defaulting to immediate",
-			"containerID", event.ContainerID,
-			"retention", retentionLabel,
-			"error", err)
-		return types.RetentionPolicy{Type: types.Immediate}
-	}
-
-	return policy
+	// Default: Immediate
+	return types.RetentionPolicy{Type: types.Immediate}
 }
 
 // SetStatePath sets the path for state persistence
@@ -335,47 +327,72 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 		return nil
 	}
 
-	// Get retention policy: prefer stateManager, fallback to labels, then Immediate
-	var policy types.RetentionPolicy
-	if activeEntry, exists := c.stateManager.GetActiveTunnel(event.ContainerID); exists {
-		policy = activeEntry.RetentionPolicy
-	} else if event.ContainerInfo != nil && event.ContainerInfo.Config != nil && event.ContainerInfo.Config.Labels != nil {
-		policy = c.getContainerRetentionPolicy(event)
-		// Ensure active entry exists for Transition (fallback path)
-		now := time.Now()
-		c.mu.RLock()
-		hostnames := c.containerRules[event.ContainerID]
-		c.mu.RUnlock()
-		entry := &types.TunnelEntry{
-			ContainerID:     event.ContainerID,
-			RetentionPolicy: policy,
-			Status:          types.StatusActive,
-			CreatedAt:       now,
-			LastSyncAt:      now,
+	// Get all active entries for this container
+	entries := c.stateManager.GetActiveTunnelsByContainer(event.ContainerID)
+
+	// Fallback: if no active entries (state lost), create per-service entries from containerRules
+	if len(entries) == 0 {
+		if event.ContainerInfo != nil && event.ContainerInfo.Config != nil && event.ContainerInfo.Config.Labels != nil {
+			labels := event.ContainerInfo.Config.Labels
+			parsedRules, err := label.Parse(event.ContainerInfo)
+			if err == nil {
+				now := time.Now()
+				for serviceName := range parsedRules {
+					policy := c.getServiceRetentionPolicy(labels, serviceName)
+					c.stateManager.AddActiveTunnel(&types.TunnelEntry{
+						ContainerID:     event.ContainerID,
+						ServiceName:     serviceName,
+						RetentionPolicy: policy,
+						Status:          types.StatusActive,
+						CreatedAt:       now,
+						LastSyncAt:      now,
+					})
+				}
+				entries = c.stateManager.GetActiveTunnelsByContainer(event.ContainerID)
+			}
 		}
-		if len(hostnames) > 0 {
-			entry.Config.Hostname = hostnames[0]
+		if len(entries) == 0 {
+			// Last resort: no info, use Immediate for all hostnames
+			c.mu.RLock()
+			hostnames := c.containerRules[event.ContainerID]
+			c.mu.RUnlock()
+			now := time.Now()
+			for i, hostname := range hostnames {
+				c.stateManager.AddActiveTunnel(&types.TunnelEntry{
+					ContainerID:     event.ContainerID,
+					ServiceName:     fmt.Sprintf("svc%d", i),
+					RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+					Status:          types.StatusActive,
+					CreatedAt:       now,
+					LastSyncAt:      now,
+					Config:          types.TunnelConfiguration{Hostname: hostname},
+				})
+			}
+			entries = c.stateManager.GetActiveTunnelsByContainer(event.ContainerID)
 		}
-		c.stateManager.AddActiveTunnel(entry)
-	} else {
-		policy = types.RetentionPolicy{Type: types.Immediate}
 	}
 
-	slog.Info("Container retention policy",
-		"containerID", event.ContainerID,
-		"policyType", policy.Type,
-		"duration", policy.Duration)
-
-	// Transition state machine
-	actions, err := c.stateManager.Transition(event.ContainerID, types.EventContainerStopped, &policy)
-	if err != nil {
-		return fmt.Errorf("state transition failed: %w", err)
+	// Transition each service independently
+	var allActions []types.Action
+	for _, entry := range entries {
+		actions, err := c.stateManager.Transition(
+			event.ContainerID, entry.ServiceName,
+			types.EventContainerStopped, &entry.RetentionPolicy,
+		)
+		if err != nil {
+			slog.Error("State transition failed",
+				"container_id", event.ContainerID,
+				"service_name", entry.ServiceName,
+				"error", err)
+			continue
+		}
+		allActions = append(allActions, actions...)
 	}
 
 	// Execute actions: clear containerRules, handle ingress based on actions
 	c.mu.Lock()
 	delete(c.containerRules, event.ContainerID)
-	for _, action := range actions {
+	for _, action := range allActions {
 		if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
 			delete(c.ingressRules, action.Hostname)
 		}
@@ -460,6 +477,25 @@ func (c *Controller) Sync(ctx context.Context) error {
 				continue
 			}
 			allParsedRules[serviceName] = rule
+
+			// Populate per-service state entries if not already present
+			if _, exists := c.stateManager.GetActiveTunnel(event.ContainerID, serviceName); !exists {
+				labels := event.ContainerInfo.Config.Labels
+				policy := c.getServiceRetentionPolicy(labels, serviceName)
+				hostname := ""
+				if rule.Hostname.Value != "" {
+					hostname = rule.Hostname.Value
+				}
+				c.stateManager.AddActiveTunnel(&types.TunnelEntry{
+					ContainerID:     event.ContainerID,
+					ServiceName:     serviceName,
+					RetentionPolicy: policy,
+					Status:          types.StatusActive,
+					CreatedAt:       time.Now(),
+					LastSyncAt:      time.Now(),
+					Config:          types.TunnelConfiguration{Hostname: hostname},
+				})
+			}
 		}
 
 		hostnames := make([]string, 0, len(parsedRules))

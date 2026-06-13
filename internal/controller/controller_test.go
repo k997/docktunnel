@@ -329,7 +329,7 @@ func TestStartupReconciliation(t *testing.T) {
 	}
 
 	// Verify it's now in active tunnels
-	restoredEntry, exists := controller.stateManager.GetActiveTunnel(containerID)
+	restoredEntry, exists := controller.stateManager.GetActiveTunnel(containerID, "web")
 	if !exists {
 		t.Fatal("Container should be in active tunnels after restoration")
 	}
@@ -566,7 +566,7 @@ func TestRetentionPolicyPersistedOnStart(t *testing.T) {
 		t.Fatalf("start dispatch failed: %v", err)
 	}
 
-	entry, exists := ctrl.stateManager.GetActiveTunnel("retain-container")
+	entry, exists := ctrl.stateManager.GetActiveTunnel("retain-container", "web")
 	if !exists {
 		t.Fatal("expected active tunnel entry after start with retention label")
 	}
@@ -844,7 +844,7 @@ func TestStart_RestoresFromRetainingViaTransition(t *testing.T) {
 	}
 
 	// Should be in active tunnels now
-	entry, exists := ctrl.stateManager.GetActiveTunnel("c1")
+	entry, exists := ctrl.stateManager.GetActiveTunnel("c1", "web")
 	if !exists {
 		t.Fatal("expected entry in active tunnels after restart")
 	}
