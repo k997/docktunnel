@@ -581,7 +581,15 @@ func (c *Controller) Sync(ctx context.Context) error {
 	c.mu.Unlock()
 
 	// 同步到Cloudflare
-	return c.syncToCloudflare(ctx)
+	if err := c.syncToCloudflare(ctx); err != nil {
+		return err
+	}
+
+	// Refresh the actual-state cache for /debug/state (Phase 6).
+	// Non-fatal: a failure here just means diagnostics show stale data.
+	c.refreshActualState(ctx)
+
+	return nil
 }
 
 // syncToCloudflare 将当前规则同步到Cloudflare
@@ -1011,7 +1019,13 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	c.containerRules = desiredContainerRules
 	c.mu.Unlock()
 
-	return c.syncToCloudflare(ctx)
+	if err := c.syncToCloudflare(ctx); err != nil {
+		return err
+	}
+
+	c.refreshActualState(ctx)
+
+	return nil
 }
 
 // ReconcileEnabled returns whether periodic reconciliation is enabled.
@@ -1048,6 +1062,30 @@ func (c *Controller) GetDebugState() diagnostics.DebugStateResponse {
 		Source:       source,
 		Diff:         diagnostics.ComputeDiff(desired, actual),
 	}
+}
+
+// refreshActualState fetches the live tunnel config from Cloudflare and
+// caches it for /debug/state. Safe to call from Sync/Reconcile.
+func (c *Controller) refreshActualState(ctx context.Context) {
+	ingress, err := c.cloudflareManager.GetConfiguration(ctx)
+	if err != nil {
+		slog.Warn("Failed to fetch live tunnel config for diagnostics",
+			"error", err)
+		return
+	}
+
+	views := make([]diagnostics.RuleView, 0, len(ingress))
+	for _, rule := range ingress {
+		if rule.Hostname == "" {
+			continue // skip catch-all rules like http_status:404
+		}
+		views = append(views, diagnostics.RuleView{
+			Hostname: rule.Hostname,
+			Service:  rule.Service,
+			Path:     rule.Path,
+		})
+	}
+	c.setLastKnownActualRules(views)
 }
 
 // setLastKnownActualRules replaces the cached actual-state snapshot.
