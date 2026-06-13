@@ -366,3 +366,82 @@ func TestSetValidateOnLoad(t *testing.T) {
 	sm.SetValidateOnLoad(false)
 	assert.False(t, sm.ValidateOnLoad())
 }
+
+func TestValidateSnapshot_Valid(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: now,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"abc123:web": {
+				ContainerID: "abc123",
+				ServiceName: "web",
+				Status:      types.StatusActive,
+				Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+			},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{
+			"def456:api": {
+				ContainerID: "def456",
+				ServiceName: "api",
+				Status:      types.StatusPendingDelete,
+				Config:      types.TunnelConfiguration{Hostname: "api.example.com"},
+			},
+		},
+		PendingActions: map[string]*types.CompensationRecord{
+			"rec1": {ID: "rec1", CreatedAt: now, Action: types.Action{Kind: types.ActionDeleteRoute}},
+		},
+	}
+	err := validateSnapshot(snapshot)
+	assert.NoError(t, err)
+}
+
+func TestValidateSnapshot_ZeroTimestamp(t *testing.T) {
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Time{},
+	}
+	err := validateSnapshot(snapshot)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "timestamp")
+}
+
+func TestValidateSnapshot_FutureTimestamp(t *testing.T) {
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Now().UTC().Add(10 * time.Minute),
+	}
+	err := validateSnapshot(snapshot)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "future")
+}
+
+func TestValidateSnapshot_KeyMismatch(t *testing.T) {
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Now().UTC(),
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"wrong-key": {
+				ContainerID: "abc123",
+				ServiceName: "web",
+				Status:      types.StatusActive,
+			},
+		},
+	}
+	err := validateSnapshot(snapshot)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "key mismatch")
+}
+
+func TestValidateSnapshot_InvalidCompensationRecord(t *testing.T) {
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Now().UTC(),
+		PendingActions: map[string]*types.CompensationRecord{
+			"rec1": {ID: "", CreatedAt: time.Time{}},
+		},
+	}
+	err := validateSnapshot(snapshot)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "compensation record")
+}

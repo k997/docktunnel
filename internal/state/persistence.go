@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"docktunnel/pkg/types"
@@ -259,4 +260,48 @@ func RegisterGobTypes() {
 	gob.Register(types.Action{})
 	gob.Register(types.CompensationRecord{})
 	gob.Register(map[string]*types.CompensationRecord{})
+}
+
+// validateSnapshot checks a loaded snapshot for data integrity issues.
+// Returns a multi-error describing all problems found, or nil if valid.
+func validateSnapshot(snapshot *types.StateSnapshot) error {
+	var errs []string
+
+	// 1. Timestamp check
+	if snapshot.Timestamp.IsZero() {
+		errs = append(errs, "timestamp is zero")
+	} else if snapshot.Timestamp.After(time.Now().UTC().Add(5*time.Minute)) {
+		errs = append(errs, fmt.Sprintf("timestamp is in the future: %v", snapshot.Timestamp))
+	}
+
+	// 2. Key consistency — ActiveTunnels
+	for key, entry := range snapshot.ActiveTunnels {
+		expected := entry.ContainerID + ":" + entry.ServiceName
+		if key != expected {
+			errs = append(errs, fmt.Sprintf("activeTunnels key mismatch: key=%q expected=%q", key, expected))
+		}
+	}
+
+	// 2. Key consistency — PendingDeletions
+	for key, entry := range snapshot.PendingDeletions {
+		expected := entry.ContainerID + ":" + entry.ServiceName
+		if key != expected {
+			errs = append(errs, fmt.Sprintf("pendingDeletions key mismatch: key=%q expected=%q", key, expected))
+		}
+	}
+
+	// 3. Compensation records
+	for mapKey, rec := range snapshot.PendingActions {
+		if rec.ID == "" {
+			errs = append(errs, fmt.Sprintf("compensation record %q has empty ID", mapKey))
+		}
+		if rec.CreatedAt.IsZero() {
+			errs = append(errs, fmt.Sprintf("compensation record %q has zero CreatedAt", mapKey))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("snapshot validation failed: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
