@@ -573,3 +573,58 @@ func TestRotateBackups_DisabledWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, matches, 0, "no backups when backupCount=0")
 }
+
+func TestLoad_FallsBackToBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+
+	// Save — creates the state file and a backup (since no prior file exists, first save has no backup)
+	require.NoError(t, sm.Save(statePath))
+
+	// Save again to create a backup (the first file gets rotated)
+	require.NoError(t, sm.Save(statePath))
+
+	// Verify backup exists
+	matches, err := filepath.Glob(statePath + ".bak.*")
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "should have at least one backup")
+
+	// Corrupt the primary state file
+	require.NoError(t, os.WriteFile(statePath, []byte{0x00, 0x01, 0x02}, 0644))
+
+	// Load should fall back to the backup
+	sm2 := NewManager(slog.Default())
+	err = sm2.Load(statePath)
+	assert.NoError(t, err, "should load from backup when primary is corrupt")
+
+	loaded, ok := sm2.GetActiveTunnel("abc", "web")
+	assert.True(t, ok, "entry should be restored from backup")
+	assert.Equal(t, "web.example.com", loaded.Config.Hostname)
+}
+
+func TestLoad_AllBackupsCorrupt_DegradesToEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Create a corrupted primary file
+	require.NoError(t, os.WriteFile(statePath, []byte{0x00, 0x01, 0x02}, 0644))
+
+	// Create a corrupted backup file
+	require.NoError(t, os.WriteFile(statePath+".bak.20260613-120000", []byte{0xFF, 0xFE}, 0644))
+
+	sm := NewManager(slog.Default())
+	err := sm.Load(statePath)
+	assert.NoError(t, err, "should degrade to empty state without error")
+
+	stats := sm.GetStats()
+	assert.Equal(t, 0, stats["active_tunnels"], "should start with empty state")
+}

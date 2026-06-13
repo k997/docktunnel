@@ -87,7 +87,7 @@ func (sm *Manager) Save(statePath string) error {
 }
 
 // Load loads a persisted state snapshot from disk (T071)
-// Tries gob encoding first, falls back to JSON, handles corruption (T075)
+// Tries gob encoding first, falls back to backups, then JSON, handles corruption (T075)
 func (sm *Manager) Load(statePath string) error {
 	if statePath == "" {
 		statePath = StateFileDefault
@@ -96,9 +96,15 @@ func (sm *Manager) Load(statePath string) error {
 	// Try gob format first
 	if _, err := os.Stat(statePath); err == nil {
 		if err := sm.loadGob(statePath); err != nil {
-			slog.Warn("Failed to load gob state file, trying JSON fallback",
+			slog.Warn("Failed to load gob state file",
 				"path", statePath,
 				"error", err)
+
+			// Try backup files (newest first)
+			if loadedPath := sm.tryLoadBackups(statePath); loadedPath != "" {
+				return nil
+			}
+
 			// Try JSON fallback
 			jsonPath := statePath + ".json"
 			if _, err := os.Stat(jsonPath); err == nil {
@@ -107,7 +113,6 @@ func (sm *Manager) Load(statePath string) error {
 						"gob_path", statePath,
 						"json_path", jsonPath,
 						"error", err)
-					// Return nil to allow startup to continue (T075)
 					slog.Info("Continuing with empty state due to load failures")
 					return nil
 				}
@@ -121,6 +126,35 @@ func (sm *Manager) Load(statePath string) error {
 
 	slog.Info("No existing state file found, starting with empty state", "path", statePath)
 	return nil
+}
+
+// tryLoadBackups attempts to load state from backup files, newest first.
+// Returns the path of the successfully loaded backup, or empty string if all fail.
+func (sm *Manager) tryLoadBackups(statePath string) string {
+	pattern := statePath + ".bak.*"
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+
+	// Sort newest first
+	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+
+	for _, backupPath := range matches {
+		slog.Info("Trying backup state file", "path", backupPath)
+		if err := sm.loadGob(backupPath); err != nil {
+			slog.Warn("Backup file also failed to load",
+				"path", backupPath,
+				"error", err)
+			continue
+		}
+		slog.Info("Successfully loaded state from backup",
+			"path", backupPath)
+		return backupPath
+	}
+
+	slog.Warn("All backup files failed to load", "tried", len(matches))
+	return ""
 }
 
 // loadGob loads state from gob-encoded file
