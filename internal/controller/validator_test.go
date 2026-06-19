@@ -59,6 +59,47 @@ func TestHostnameUniquenessValidator(t *testing.T) {
 	}
 }
 
+// TestHostnameUniquenessValidator_CaseInsensitive verifies that case
+// variants of the same DNS hostname are still treated as a collision.
+// DNS is case-insensitive: App.example.com and app.example.com resolve to
+// the same record, so both must not pass validation.
+func TestHostnameUniquenessValidator_CaseInsensitive(t *testing.T) {
+	validator := &HostnameUniquenessValidator{}
+
+	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"service1": {
+			Hostname: cloudflare.F("App.Example.COM"),
+			Service:  cloudflare.F("http://localhost:8080"),
+		},
+		"service2": {
+			Hostname: cloudflare.F("app.example.com"), // case variant
+			Service:  cloudflare.F("http://localhost:8081"),
+		},
+	}
+
+	err := validator.Validate(rules, nil)
+	if err == nil {
+		t.Error("Expected error for case-variant duplicate hostname, got none")
+	}
+
+	// Also verify against existing rules map.
+	existing := map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"app.example.com": {
+			Hostname: cloudflare.F("app.example.com"),
+			Service:  cloudflare.F("http://localhost:9000"),
+		},
+	}
+	newRules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"service2": {
+			Hostname: cloudflare.F("APP.EXAMPLE.COM"),
+			Service:  cloudflare.F("http://localhost:9001"),
+		},
+	}
+	if err := validator.Validate(newRules, existing); err == nil {
+		t.Error("Expected error for case-variant collision with existing rules, got none")
+	}
+}
+
 func TestServiceNameUniquenessValidator(t *testing.T) {
 	validator := &ServiceNameUniquenessValidator{}
 

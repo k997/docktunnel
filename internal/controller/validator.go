@@ -19,22 +19,26 @@ type RuleValidator interface {
 type HostnameUniquenessValidator struct{}
 
 func (v *HostnameUniquenessValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, existingRules map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
-	hostnameMap := make(map[string]string) // hostname -> service name
+	// DNS is case-insensitive: App.example.com and app.example.com resolve
+	// to the same record. Lowercase before keying so case variants can't
+	// both pass validation and then collide at the Cloudflare API.
+	hostnameMap := make(map[string]string) // lowercased hostname -> service name
 
 	// 从现有规则中填充主机名
 	if existingRules != nil {
 		for hostname := range existingRules {
-			hostnameMap[hostname] = "an existing service"
+			hostnameMap[strings.ToLower(hostname)] = "an existing service"
 		}
 	}
 
 	// 检查新规则中的主机名
 	for serviceName, rule := range rules {
-		if existingService, exists := hostnameMap[rule.Hostname.Value]; exists {
+		key := strings.ToLower(rule.Hostname.Value)
+		if existingService, exists := hostnameMap[key]; exists {
 			return fmt.Errorf("duplicate hostname %s found. It is already used by %s, and new service %s also tries to use it", rule.Hostname.Value, existingService, serviceName)
 		}
 
-		hostnameMap[rule.Hostname.Value] = serviceName
+		hostnameMap[key] = serviceName
 	}
 	return nil
 }

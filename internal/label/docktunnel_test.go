@@ -163,3 +163,42 @@ func TestSanitizeLabelValue(t *testing.T) {
 		})
 	}
 }
+
+// TestSetServiceConfigField_UnknownOriginRequestKey verifies that unknown
+// originRequest.* subkeys do not panic or get silently swallowed into a
+// real field. We can't easily capture slog output, but we can assert the
+// decoder simply doesn't populate anything.
+func TestSetServiceConfigField_UnknownOriginRequestKey(t *testing.T) {
+	sc := &ServiceConfig{}
+	// Walk a few attributes that look plausible but are not in our schema.
+	for _, attr := range []string{
+		"originRequest.fallbackDelay",
+		"originRequest.bogusField",
+		"originRequest.access.tls.auth",
+	} {
+		setServiceConfigField(sc, attr, "some-value")
+	}
+
+	// None of these should have populated any known field on ServiceConfig.
+	if sc.ConnectTimeout != "" || sc.NoTLSVerify != "" || sc.AccessRequired != "" {
+		t.Errorf("unknown originRequest.* keys should not populate any field, got %+v", sc)
+	}
+}
+
+// TestDecodeDockTunnel_OriginRequestSubkeyIsolated ensures a recognized
+// originRequest key still works alongside unknown ones (decoder is
+// per-attribute, not all-or-nothing).
+func TestDecodeDockTunnel_OriginRequestSubkeyIsolated(t *testing.T) {
+	labels := map[string]string{
+		"docktunnel.enable":                           "true",
+		"docktunnel.web.hostname":                     "example.com",
+		"docktunnel.web.originRequest.connectTimeout": "30s",
+		"docktunnel.web.originRequest.fallbackDelay":  "300ms",
+	}
+
+	services := decodeDockTunnel(labels)
+	web := services["web"]
+	if web.ConnectTimeout != "30s" {
+		t.Errorf("recognized key should still populate: got connectTimeout=%q", web.ConnectTimeout)
+	}
+}

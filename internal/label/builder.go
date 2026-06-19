@@ -2,6 +2,7 @@ package label
 
 import (
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,8 +32,17 @@ func GetContainerIP(containerInfo *container.InspectResponse) string {
 		return network.IPAddress
 	}
 
-	for _, network := range containerInfo.NetworkSettings.Networks {
-		if network.IPAddress != "" {
+	// Iterate networks in deterministic (sorted) name order so a container
+	// attached to multiple non-bridge networks always picks the same IP.
+	// Map iteration order is random in Go — without sorting, the same labels
+	// could resolve to different IPs on different runs.
+	names := make([]string, 0, len(containerInfo.NetworkSettings.Networks))
+	for name := range containerInfo.NetworkSettings.Networks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if network := containerInfo.NetworkSettings.Networks[name]; network.IPAddress != "" {
 			return network.IPAddress
 		}
 	}
@@ -90,51 +100,70 @@ func convertOriginRequest(sc *ServiceConfig) *OriginRequestSpec {
 		if d, err := time.ParseDuration(v); err == nil {
 			spec.ConnectTimeout = &d
 			hasAny = true
+		} else {
+			slog.Warn("Ignoring originRequest.connectTimeout: invalid duration",
+				"value", v, "error", err)
 		}
 	}
 	if v := sc.TLSTimeout; v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			spec.TLSTimeout = &d
 			hasAny = true
+		} else {
+			slog.Warn("Ignoring originRequest.tlsTimeout: invalid duration",
+				"value", v, "error", err)
 		}
 	}
 	if v := sc.TCPKeepAlive; v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			spec.TCPKeepAlive = &d
 			hasAny = true
+		} else {
+			slog.Warn("Ignoring originRequest.tcpKeepAlive: invalid duration",
+				"value", v, "error", err)
 		}
 	}
 	if v := sc.KeepAliveTimeout; v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			spec.KeepAliveTimeout = &d
 			hasAny = true
+		} else {
+			slog.Warn("Ignoring originRequest.keepAliveTimeout: invalid duration",
+				"value", v, "error", err)
 		}
 	}
 	if v := sc.KeepAliveConnections; v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			spec.KeepAliveConnections = &n
 			hasAny = true
+		} else {
+			slog.Warn("Ignoring originRequest.keepAliveConnections: invalid integer",
+				"value", v, "error", err)
 		}
 	}
 	if v := sc.NoHappyEyeballs; v != "" {
-		b := v == "true"
-		spec.NoHappyEyeballs = &b
-		hasAny = true
+		if b, err := parseBoolLabel("originRequest.noHappyEyeballs", v); err == nil {
+			spec.NoHappyEyeballs = &b
+			hasAny = true
+		}
 	}
 	if v := sc.NoTLSVerify; v != "" {
-		b := v == "true"
-		spec.NoTLSVerify = &b
-		hasAny = true
+		if b, err := parseBoolLabel("originRequest.noTLSVerify", v); err == nil {
+			spec.NoTLSVerify = &b
+			hasAny = true
+		}
 	}
 	if v := sc.HTTP2Origin; v != "" {
-		b := v == "true"
-		spec.HTTP2Origin = &b
-		hasAny = true
+		if b, err := parseBoolLabel("originRequest.http2Origin", v); err == nil {
+			spec.HTTP2Origin = &b
+			hasAny = true
+		}
 	}
 	if v := sc.DisableChunkedEncoding; v != "" {
-		b := v == "true"
-		spec.DisableChunkedEncoding = &b
-		hasAny = true
+		if b, err := parseBoolLabel("originRequest.disableChunkedEncoding", v); err == nil {
+			spec.DisableChunkedEncoding = &b
+			hasAny = true
+		}
 	}
 	if v := sc.HTTPHostHeader; v != "" {
 		spec.HTTPHostHeader = v
@@ -160,18 +189,27 @@ func convertOriginRequest(sc *ServiceConfig) *OriginRequestSpec {
 		if n, err := strconv.Atoi(v); err == nil {
 			spec.ProxyPort = &n
 			hasAny = true
+		} else {
+			slog.Warn("Ignoring originRequest.proxyPort: invalid integer",
+				"value", v, "error", err)
 		}
 	}
 	if v := sc.MatchSNItoHost; v != "" {
-		b := v == "true"
-		spec.MatchSNItoHost = &b
-		hasAny = true
+		if b, err := parseBoolLabel("originRequest.matchSNItoHost", v); err == nil {
+			spec.MatchSNItoHost = &b
+			hasAny = true
+		}
 	}
 
 	// Access
 	if sc.AccessRequired != "" || sc.AccessTeamName != "" || sc.AccessAUDTag != "" {
 		access := &AccessSpec{}
-		access.Required = sc.AccessRequired == "true"
+		// accessRequired 也走 ParseBool
+		if sc.AccessRequired != "" {
+			if b, err := parseBoolLabel("originRequest.access.required", sc.AccessRequired); err == nil {
+				access.Required = b
+			}
+		}
 		access.TeamName = sc.AccessTeamName
 		if sc.AccessAUDTag != "" {
 			tags := strings.Split(sc.AccessAUDTag, ",")
@@ -188,6 +226,23 @@ func convertOriginRequest(sc *ServiceConfig) *OriginRequestSpec {
 		return nil
 	}
 	return spec
+}
+
+// parseBoolLabel parses a boolean label value using Go's strconv.ParseBool,
+// which accepts 1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False.
+// This is much more forgiving than the previous `v == "true"` check, which
+// silently treated True / TRUE / 1 / yes as false — most dangerously for
+// noTLSVerify, where a user setting "True" against a self-signed origin
+// would still get TLS verification and fail handshakes without any warning.
+func parseBoolLabel(label, value string) (bool, error) {
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		slog.Warn("Ignoring boolean label: invalid value",
+			"label", label, "value", value,
+			"hint", "accepted: 1, t, true, TRUE, True, 0, f, false, FALSE, False")
+		return false, err
+	}
+	return b, nil
 }
 
 // mergeSpecs merges traefik and docktunnel specs. On hostname conflict, docktunnel wins.

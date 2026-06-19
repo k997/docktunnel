@@ -139,9 +139,12 @@ func TestExtractHostsFromRule(t *testing.T) {
 		rule     string
 		expected []string
 	}{
-		{"single host", "Host(`example.com`)", []string{"example.com"}},
-		{"multiple hosts", "Host(`a.com`, `b.com`)", []string{"a.com", "b.com"}},
+		{"single host backtick", "Host(`example.com`)", []string{"example.com"}},
+		{"single host double-quote", `Host("example.com")`, []string{"example.com"}},
+		{"single host single-quote", "Host('example.com')", []string{"example.com"}},
+		{"multiple hosts backtick", "Host(`a.com`, `b.com`)", []string{"a.com", "b.com"}},
 		{"host and path", "Host(`example.com`) && Path(`/api`)", []string{"example.com"}},
+		{"host and path double-quote", `Host("example.com") && Path("/api")`, []string{"example.com"}},
 		{"no host", "Path(`/api`)", nil},
 	}
 

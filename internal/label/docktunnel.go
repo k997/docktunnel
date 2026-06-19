@@ -105,5 +105,13 @@ func setServiceConfigField(sc *ServiceConfig, attr, value string) {
 		sc.AccessTeamName = value
 	case "originRequest.access.audTag":
 		sc.AccessAUDTag = value
+	default:
+		// Warn on unknown attributes so users learn about typos and
+		// unsupported keys (e.g. originRequest.fallbackDelay) instead of
+		// silently dropping the value.
+		if strings.HasPrefix(attr, "originRequest.") {
+			slog.Warn("Ignoring unknown originRequest subkey",
+				"attribute", attr, "hint", "see docs for supported originRequest.* keys")
+		}
 	}
 }

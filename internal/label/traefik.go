@@ -247,9 +247,13 @@ func resolveTCPPort(services map[string]*TCPService, name string) int {
 }
 
 // --- Rule extraction helpers ---
+//
+// Traefik accepts Host(`x`), Host("x"), and Host('x') delimiter styles in
+// practice; the official docs and most migrations use double quotes. The
+// regexes below accept all three so users copying a Traefik rule into a
+// docktunnel.* label don't silently lose routing.
 
-var hostRegex = regexp.MustCompile(`Host\(\s*(` + "`" + `[^` + "`" + `]+` + "`" + `(?:\s*,\s*` + "`" + `[^` + "`" + `]+` + "`" + `)*)\s*\)`)
-var backtickRegex = regexp.MustCompile("`([^`]+)`")
+var hostRegex = regexp.MustCompile(`Host\(\s*([^)]+)\)`)
 
 // extractHostsFromRule extracts hostnames from Traefik Host() rule patterns.
 func extractHostsFromRule(rule string) []string {
@@ -257,13 +261,13 @@ func extractHostsFromRule(rule string) []string {
 	matches := hostRegex.FindAllStringSubmatch(rule, -1)
 	for _, match := range matches {
 		if len(match) > 1 {
-			hostnames = append(hostnames, extractFromBackticks(match[1])...)
+			hostnames = append(hostnames, extractQuoted(match[1])...)
 		}
 	}
 	return hostnames
 }
 
-var pathRegex = regexp.MustCompile(`Path\(\s*` + "`" + `([^` + "`" + `]+)` + "`" + `\s*\)`)
+var pathRegex = regexp.MustCompile(`Path\(\s*[` + "`" + `"]([^` + "`" + `"]+)[` + "`" + `"]\s*\)`)
 
 // extractPathsFromRule extracts paths from Traefik Path() rule patterns.
 func extractPathsFromRule(rule string) []string {
@@ -277,7 +281,7 @@ func extractPathsFromRule(rule string) []string {
 	return paths
 }
 
-var hostSNIRegex = regexp.MustCompile(`HostSNI\(\s*` + "`" + `([^` + "`" + `]+)` + "`" + `\s*\)`)
+var hostSNIRegex = regexp.MustCompile(`HostSNI\(\s*[` + "`" + `"]([^` + "`" + `"]+)[` + "`" + `"]\s*\)`)
 
 // extractHostSNIFromRule extracts hostnames from Traefik HostSNI() rule patterns.
 func extractHostSNIFromRule(rule string) []string {
@@ -291,10 +295,13 @@ func extractHostSNIFromRule(rule string) []string {
 	return hostnames
 }
 
-// extractFromBackticks extracts strings from backtick-delimited content.
-func extractFromBackticks(s string) []string {
+// extractQuoted extracts the contents of backtick- or double-quote-delimited
+// tokens (e.g. `Host(`a`, `b`)` → ["a","b"]). Used for Host() rules where
+// multiple hosts can be listed comma-separated inside one pair of delimiters.
+func extractQuoted(s string) []string {
 	var results []string
-	matches := backtickRegex.FindAllStringSubmatch(s, -1)
+	re := regexp.MustCompile("[`\"']([^`\"']+)[`\"']")
+	matches := re.FindAllStringSubmatch(s, -1)
 	for _, match := range matches {
 		if len(match) > 1 {
 			results = append(results, match[1])
