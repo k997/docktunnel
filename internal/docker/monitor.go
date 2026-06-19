@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/client"
 
 	"docktunnel/internal/events"
+	"docktunnel/internal/metrics"
 )
 
 // dockerClient abstracts the Docker API methods used by Manager.
@@ -75,6 +76,36 @@ func (m *Manager) ScanRunningContainers(ctx context.Context) ([]events.Event, er
 	return result, nil
 }
 
+// trySendEvent enqueues event on eventChannel without blocking the Docker
+// event-listener goroutine. If the channel is full the event is dropped and
+// the metrics.EventsDropped counter is incremented; the next resync (after a
+// reconnect, or on the reconcile interval) recovers state drift. Returns true
+// if the event was sent, false if dropped.
+//
+// Resync events are NEVER dropped — they're how we recover from drops.
+func trySendEvent(ctx context.Context, eventChannel chan<- events.Event, event events.Event) bool {
+	if event.Type == events.ActionResync {
+		select {
+		case eventChannel <- event:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	select {
+	case eventChannel <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	default:
+		metrics.IncEventsDropped()
+		slog.Warn("Dropped Docker event: internal channel full",
+			"type", event.Type, "containerID", event.ContainerID,
+			"hint", "state will converge on the next resync/reconcile")
+		return false
+	}
+}
+
 // ListenForEvents listens to Docker events with automatic reconnection.
 func (m *Manager) ListenForEvents(ctx context.Context, eventChannel chan<- events.Event) error {
 	backoff := 1 * time.Second
@@ -111,9 +142,7 @@ func (m *Manager) ListenForEvents(ctx context.Context, eventChannel chan<- event
 
 		// Emit resync event after reconnect
 		slog.Info("Reconnected to Docker daemon, triggering resync")
-		select {
-		case eventChannel <- events.Event{Type: events.ActionResync}:
-		case <-ctx.Done():
+		if !trySendEvent(ctx, eventChannel, events.Event{Type: events.ActionResync}) && ctx.Err() != nil {
 			return ctx.Err()
 		}
 	}
@@ -201,10 +230,11 @@ func (m *Manager) listenOnce(ctx context.Context, eventChannel chan<- events.Eve
 			}
 
 			select {
-			case eventChannel <- event:
 			case <-ctx.Done():
 				return ctx.Err()
+			default:
 			}
+			trySendEvent(ctx, eventChannel, event)
 		}
 	}
 }

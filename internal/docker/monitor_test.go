@@ -9,8 +9,10 @@ import (
 
 	containerTypes "github.com/docker/docker/api/types/container"
 	eventTypes "github.com/docker/docker/api/types/events"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"docktunnel/internal/events"
+	"docktunnel/internal/metrics"
 )
 
 type eventsResponse struct {
@@ -178,5 +180,77 @@ func TestListenOnce_TranslatesHealthStatusEvents(t *testing.T) {
 		default:
 			t.Fatalf("event %d: expected event not received", i)
 		}
+	}
+}
+
+// TestTrySendEvent_DropsAndCountsWhenChannelFull verifies that a non-resync
+// event is dropped (and counted) when the channel is full, rather than
+// blocking the caller.
+func TestTrySendEvent_DropsAndCountsWhenChannelFull(t *testing.T) {
+	before := testutil.ToFloat64(metrics.EventsDropped)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Single-slot channel, already full.
+	ch := make(chan events.Event, 1)
+	ch <- events.Event{Type: "start", ContainerID: "filler"}
+
+	sent := trySendEvent(ctx, ch, events.Event{Type: "start", ContainerID: "dropped"})
+	if sent {
+		t.Error("expected send to be dropped when channel is full")
+	}
+
+	after := testutil.ToFloat64(metrics.EventsDropped)
+	if after-before != 1 {
+		t.Errorf("expected EventsDropped delta=1, got %v", after-before)
+	}
+
+	// Confirm only the filler event is still in the channel.
+	if len(ch) != 1 {
+		t.Errorf("expected channel len=1, got %d", len(ch))
+	}
+}
+
+// TestTrySendEvent_NeverDropsResync verifies resync events bypass the drop
+// path — they're how we recover from previous drops.
+func TestTrySendEvent_NeverDropsResync(t *testing.T) {
+	before := testutil.ToFloat64(metrics.EventsDropped)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan events.Event, 1)
+	ch <- events.Event{Type: "start"} // fill the channel
+
+	// Drain in a goroutine so the resync send can complete.
+	go func() {
+		<-ch
+	}()
+
+	sent := trySendEvent(ctx, ch, events.Event{Type: events.ActionResync})
+	if !sent {
+		t.Error("resync event should always be sent, even on a full channel")
+	}
+
+	after := testutil.ToFloat64(metrics.EventsDropped)
+	if after != before {
+		t.Errorf("resync must not increment EventsDropped, got delta=%v", after-before)
+	}
+}
+
+// TestTrySendEvent_ReturnsFalseOnContextCancel verifies the helper honors
+// context cancellation even when blocking on a resync send.
+func TestTrySendEvent_ReturnsFalseOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ch := make(chan events.Event, 1)
+	ch <- events.Event{Type: "start"}
+
+	cancel() // cancel before calling
+
+	sent := trySendEvent(ctx, ch, events.Event{Type: events.ActionResync})
+	if sent {
+		t.Error("expected send to be false after ctx cancel")
 	}
 }

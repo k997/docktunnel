@@ -128,3 +128,14 @@ func TestRecordEvent_AcceptsAllEnumeratedResults(t *testing.T) {
 		}
 	}
 }
+
+func TestIncEventsDropped_IncrementsCounter(t *testing.T) {
+	before := testutil.ToFloat64(EventsDropped)
+	IncEventsDropped()
+	IncEventsDropped()
+	IncEventsDropped()
+	after := testutil.ToFloat64(EventsDropped)
+	if after-before != 3 {
+		t.Errorf("expected delta=3, got %v", after-before)
+	}
+}

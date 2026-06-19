@@ -84,7 +84,7 @@ func main() {
 	// 创建Cloudflare Manager
 	cfManager, err := cloudflareManager.NewManager(cfg.GetCloudflareOptions())
 	if err != nil {
-		slog.Error("Failed to create Cloudflare manager", "error", err)
+		appLogger.Error("Failed to create Cloudflare manager", "error", err)
 		os.Exit(1)
 	}
 
@@ -120,7 +120,10 @@ func main() {
 	}
 
 	// 创建事件通道
-	eventChan := make(chan events.Event, 10)
+	// 256 is large enough to absorb container storms (bulk restarts, daemon
+	// reconnect bursts) without blocking the Docker event-listener goroutine.
+	// trySendEvent in monitor.go drops + counts when even this fills up.
+	eventChan := make(chan events.Event, 256)
 
 	// 启动事件处理循环
 	var wg sync.WaitGroup

@@ -62,6 +62,18 @@ var (
 		Help:      "Total Docker events processed by type and result.",
 	}, []string{"type", "result"})
 
+	// EventsDropped counts Docker events dropped because the event channel
+	// was full. A container storm (bulk restarts) can outpace Dispatch, and
+	// rather than block the Docker event-listener goroutine — which would
+	// eventually cause the daemon to drop events itself — we drop on our
+	// side and surface it via this counter. Reconciliation will catch up
+	// state on the next resync.
+	EventsDropped = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "docktunnel",
+		Name:      "events_dropped_total",
+		Help:      "Docker events dropped because the internal event channel was full.",
+	})
+
 	// ReconcileDuration observes wall-clock time of Reconcile cycles.
 	ReconcileDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "docktunnel",
@@ -126,6 +138,11 @@ const (
 
 func RecordEvent(eventType, result string) {
 	EventsTotal.WithLabelValues(safeEventTypeLabel(eventType), safeResultLabel(result)).Inc()
+}
+
+// IncEventsDropped increments the EventsDropped counter by 1.
+func IncEventsDropped() {
+	EventsDropped.Inc()
 }
 
 // ObserveReconcile records a Reconcile cycle's duration in seconds.
