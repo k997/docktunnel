@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -25,6 +26,10 @@ type syncWorker struct {
 	stopCh     chan struct{}      // closed when run() exits
 
 	started atomic.Bool
+
+	// lastErr / errMu will be replaced by atomic.Pointer in Task 5.
+	errMu   sync.RWMutex
+	lastErr error
 }
 
 func newSyncWorker(debounce time.Duration, syncFn func(context.Context) error, log *slog.Logger) *syncWorker {
@@ -83,9 +88,65 @@ func (w *syncWorker) Stop() {
 // run is filled in by Task 2.
 func (w *syncWorker) run(ctx context.Context) {
 	defer close(w.stopCh)
-	<-ctx.Done()
+	timer := time.NewTimer(w.debounce)
+	timer.Stop()
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.triggerCh:
+			// Debounce window: absorb triggers until quiet.
+			timer.Reset(w.debounce)
+		debounce:
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-w.triggerCh:
+					timer.Reset(w.debounce)
+				case <-timer.C:
+					break debounce
+				}
+			}
+			w.runOnce(ctx)
+		}
+	}
 }
 
-// (runOnce will be added in Task 2; fmt-safe placeholder kept here to
-// avoid unused import errors during this slice of work.)
-var _ = fmt.Sprintf
+// runOnce invokes syncFn, stores the result, and drains any pending
+// flushers. The panic recovery keeps a single bad sync from killing
+// the worker.
+func (w *syncWorker) runOnce(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.log.Error("syncFn panic recovered", "panic", r)
+			err := fmt.Errorf("sync panicked: %v", r)
+			w.storeErr(err)
+		}
+		w.drainFlushers()
+	}()
+	err := w.syncFn(ctx)
+	w.storeErr(err)
+	if err != nil {
+		w.log.Warn("sync failed; will retry on next trigger", "error", err)
+	}
+}
+
+func (w *syncWorker) storeErr(err error) {
+	// Will be replaced by atomic.Pointer store in Task 5.
+	w.errMu.Lock()
+	w.lastErr = err
+	w.errMu.Unlock()
+}
+
+func (w *syncWorker) loadErr() error {
+	w.errMu.RLock()
+	defer w.errMu.RUnlock()
+	return w.lastErr
+}
+
+func (w *syncWorker) drainFlushers() {
+	// Filled in by Task 3.
+}
