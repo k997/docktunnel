@@ -930,9 +930,9 @@ func TestCleanupResources_BlocksUntilSyncRun(t *testing.T) {
 
 	ctrl := NewController(nil, mgr, ControllerOptions{})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ctrl.Start(ctx)
 	defer ctrl.StopSyncWorker()
+	defer cancel()
 
 	if err := ctrl.CleanupResources(ctx); err != nil {
 		t.Fatalf("CleanupResources returned err: %v", err)
