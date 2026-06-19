@@ -22,6 +22,14 @@ import (
 // mockCloudflareManager 是一个模拟的Cloudflare管理器，用于测试
 type mockCloudflareManager struct {
 	tunnel *zero_trust.TunnelCloudflaredGetResponse
+
+	// updateBlock, when non-nil, makes UpdateConfiguration block on
+	// receiving from this channel before returning. Lets callers prove
+	// that a code path actually waits for the sync to land.
+	updateBlock chan struct{}
+
+	// updateCalls counts UpdateConfiguration invocations.
+	updateCalls int
 }
 
 // GetTunnel 返回模拟的隧道信息
@@ -31,6 +39,14 @@ func (m *mockCloudflareManager) GetTunnel() *zero_trust.TunnelCloudflaredGetResp
 
 // UpdateConfiguration 模拟更新配置
 func (m *mockCloudflareManager) UpdateConfiguration(ctx context.Context, ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
+	m.updateCalls++
+	if m.updateBlock != nil {
+		select {
+		case <-m.updateBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
 }
 
@@ -920,12 +936,16 @@ func TestExecuteAction_SkipsDeleteWhenHostnameIsRegistered(t *testing.T) {
 }
 
 // TestCleanupResources_BlocksUntilSyncRun verifies that CleanupResources
-// does not return until the sync worker has processed the cleared-state
-// sync. Regression guard for the shutdown race that motivated the
-// syncWorker refactor.
+// does not return until the sync worker has actually processed the
+// cleared-state sync. A non-blocking mock would let this test pass even
+// if CleanupResources returned early, so we install a mock whose
+// UpdateConfiguration blocks on a release channel and prove the call
+// actually waits.
 func TestCleanupResources_BlocksUntilSyncRun(t *testing.T) {
+	release := make(chan struct{})
 	mgr := &mockCloudflareManager{
-		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "t1"},
+		tunnel:      &zero_trust.TunnelCloudflaredGetResponse{ID: "t1"},
+		updateBlock: release,
 	}
 
 	ctrl := NewController(nil, mgr, ControllerOptions{})
@@ -934,8 +954,35 @@ func TestCleanupResources_BlocksUntilSyncRun(t *testing.T) {
 	defer ctrl.StopSyncWorker()
 	defer cancel()
 
-	if err := ctrl.CleanupResources(ctx); err != nil {
-		t.Fatalf("CleanupResources returned err: %v", err)
+	// Spawn CleanupResources in a goroutine so we can observe whether
+	// it is blocked.
+	done := make(chan error, 1)
+	go func() {
+		done <- ctrl.CleanupResources(ctx)
+	}()
+
+	// While the mock is holding UpdateConfiguration, CleanupResources
+	// must NOT return. 50ms is well under the controller's debounce
+	// (2s) plus any scheduling slack, but long enough that an
+	// immediate-return bug would reliably surface here.
+	select {
+	case <-done:
+		t.Fatalf("CleanupResources returned before UpdateConfiguration was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Releasing the mock lets UpdateConfiguration return, which lets
+	// the sync finish, which lets FlushSync inside CleanupResources
+	// unblock. Verify CleanupResources returns shortly after.
+	close(release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CleanupResources returned err: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("CleanupResources did not return after UpdateConfiguration was released")
 	}
 
 	// After CleanupResources returns, ingressRules should be empty and
@@ -943,5 +990,8 @@ func TestCleanupResources_BlocksUntilSyncRun(t *testing.T) {
 	rules := ctrl.GetIngressRules()
 	if len(rules) != 1 { // catch-all only
 		t.Errorf("expected 1 rule (catch-all) after cleanup, got %d", len(rules))
+	}
+	if mgr.updateCalls == 0 {
+		t.Error("expected UpdateConfiguration to have been called at least once")
 	}
 }
