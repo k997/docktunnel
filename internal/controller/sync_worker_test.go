@@ -179,5 +179,37 @@ func TestSyncWorker_FlushSyncCtxTimeout(t *testing.T) {
 	close(proceed)
 }
 
+// TestSyncWorker_FlushSyncNoHangOnSlowScheduler is a regression test for
+// the trigger-then-register race that was fixed by merging trigger and
+// flusher-registration into a single channel send. Before the fix,
+// yielding between the two sends would cause ~18% of FlushSync calls
+// to hang until ctx timeout.
+func TestSyncWorker_FlushSyncNoHangOnSlowScheduler(t *testing.T) {
+	var callCount int32
+	w := newTestWorker(t, 5*time.Millisecond, func(context.Context) error {
+		atomic.AddInt32(&callCount, 1)
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	w.Start(ctx)
+	defer w.Stop()
+	defer cancel()
+
+	// Hammer FlushSync with no other trigger source. If the race
+	// exists, many of these will hang until ctx timeout.
+	for i := 0; i < 50; i++ {
+		flushCtx, flushCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		if err := w.FlushSync(flushCtx); err != nil {
+			flushCancel()
+			t.Fatalf("FlushSync call %d returned err: %v (race regression?)", i, err)
+		}
+		flushCancel()
+	}
+
+	if got := atomic.LoadInt32(&callCount); got < 50 {
+		t.Errorf("expected at least 50 syncFn calls (one per flush), got %d", got)
+	}
+}
+
 // keep atomic import used; will be referenced by later tests
 var _ = atomic.Bool{}

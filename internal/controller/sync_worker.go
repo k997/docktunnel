@@ -21,7 +21,7 @@ type syncWorker struct {
 	syncFn   func(context.Context) error
 	log      *slog.Logger
 
-	triggerCh  chan struct{}      // size 1; signals "sync wanted"
+	triggerCh  chan chan struct{} // size 1; nil = trigger, non-nil = flush
 	flushQueue chan chan struct{} // unbuffered; FlushSync registers its done chan
 	stopCh     chan struct{}      // closed when run() exits
 
@@ -37,7 +37,7 @@ func newSyncWorker(debounce time.Duration, syncFn func(context.Context) error, l
 		debounce:   debounce,
 		syncFn:     syncFn,
 		log:        log,
-		triggerCh:  make(chan struct{}, 1),
+		triggerCh:  make(chan chan struct{}, 1),
 		flushQueue: make(chan chan struct{}),
 		stopCh:     make(chan struct{}),
 	}
@@ -55,7 +55,7 @@ func (w *syncWorker) Start(ctx context.Context) {
 // call from event handlers. Multiple triggers coalesce.
 func (w *syncWorker) TriggerSync() {
 	select {
-	case w.triggerCh <- struct{}{}:
+	case w.triggerCh <- nil:
 	default:
 		// channel full; worker will re-check after current sync
 	}
@@ -70,16 +70,12 @@ func (w *syncWorker) FlushSync(ctx context.Context) error {
 	}
 	myDone := make(chan struct{})
 
-	// Ensure worker has something to do.
+	// Single atomic operation: trigger AND register flusher in one
+	// channel send. This closes the race where the worker could
+	// complete a sync cycle between a separate trigger-send and
+	// flusher-register, leaving the flusher hanging.
 	select {
-	case w.triggerCh <- struct{}{}:
-	default:
-	}
-
-	// Register our completion channel. May block briefly if another
-	// flusher is mid-register; that's fine.
-	select {
-	case w.flushQueue <- myDone:
+	case w.triggerCh <- myDone:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -113,37 +109,53 @@ func (w *syncWorker) run(ctx context.Context) {
 	defer timer.Stop()
 
 	for {
+		var heldFlushers []chan struct{}
 		select {
 		case <-ctx.Done():
 			return
-		case <-w.triggerCh:
-			// Debounce window: absorb triggers until quiet.
-			timer.Reset(w.debounce)
-		debounce:
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-w.triggerCh:
-					timer.Reset(w.debounce)
-				case <-timer.C:
-					break debounce
-				}
+		case f := <-w.triggerCh:
+			if f != nil {
+				heldFlushers = append(heldFlushers, f)
 			}
-			w.runOnce(ctx)
 		}
+
+		timer.Reset(w.debounce)
+	debounce:
+		for {
+			select {
+			case <-ctx.Done():
+				// Best-effort: close any held flushers on shutdown.
+				for _, f := range heldFlushers {
+					close(f)
+				}
+				return
+			case f := <-w.triggerCh:
+				if f != nil {
+					heldFlushers = append(heldFlushers, f)
+				}
+				timer.Reset(w.debounce)
+			case <-timer.C:
+				break debounce
+			}
+		}
+		w.runOnce(ctx, heldFlushers)
 	}
 }
 
 // runOnce invokes syncFn, stores the result, and drains any pending
 // flushers. The panic recovery keeps a single bad sync from killing
 // the worker.
-func (w *syncWorker) runOnce(ctx context.Context) {
+func (w *syncWorker) runOnce(ctx context.Context, heldFlushers []chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
 			w.log.Error("syncFn panic recovered", "panic", r)
 			err := fmt.Errorf("sync panicked: %v", r)
 			w.storeErr(err)
+		}
+		// Close all flushers (held + queued) so callers unblock on
+		// both panic and normal paths.
+		for _, f := range heldFlushers {
+			close(f)
 		}
 		w.drainFlushers()
 	}()
@@ -168,6 +180,8 @@ func (w *syncWorker) loadErr() error {
 }
 
 func (w *syncWorker) drainFlushers() {
+	// Flushers now arrive via triggerCh; flushQueue is legacy and
+	// always empty. Drain defensively in case future code uses it.
 	for {
 		select {
 		case done := <-w.flushQueue:
