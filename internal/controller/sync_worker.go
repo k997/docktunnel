@@ -20,9 +20,8 @@ type syncWorker struct {
 	syncFn   func(context.Context) error
 	log      *slog.Logger
 
-	triggerCh  chan chan struct{} // size 1; nil = trigger, non-nil = flush
-	flushQueue chan chan struct{} // unbuffered; FlushSync registers its done chan
-	stopCh     chan struct{}      // closed when run() exits
+	triggerCh chan chan struct{} // size 1; nil = trigger, non-nil = flush
+	stopCh    chan struct{}      // closed when run() exits
 
 	started atomic.Bool
 
@@ -31,12 +30,11 @@ type syncWorker struct {
 
 func newSyncWorker(debounce time.Duration, syncFn func(context.Context) error, log *slog.Logger) *syncWorker {
 	return &syncWorker{
-		debounce:   debounce,
-		syncFn:     syncFn,
-		log:        log,
-		triggerCh:  make(chan chan struct{}, 1),
-		flushQueue: make(chan chan struct{}),
-		stopCh:     make(chan struct{}),
+		debounce:  debounce,
+		syncFn:    syncFn,
+		log:       log,
+		triggerCh: make(chan chan struct{}, 1),
+		stopCh:    make(chan struct{}),
 	}
 }
 
@@ -158,24 +156,10 @@ func (w *syncWorker) runOnce(ctx context.Context, heldFlushers []chan struct{}) 
 		for _, f := range heldFlushers {
 			close(f)
 		}
-		w.drainFlushers()
 	}()
 	err := w.syncFn(ctx)
 	w.lastErr.Store(&err)
 	if err != nil {
 		w.log.Warn("sync failed; will retry on next trigger", "error", err)
-	}
-}
-
-func (w *syncWorker) drainFlushers() {
-	// Flushers now arrive via triggerCh; flushQueue is legacy and
-	// always empty. Drain defensively in case future code uses it.
-	for {
-		select {
-		case done := <-w.flushQueue:
-			close(done)
-		default:
-			return
-		}
 	}
 }
