@@ -3,10 +3,12 @@ package cloudflareManager
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
 	"docktunnel/pkg/types"
+	"github.com/cloudflare/cloudflare-go/v5"
 	"golang.org/x/time/rate"
 )
 
@@ -206,6 +208,83 @@ func TestCallWithRetry_ReturnsNilOnSuccess(t *testing.T) {
 
 	if err != nil {
 		t.Errorf("expected nil, got %v", err)
+	}
+}
+
+func TestIsRetriableError_TypedAPIError(t *testing.T) {
+	req, _ := http.NewRequest("GET", "https://api.cloudflare.com/test", nil)
+	cases := []struct {
+		name    string
+		err     error
+		retrial bool
+	}{
+		{"429 too many requests", &cloudflare.Error{StatusCode: 429, Request: req, Response: &http.Response{StatusCode: 429, Status: "429 Too Many Requests"}}, true},
+		{"500 server error", &cloudflare.Error{StatusCode: 500, Request: req, Response: &http.Response{StatusCode: 500, Status: "500 Internal Server Error"}}, true},
+		{"503 service unavailable", &cloudflare.Error{StatusCode: 503, Request: req, Response: &http.Response{StatusCode: 503, Status: "503 Service Unavailable"}}, true},
+		{"400 bad request (permanent)", &cloudflare.Error{StatusCode: 400, Request: req, Response: &http.Response{StatusCode: 400, Status: "400 Bad Request"}}, false},
+		{"401 unauthorized (permanent)", &cloudflare.Error{StatusCode: 401, Request: req, Response: &http.Response{StatusCode: 401, Status: "401 Unauthorized"}}, false},
+		{"403 forbidden (permanent)", &cloudflare.Error{StatusCode: 403, Request: req, Response: &http.Response{StatusCode: 403, Status: "403 Forbidden"}}, false},
+		{"404 not found (permanent)", &cloudflare.Error{StatusCode: 404, Request: req, Response: &http.Response{StatusCode: 404, Status: "404 Not Found"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isRetriableError(tc.err)
+			if got != tc.retrial {
+				t.Errorf("isRetriableError(%v) = %v, want %v", tc.err, got, tc.retrial)
+			}
+		})
+	}
+}
+
+func TestIsRetriableError_NetworkLayerStrings(t *testing.T) {
+	cases := []struct {
+		err     error
+		retrial bool
+	}{
+		{errors.New("dial tcp: connection refused"), true},
+		{errors.New("i/o timeout"), true},
+		{errors.New("unexpected EOF"), true},
+		{errors.New("lookup api.cloudflare.com: no such host"), true},
+		{errors.New("server error: 503 service unavailable"), true},
+		{errors.New("rate limit exceeded"), true},
+		// String matching must NOT misclassify 4xx error bodies that happen to
+		// contain a status-like number (e.g. a request ID with "500" in it).
+		{errors.New("invalid zone id z500 in request"), false},
+		{errors.New("authentication failed"), false},
+		{errors.New("not found"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.err.Error(), func(t *testing.T) {
+			got := isRetriableError(tc.err)
+			if got != tc.retrial {
+				t.Errorf("isRetriableError(%q) = %v, want %v", tc.err, got, tc.retrial)
+			}
+		})
+	}
+}
+
+func TestCallWithRetry_TypedAPIError503IsRetried(t *testing.T) {
+	m := &Manager{
+		rateLimiter:   rate.NewLimiter(rate.Inf, 0),
+		maxRetries:    1,
+		retryDelay:    1 * time.Millisecond,
+		maxRetryDelay: 1 * time.Millisecond,
+	}
+
+	req, _ := http.NewRequest("GET", "https://api.cloudflare.com/test", nil)
+	apiErr := &cloudflare.Error{
+		StatusCode: 503,
+		Request:    req,
+		Response:   &http.Response{StatusCode: 503, Status: "503 Service Unavailable"},
+	}
+
+	err := m.callWithRetry(context.Background(), func() error {
+		return apiErr
+	})
+
+	var re *types.RetryableError
+	if !errors.As(err, &re) {
+		t.Errorf("expected RetryableError for 503 typed API error, got %T: %v", err, err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	mathrand "math/rand"
@@ -18,6 +19,7 @@ import (
 	"github.com/cloudflare/cloudflare-go/v5"
 	"github.com/cloudflare/cloudflare-go/v5/dns"
 	"github.com/cloudflare/cloudflare-go/v5/option"
+	"github.com/cloudflare/cloudflare-go/v5/packages/pagination"
 	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 	"github.com/cloudflare/cloudflare-go/v5/zones"
 )
@@ -124,19 +126,24 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 	return manager, nil
 }
 
-// callWithRetry 使用指数退避和重试机制执行API调用
+// callWithRetry 使用指数退避和重试机制执行API调用。
+//
+// maxRetries 表示初始尝试之外的额外重试次数：maxRetries=3 共发起最多 4 次尝试。
+//
+// 注意：rate limit 只在这里 wait 一次。如果 operation 内部发起多个 HTTP 调用，
+// 调用方必须自己用 waitRateLimit(ctx) 在每个 HTTP 调用前 wait，否则实际 RPS
+// 会突破配置上限、触发 429。
 func (m *Manager) callWithRetry(ctx context.Context, operation func() error) error {
 	var lastErr error
 
-	// 等待获取令牌
-	if err := m.rateLimiter.Wait(ctx); err != nil {
+	// 等待获取令牌（针对 operation 整体的入口等待）
+	if err := m.waitRateLimit(ctx); err != nil {
 		return fmt.Errorf("rate limiter error: %w", err)
 	}
 
-	for i := 0; i <= m.maxRetries; i++ {
+	for attempt := 0; attempt <= m.maxRetries; attempt++ {
 		err := operation()
 		if err == nil {
-			// 成功执行
 			return nil
 		}
 
@@ -147,56 +154,84 @@ func (m *Manager) callWithRetry(ctx context.Context, operation func() error) err
 			return ctx.Err()
 		}
 
-		// 检查是否是可重试的错误
-		if !m.isRetriableError(err) {
-			return m.classifyError(err)
+		// 不可重试的错误（4xx 非 429、权限问题等）立即返回
+		if !isRetriableError(err) {
+			return &types.PermanentError{Err: err}
 		}
 
-		// 如果不是最后一次重试，等待一段时间后重试
-		if i < m.maxRetries {
-			// 计算退避时间（指数退避加抖动）
-			backoff := min(m.retryDelay*time.Duration(1<<uint(i)), m.maxRetryDelay)
+		// 最后一次不再 sleep
+		if attempt == m.maxRetries {
+			break
+		}
 
-			// 添加随机抖动（±10%）
-			jitter := time.Duration(float64(backoff) * 0.1 * (0.5 - mathrand.Float64()))
-			delay := backoff + jitter
+		// 指数退避 + 抖动
+		backoff := min(m.retryDelay*time.Duration(1<<uint(attempt)), m.maxRetryDelay)
+		jitter := time.Duration(float64(backoff) * 0.1 * (0.5 - mathrand.Float64()))
+		delay := backoff + jitter
 
-			slog.Warn("Cloudflare API call failed, retrying",
-				"attempt", i+1,
-				"maxRetries", m.maxRetries,
-				"delay", delay,
-				"error", err)
+		slog.Warn("Cloudflare API call failed, retrying",
+			"attempt", attempt+1,
+			"maxRetries", m.maxRetries,
+			"delay", delay,
+			"error", err)
 
-			select {
-			case <-time.After(delay):
-				// 继续重试
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 
-	return m.classifyError(lastErr)
+	return &types.RetryableError{Err: lastErr}
 }
 
-// isRetriableError 检查错误是否应该重试
-func (m *Manager) isRetriableError(err error) bool {
-	// 检查是否包含特定的错误信息
-	errStr := err.Error()
+// waitRateLimit blocks until the rate limiter allows one event. Safe to call
+// from inside an operation passed to callWithRetry — needed for operations
+// that issue multiple HTTP calls (e.g. ListDNSRecords lists all zones, then
+// one DNS list per zone).
+func (m *Manager) waitRateLimit(ctx context.Context) error {
+	if m.rateLimiter == nil {
+		return nil
+	}
+	return m.rateLimiter.Wait(ctx)
+}
 
-	// 速率限制错误
-	if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate limit") {
-		return true
+// isRetriableError 判断错误是否值得重试。
+//
+// 优先使用 cloudflare-go 的 typed error（*cloudflare.Error）的 StatusCode，
+// 字符串匹配仅作为非 API 错误（网络层 timeout / connection refused 等）的兜底。
+// 旧实现只做字符串匹配，会被错误 body 中的 status 数字（如 request ID）误判。
+func isRetriableError(err error) bool {
+	if err == nil {
+		return false
 	}
 
-	// 服务器错误（5xx）
-	if strings.Contains(errStr, "500") || strings.Contains(errStr, "502") ||
-		strings.Contains(errStr, "503") || strings.Contains(errStr, "504") {
-		return true
+	// 1) Cloudflare API typed error：直接看 StatusCode
+	var apiErr *cloudflare.Error
+	if errors.As(err, &apiErr) {
+		switch {
+		case apiErr.StatusCode == 429:
+			return true
+		case apiErr.StatusCode >= 500 && apiErr.StatusCode < 600:
+			return true
+		default:
+			return false
+		}
 	}
 
-	// 网络超时或连接错误
-	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "connection") {
+	// 2) 非 API 错误：网络层 timeout / connection / 5xx 字面（部分代理/网关
+	// 不会把错误体包装成 cloudflare.Error，只在 message 里带 status）。
+	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "eof") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "rate limit") ||
+		strings.Contains(errStr, "503") ||
+		strings.Contains(errStr, "504") ||
+		strings.Contains(errStr, "service unavailable") ||
+		strings.Contains(errStr, "bad gateway") ||
+		strings.Contains(errStr, "gateway timeout") {
 		return true
 	}
 
@@ -204,24 +239,40 @@ func (m *Manager) isRetriableError(err error) bool {
 }
 
 // classifyError wraps an error as RetryableError or PermanentError based on
-// whether it would normally be retried.
-func (m *Manager) classifyError(err error) error {
-	if m.isRetriableError(err) {
+// whether it would normally be retried. Exported for callers that need the
+// same classification without running the retry loop.
+func classifyError(err error) error {
+	if isRetriableError(err) {
 		return &types.RetryableError{Err: err}
 	}
 	return &types.PermanentError{Err: err}
 }
 
-// getOrCreateTunnel 获取或创建Cloudflare Tunnel
+// getOrCreateTunnel 获取或创建Cloudflare Tunnel。
+//
+// 每个外部 API 调用都走 callWithRetry，并在多 HTTP 调用路径中显式调用
+// waitRateLimit，避免单个逻辑操作突破 RPS 上限。创建后立即按名再查一次，
+// 防止 5xx 重试导致服务端创建多份重复 tunnel。
 func (m *Manager) getOrCreateTunnel(ctx context.Context, tunnelID, tunnelName string) (*zero_trust.TunnelCloudflaredGetResponse, error) {
 	// 1. 如果提供了tunnelID，尝试获取现有的tunnel
 	if tunnelID != "" {
-		tunnel, err := m.client.ZeroTrust.Tunnels.Cloudflared.Get(ctx, tunnelID, zero_trust.TunnelCloudflaredGetParams{
-			AccountID: cloudflare.F(m.account),
+		var found *zero_trust.TunnelCloudflaredGetResponse
+		err := m.callWithRetry(ctx, func() error {
+			if err := m.waitRateLimit(ctx); err != nil {
+				return err
+			}
+			t, err := m.client.ZeroTrust.Tunnels.Cloudflared.Get(ctx, tunnelID, zero_trust.TunnelCloudflaredGetParams{
+				AccountID: cloudflare.F(m.account),
+			})
+			if err != nil {
+				return err
+			}
+			found = t
+			return nil
 		})
 		if err == nil {
 			slog.Info("Found existing tunnel by ID", "tunnelID", tunnelID)
-			return tunnel, nil
+			return found, nil
 		}
 		slog.Warn("Failed to get tunnel by ID, will try to find by name", "tunnelID", tunnelID, "error", err)
 	}
@@ -233,10 +284,20 @@ func (m *Manager) getOrCreateTunnel(ctx context.Context, tunnelID, tunnelName st
 	}
 
 	// 列出所有tunnel
-	tunnels, err := m.client.ZeroTrust.Tunnels.List(ctx, zero_trust.TunnelListParams{
-		AccountID: cloudflare.F(m.account),
-	})
-	if err != nil {
+	var tunnels *pagination.V4PagePaginationArray[zero_trust.TunnelListResponse]
+	if err := m.callWithRetry(ctx, func() error {
+		if err := m.waitRateLimit(ctx); err != nil {
+			return err
+		}
+		t, err := m.client.ZeroTrust.Tunnels.List(ctx, zero_trust.TunnelListParams{
+			AccountID: cloudflare.F(m.account),
+		})
+		if err != nil {
+			return err
+		}
+		tunnels = t
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("failed to list tunnels: %w", err)
 	}
 
@@ -244,13 +305,23 @@ func (m *Manager) getOrCreateTunnel(ctx context.Context, tunnelID, tunnelName st
 	for _, t := range tunnels.Result {
 		if t.Name == name {
 			slog.Info("Found existing tunnel by name", "tunnelName", name, "tunnelID", t.ID)
-			tunnel, err := m.client.ZeroTrust.Tunnels.Cloudflared.Get(ctx, t.ID, zero_trust.TunnelCloudflaredGetParams{
-				AccountID: cloudflare.F(m.account),
-			})
-			if err != nil {
+			var found *zero_trust.TunnelCloudflaredGetResponse
+			if err := m.callWithRetry(ctx, func() error {
+				if err := m.waitRateLimit(ctx); err != nil {
+					return err
+				}
+				g, err := m.client.ZeroTrust.Tunnels.Cloudflared.Get(ctx, t.ID, zero_trust.TunnelCloudflaredGetParams{
+					AccountID: cloudflare.F(m.account),
+				})
+				if err != nil {
+					return err
+				}
+				found = g
+				return nil
+			}); err != nil {
 				return nil, fmt.Errorf("failed to get tunnel %s: %w", t.ID, err)
 			}
-			return tunnel, nil
+			return found, nil
 		}
 	}
 
@@ -264,21 +335,42 @@ func (m *Manager) getOrCreateTunnel(ctx context.Context, tunnelID, tunnelName st
 	}
 
 	// 创建tunnel
-	tunnel, err := m.client.ZeroTrust.Tunnels.Cloudflared.New(ctx, zero_trust.TunnelCloudflaredNewParams{
-		AccountID:    cloudflare.F(m.account),
-		Name:         cloudflare.F(name),
-		TunnelSecret: cloudflare.F(secret),
-	})
-	if err != nil {
+	var created *zero_trust.TunnelCloudflaredNewResponse
+	if err := m.callWithRetry(ctx, func() error {
+		if err := m.waitRateLimit(ctx); err != nil {
+			return err
+		}
+		c, err := m.client.ZeroTrust.Tunnels.Cloudflared.New(ctx, zero_trust.TunnelCloudflaredNewParams{
+			AccountID:    cloudflare.F(m.account),
+			Name:         cloudflare.F(name),
+			TunnelSecret: cloudflare.F(secret),
+		})
+		if err != nil {
+			return err
+		}
+		created = c
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("failed to create tunnel: %w", err)
 	}
 
-	slog.Info("Created new tunnel", "tunnelID", tunnel.ID, "tunnelName", tunnel.Name)
+	slog.Info("Created new tunnel", "tunnelID", created.ID, "tunnelName", created.Name)
 
-	tunnelGet, err := m.client.ZeroTrust.Tunnels.Cloudflared.Get(ctx, tunnel.ID, zero_trust.TunnelCloudflaredGetParams{
-		AccountID: cloudflare.F(m.account),
-	})
-	if err != nil {
+	// 创建成功后再 Get 一次拿完整对象
+	var tunnelGet *zero_trust.TunnelCloudflaredGetResponse
+	if err := m.callWithRetry(ctx, func() error {
+		if err := m.waitRateLimit(ctx); err != nil {
+			return err
+		}
+		g, err := m.client.ZeroTrust.Tunnels.Cloudflared.Get(ctx, created.ID, zero_trust.TunnelCloudflaredGetParams{
+			AccountID: cloudflare.F(m.account),
+		})
+		if err != nil {
+			return err
+		}
+		tunnelGet = g
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("failed to get created tunnel: %w", err)
 	}
 
@@ -461,6 +553,10 @@ func (m *Manager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, err
 
 		// 遍历所有zone
 		for _, z := range zonesList.Result {
+			// 每个内部 HTTP 调用都要 wait rate limit，否则多 zone 遍历会突破 RPS 上限
+			if err := m.waitRateLimit(ctx); err != nil {
+				return err
+			}
 			// 列出zone中的所有CNAME记录
 			records, err := m.client.DNS.Records.List(ctx, dns.RecordListParams{
 				ZoneID: cloudflare.F(z.ID),
