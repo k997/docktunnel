@@ -19,6 +19,7 @@ import (
 	"docktunnel/internal/controller"
 	"docktunnel/internal/docker"
 	"docktunnel/internal/events"
+	"docktunnel/internal/instance"
 	"docktunnel/internal/logger"
 	"docktunnel/internal/metrics"
 	"docktunnel/internal/server"
@@ -57,6 +58,18 @@ func main() {
 	// 初始化日志记录器
 	var appLogger *slog.Logger = logger.New(cfg.Log.Level, cfg.Log.Format)
 	appLogger.Info("Configuration loaded successfully", "log_level", cfg.Log.Level, "log_format", cfg.Log.Format)
+
+	// Acquire single-instance lock before touching Cloudflare. Two instances
+	// against the same tunnel would race on configuration writes and thrash
+	// DNS records. Released implicitly on process exit; deferred Close keeps
+	// the next startup from waiting on fd cleanup.
+	instanceLock, err := instance.Acquire(cfg.Cleanup.LockFile)
+	if err != nil {
+		appLogger.Error("Failed to acquire instance lock", "path", cfg.Cleanup.LockFile, "error", err)
+		os.Exit(1)
+	}
+	defer instanceLock.Close()
+	appLogger.Info("Acquired instance lock", "path", cfg.Cleanup.LockFile)
 
 	// 创建上下文用于优雅关闭
 	ctx, cancel := context.WithCancel(context.Background())

@@ -69,6 +69,9 @@ type Config struct {
 		StateFile string        `mapstructure:"stateFile"`
 		Strategy  string        `mapstructure:"strategy"`
 		Timeout   time.Duration `mapstructure:"timeout"`
+		// LockFile holds the path to the single-instance flock. Empty
+		// defaults to /var/lib/docktunnel/instance.lock.
+		LockFile string `mapstructure:"lockFile"`
 	} `mapstructure:"cleanup"`
 	Defaults struct {
 		Scheme string `mapstructure:"scheme"`
@@ -269,6 +272,7 @@ func New() (*Config, error) {
 	v.SetDefault("cleanup.onExit", false)
 	v.SetDefault("cleanup.strategy", "graceful-cleanup")
 	v.SetDefault("cleanup.timeout", 30*time.Second)
+	v.SetDefault("cleanup.lockFile", "/var/lib/docktunnel/instance.lock")
 	// Global defaults for label auto-detection fallback
 	v.SetDefault("defaults.scheme", "http") // 默认scheme (http, https, tcp)
 	v.SetDefault("defaults.port", 80)       // 默认端口
