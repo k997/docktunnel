@@ -18,7 +18,6 @@ import (
 	"github.com/cloudflare/cloudflare-go/v5"
 	"github.com/cloudflare/cloudflare-go/v5/dns"
 	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
-	eventTypes "github.com/docker/docker/api/types/events"
 
 	"docktunnel/internal/docker"
 )
@@ -86,6 +85,9 @@ type Controller struct {
 	// Updated after successful UpdateConfiguration calls.
 	actualStateMu        sync.RWMutex
 	lastKnownActualRules []diagnostics.RuleView
+
+	// Internal helpers (Phase 2 extraction)
+	dispatcher *dispatcher
 }
 
 // NewController 创建一个新的控制器实例
@@ -129,6 +131,8 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 
 	controller.syncWorker = newSyncWorker(controller.debounceDuration, controller.performSync, slog.Default())
 
+	controller.dispatcher = newDispatcher(controller)
+
 	return controller
 }
 
@@ -147,38 +151,7 @@ func (c *Controller) StopSyncWorker() {
 
 // Dispatch 是所有事件处理的统一入口
 func (c *Controller) Dispatch(ctx context.Context, event events.Event) error {
-	err := c.dispatchInner(ctx, event)
-
-	result := metrics.ResultSuccess
-	if err != nil {
-		result = metrics.ResultFailure
-	}
-	metrics.RecordEvent(string(event.Type), result)
-
-	return err
-}
-
-// dispatchInner is the original dispatch switch.
-func (c *Controller) dispatchInner(ctx context.Context, event events.Event) error {
-	switch event.Type {
-	case eventTypes.ActionStart:
-		return c.handleContainerStart(ctx, event)
-	case eventTypes.ActionStop:
-		return c.handleContainerStop(ctx, event)
-	case eventTypes.ActionDie:
-		return c.handleContainerStop(ctx, event)
-	case events.ActionHealthHealthy:
-		return c.handleHealthHealthy(ctx, event)
-	case events.ActionHealthUnhealthy:
-		return c.handleHealthUnhealthy(ctx, event)
-	case events.ActionHealthStarting:
-		return c.handleHealthUnhealthy(ctx, event)
-	case events.ActionResync:
-		return c.handleResync(ctx)
-	default:
-		// 忽略不关心的事件
-		return nil
-	}
+	return c.dispatcher.Dispatch(ctx, event)
 }
 
 // CleanupResources 清理创建的DNS记录
@@ -207,15 +180,10 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 	return nil
 }
 
-// isDocktunnelEnabled 检查容器是否启用了docktunnel
+// isDocktunnelEnabled delegates to dispatcher. Temporary; will be inlined
+// into handlers.go once handlers are extracted.
 func (c *Controller) isDocktunnelEnabled(event events.Event) bool {
-	// 检查容器信息是否存在
-	if event.ContainerInfo == nil || event.ContainerInfo.Config == nil || event.ContainerInfo.Config.Labels == nil {
-		return false
-	}
-
-	// 检查docktunnel.enable标签是否设置为true
-	return event.ContainerInfo.Config.Labels["docktunnel.enable"] == "true"
+	return c.dispatcher.isDocktunnelEnabled(event)
 }
 
 // registerContainerRules parses labels, validates, and registers ingress rules for a container.
