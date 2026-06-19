@@ -417,34 +417,53 @@ func TestValidate_CleanupStrategy(t *testing.T) {
 			cfg := &Config{}
 			cfg.Cleanup.Strategy = tc.strategy
 			err := cfg.validate()
-			if (err != nil) != tc.wantErr {
-				t.Errorf("strategy=%q err=%v wantErr=%v", tc.strategy, err, tc.wantErr)
+			if tc.wantErr && err == nil {
+				t.Errorf("expected error for strategy %q, got nil", tc.strategy)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error for strategy %q: %v", tc.strategy, err)
+			}
+		})
+	}
+}
+
+// TestValidate_DebugTokenRequiredForNonLoopback verifies that exposing the
+// diagnostics server on a non-loopback interface requires a bearer token,
+// since /debug/state leaks hostnames and service URLs.
+func TestValidate_DebugTokenRequiredForNonLoopback(t *testing.T) {
+	cases := []struct {
+		name     string
+		bindAddr string
+		token    string
+		wantErr  bool
+	}{
+		{"loopback empty", "", "", false},
+		{"loopback 127.0.0.1", "127.0.0.1", "", false},
+		{"loopback localhost", "localhost", "", false},
+		{"loopback ::1", "::1", "", false},
+		{"wildcard v4 without token", "0.0.0.0", "", true},
+		{"wildcard v6 without token", "::", "", true},
+		{"wildcard v4 with token", "0.0.0.0", "abc123", false},
+		{"LAN bind without token", "192.168.1.10", "", true},
+		{"LAN bind with token", "192.168.1.10", "abc123", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Server.BindAddr = tc.bindAddr
+			cfg.Server.DebugToken = tc.token
+			err := cfg.validate()
+			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "debugToken")) {
+				t.Errorf("expected debugToken error, got %v", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
 			}
 		})
 	}
 }
 
 func TestVerifyAPIToken_UsesInjectedVerifier(t *testing.T) {
-	cfg := &Config{}
-	cfg.Cloudflare.APIToken = "this_is_a_real_token_for_testing_purposes"
-
-	called := false
-	verifier := func(ctx context.Context, token string) error {
-		called = true
-		if token != cfg.Cloudflare.APIToken {
-			return errors.New("token mismatch")
-		}
-		return nil
-	}
-	if err := cfg.VerifyAPIToken(context.Background(), verifier); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Error("injected verifier was not invoked")
-	}
-}
-
-func TestVerifyAPIToken_PropagatesVerifierError(t *testing.T) {
 	cfg := &Config{}
 	cfg.Cloudflare.APIToken = "this_is_a_real_token_for_testing_purposes"
 

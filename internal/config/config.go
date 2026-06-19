@@ -87,8 +87,9 @@ type Config struct {
 		ValidateOnLoad bool `mapstructure:"validateOnLoad"`
 	} `mapstructure:"persistence"`
 	Server struct {
-		BindAddr string `mapstructure:"bindAddr"`
-		Port     int    `mapstructure:"port"`
+		BindAddr   string `mapstructure:"bindAddr"`
+		Port       int    `mapstructure:"port"`
+		DebugToken string `mapstructure:"debugToken"`
 	} `mapstructure:"server"`
 }
 
@@ -173,6 +174,17 @@ func (c *Config) GetServerAddr() string {
 		port = 9100
 	}
 	return fmt.Sprintf("%s:%d", addr, port)
+}
+
+// isLoopbackBind reports whether the bind address will only listen on the
+// local loopback interface. Empty defaults to loopback. Wildcards like
+// "0.0.0.0" or "::" are NOT loopback.
+func isLoopbackBind(addr string) bool {
+	switch addr {
+	case "", "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	return false
 }
 
 // GetOriginRequestDefaults 获取OriginRequest默认配置 (T082)
@@ -370,6 +382,11 @@ func (c *Config) validate() error {
 
 	// Server
 	add(c.Server.Port < 0 || c.Server.Port > 65535, "server.port must be in [0,65535]")
+	// /debug/state leaks all hostnames and service URLs. Refuse to expose it
+	// on a non-loopback interface without a bearer token gating access.
+	if !isLoopbackBind(c.Server.BindAddr) && c.Server.DebugToken == "" {
+		errs = append(errs, "server.debugToken is required when server.bindAddr is not a loopback address (e.g. 127.0.0.1 / ::1 / localhost)")
+	}
 
 	if len(errs) == 0 {
 		return nil

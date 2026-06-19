@@ -141,7 +141,7 @@ func main() {
 		}
 	}()
 	// Start HTTP server for metrics and diagnostics (Phase 6)
-	debugServer := server.New(cfg.GetServerAddr(), controller.GetDebugState)
+	debugServer := server.New(cfg.GetServerAddr(), cfg.Server.DebugToken, controller.GetDebugState)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"time"
 
@@ -19,11 +20,12 @@ type Server struct {
 
 // New builds a Server with /metrics, /debug/state, and /healthz registered.
 // addr is host:port (e.g., "127.0.0.1:9100"). The snapshot function is called
-// on every /debug/state request and must be goroutine-safe.
-func New(addr string, snapshot func() diagnostics.DebugStateResponse) *Server {
+// on every /debug/state request and must be goroutine-safe. debugToken, when
+// non-empty, gates /debug/state behind a bearer-token check.
+func New(addr string, debugToken string, snapshot func() diagnostics.DebugStateResponse) *Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
-	mux.Handle("/debug/state", diagnostics.Handler(snapshot))
+	mux.Handle("/debug/state", debugStateHandler(debugToken, snapshot))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -34,7 +36,56 @@ func New(addr string, snapshot func() diagnostics.DebugStateResponse) *Server {
 			Addr:              addr,
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		},
+	}
+}
+
+// debugStateHandler wraps the snapshot handler with GET-only enforcement,
+// optional bearer-token auth, and a hard timeout so a slow snapshot() can't
+// hold a connection (and an FD) indefinitely. The 5s budget is well above the
+// expected p99 of reading state under the controller mutex but small enough
+// that a wedged lock surfaces as a 503 rather than resource exhaustion.
+func debugStateHandler(token string, snapshot func() diagnostics.DebugStateResponse) http.Handler {
+	h := http.TimeoutHandler(
+		diagnostics.Handler(snapshot),
+		5*time.Second,
+		`{"error":"snapshot timeout"}`,
+	)
+	if token == "" {
+		// Still require GET — POST/PUT shouldn't be accepted on a read endpoint.
+		return getOnly(h)
+	}
+	return getOnly(bearerAuth(token, h))
+}
+
+// bearerAuth rejects requests whose Authorization header doesn't match
+// "Bearer <token>". Uses constant-time comparison to avoid leaking the token
+// via timing.
+func bearerAuth(token string, next http.Handler) http.HandlerFunc {
+	expected := "Bearer " + token
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("Authorization")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="docktunnel"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+// getOnly rejects any method other than GET/HEAD with 405.
+func getOnly(next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		next.ServeHTTP(w, r)
 	}
 }
 
