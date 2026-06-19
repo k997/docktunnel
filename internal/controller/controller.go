@@ -88,6 +88,7 @@ type Controller struct {
 
 	// Internal helpers (Phase 2 extraction)
 	dispatcher *dispatcher
+	reconciler *reconciler
 }
 
 // NewController 创建一个新的控制器实例
@@ -132,6 +133,7 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 	controller.syncWorker = newSyncWorker(controller.debounceDuration, controller.performSync, slog.Default())
 
 	controller.dispatcher = newDispatcher(controller)
+	controller.reconciler = newReconciler(controller, slog.Default())
 
 	return controller
 }
@@ -1023,124 +1025,23 @@ func (c *Controller) handleHealthUnhealthy(ctx context.Context, event events.Eve
 
 // handleResync performs a full state synchronization after Docker daemon reconnection.
 func (c *Controller) handleResync(ctx context.Context) error {
-	slog.Info("Handling resync event after Docker reconnection")
-	return c.Sync(ctx)
+	return c.reconciler.handleResync(ctx)
 }
 
 // Reconcile computes desired state from running containers plus retaining entries,
 // diffs against current state, and syncs only on drift.
 func (c *Controller) Reconcile(ctx context.Context) error {
-	if c.dockerManager == nil {
-		return nil
-	}
-
-	tunnel := c.cloudflareManager.GetTunnel()
-	if tunnel == nil {
-		return fmt.Errorf("tunnel is not available")
-	}
-
-	// 1. Scan running containers → build desired active rules
-	eventsList, err := c.dockerManager.ScanRunningContainers(ctx)
-	if err != nil {
-		return fmt.Errorf("reconcile scan failed: %w", err)
-	}
-
-	desiredRules := make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
-	desiredContainerRules := make(map[string][]string)
-
-	for _, event := range eventsList {
-		if !c.isDocktunnelEnabled(event) {
-			continue
-		}
-		parsedRules, err := label.Parse(event.ContainerInfo)
-		if err != nil {
-			slog.Error("Failed to parse labels during reconcile",
-				"action", "parse_labels",
-				"result", "failure",
-				"containerID", event.ContainerID,
-				"error", err)
-			continue
-		}
-
-		var hostnames []string
-		for _, rule := range parsedRules {
-			if rule.Hostname.Value != "" {
-				desiredRules[rule.Hostname.Value] = *rule
-				hostnames = append(hostnames, rule.Hostname.Value)
-			}
-		}
-		if len(hostnames) > 0 {
-			desiredContainerRules[event.ContainerID] = hostnames
-		}
-	}
-
-	// 2. Preserve retaining rules (in ingressRules but not in containerRules)
-	c.mu.RLock()
-	currentContainerHostnames := make(map[string]bool)
-	for _, hostnames := range c.containerRules {
-		for _, h := range hostnames {
-			currentContainerHostnames[h] = true
-		}
-	}
-	for hostname, rule := range c.ingressRules {
-		if !currentContainerHostnames[hostname] {
-			if _, inDesired := desiredRules[hostname]; !inDesired {
-				desiredRules[hostname] = rule
-			}
-		}
-	}
-	c.mu.RUnlock()
-
-	// 3. Diff desired vs current
-	c.mu.RLock()
-	hasDiff := len(desiredRules) != len(c.ingressRules)
-	if !hasDiff {
-		for hostname, desiredRule := range desiredRules {
-			existing, exists := c.ingressRules[hostname]
-			if !exists || existing.Service.Value != desiredRule.Service.Value {
-				hasDiff = true
-				break
-			}
-		}
-	}
-	c.mu.RUnlock()
-
-	if !hasDiff {
-		slog.Debug("Reconcile: no drift detected")
-		return nil
-	}
-
-	slog.Info("Reconcile: drift detected, syncing",
-		"current_rules", len(c.ingressRules),
-		"desired_rules", len(desiredRules))
-
-	// 4. Apply desired state
-	c.mu.Lock()
-	c.ingressRules = desiredRules
-	c.containerRules = desiredContainerRules
-	c.mu.Unlock()
-
-	if err := c.syncToCloudflare(ctx); err != nil {
-		return err
-	}
-
-	c.refreshActualState(ctx)
-
-	return nil
+	return c.reconciler.Reconcile(ctx)
 }
 
 // ReconcileEnabled returns whether periodic reconciliation is enabled.
 func (c *Controller) ReconcileEnabled() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.reconcileEnabled
+	return c.reconciler.ReconcileEnabled()
 }
 
 // ReconcileInterval returns the reconciliation interval.
 func (c *Controller) ReconcileInterval() time.Duration {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.reconcileInterval
+	return c.reconciler.ReconcileInterval()
 }
 
 // GetDebugState returns the current desired vs actual state for the /debug/state endpoint.
