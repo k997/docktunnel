@@ -448,9 +448,26 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 
 // ExecuteAction executes a single action (e.g., delete route and sync).
 // Used by the compensation queue to retry failed actions.
+//
+// Race guard: before deleting the ingress rule for a hostname, check whether
+// the rule is still registered. If a stop event enqueued this delete and the
+// container then restarted (handleContainerStart re-added the same hostname
+// at controller.go:224), the queued delete would otherwise fire after the
+// container is back up and remove the live route. Skipping the delete when
+// the rule is present lets the start path win.
 func (c *Controller) ExecuteAction(ctx context.Context, action types.Action) error {
 	if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
 		c.mu.Lock()
+		_, stillRegistered := c.ingressRules[action.Hostname]
+		if stillRegistered {
+			c.mu.Unlock()
+			slog.Info("Skipping compensation delete: hostname is currently registered (container likely restarted)",
+				"action", action.Kind,
+				"hostname", action.Hostname,
+				"container_id", action.ContainerID,
+			)
+			return nil
+		}
 		delete(c.ingressRules, action.Hostname)
 		c.mu.Unlock()
 	}

@@ -331,7 +331,12 @@ func (sm *Manager) GetAllPendingDeletions() map[string]*types.TunnelEntry {
 	return result
 }
 
-// RestoreActiveTunnel moves all pending deletion entries for a container back to active
+// RestoreActiveTunnel moves all pending deletion entries for a container back to active.
+//
+// Also cancels any pending ActionDeleteRoute records for the container: if a
+// stop event enqueued a delete and the container came back before the
+// compensation queue ran, the queued delete would otherwise fire after
+// handleContainerStart re-registered the route, deleting a live route.
 func (sm *Manager) RestoreActiveTunnel(containerID string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -348,10 +353,22 @@ func (sm *Manager) RestoreActiveTunnel(containerID string) error {
 		}
 	}
 
-	if found {
+	// Cancel pending delete-route compensation records for this container.
+	// Without this, a stop-then-start cycle could leave a stale delete in the
+	// queue that fires after the container has re-registered its route.
+	cancelledActions := 0
+	for id, rec := range sm.pendingActions {
+		if rec.Action.ContainerID == containerID && rec.Action.Kind == types.ActionDeleteRoute {
+			delete(sm.pendingActions, id)
+			cancelledActions++
+		}
+	}
+
+	if found || cancelledActions > 0 {
 		sm.markDirty()
 		sm.logger.Info("Restored tunnel(s) to active",
 			"container_id", containerID,
+			"cancelled_pending_deletes", cancelledActions,
 		)
 	}
 
@@ -465,30 +482,53 @@ func (sm *Manager) GetFlappingState(containerID string) (types.FlappingState, bo
 	return state, ok
 }
 
-// GetSnapshot returns a snapshot of the current state
+// GetSnapshot returns a snapshot of the current state.
+//
+// Map values are deep-copied: *TunnelEntry and *CompensationRecord are cloned
+// by value under the read lock. Save/SaveJSON runs gob encoding outside this
+// lock, so without deep copies the encoder would race with concurrent
+// mutations (transitionStoppedLocked mutating entry.Status, etc.) and could
+// emit a torn snapshot.
 func (sm *Manager) GetSnapshot() *types.StateSnapshot {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	// Create deep copies of maps
 	activeTunnels := make(map[string]*types.TunnelEntry, len(sm.activeTunnels))
 	for k, v := range sm.activeTunnels {
-		activeTunnels[k] = v
+		copied := *v
+		if v.DeletedAt != nil {
+			t := *v.DeletedAt
+			copied.DeletedAt = &t
+		}
+		activeTunnels[k] = &copied
 	}
 
 	pendingDeletions := make(map[string]*types.TunnelEntry, len(sm.pendingDeletes))
 	for k, v := range sm.pendingDeletes {
-		pendingDeletions[k] = v
+		copied := *v
+		if v.DeletedAt != nil {
+			t := *v.DeletedAt
+			copied.DeletedAt = &t
+		}
+		pendingDeletions[k] = &copied
 	}
 
 	flappingContainers := make(map[string]types.FlappingState, len(sm.flappingContainers))
 	for k, v := range sm.flappingContainers {
+		// FlappingState has a []time.Time slice — copy it so callers appending
+		// to the original don't mutate the snapshot.
+		if v.Transitions != nil {
+			t := make([]time.Time, len(v.Transitions))
+			copy(t, v.Transitions)
+			v.Transitions = t
+		}
 		flappingContainers[k] = v
 	}
 
 	pendingActions := make(map[string]*types.CompensationRecord, len(sm.pendingActions))
 	for k, v := range sm.pendingActions {
-		pendingActions[k] = v
+		copied := *v
+		pendingActions[k] = &copied
 	}
 
 	return &types.StateSnapshot{
@@ -618,13 +658,20 @@ func (sm *Manager) RunGC(ctx context.Context) ([]*types.TunnelEntry, error) {
 	}
 
 	// Clean up expired flapping states
+	flappingRemoved := 0
 	for containerID, state := range sm.flappingContainers {
 		if now.After(state.CoolingUntil) {
 			delete(sm.flappingContainers, containerID)
+			flappingRemoved++
 			sm.logger.Debug("Removed expired flapping state",
 				"container_id", containerID,
 			)
 		}
+	}
+	if flappingRemoved > 0 {
+		// Must mark dirty: without it, SaveIfDirty skips writing and the
+		// expired flapping state reappears from the on-disk snapshot on restart.
+		sm.markDirty()
 	}
 
 	return expiredEntries, nil
@@ -794,12 +841,12 @@ func (sm *Manager) RunCompensation(ctx context.Context, executor func(types.Acti
 func (sm *Manager) processCompensationQueue(executor func(types.Action) error) {
 	sm.mu.Lock()
 
-	now := time.Now()
 	for id, rec := range sm.pendingActions {
 		if rec.Dead {
 			continue
 		}
-		if now.Before(rec.NextRetryAt) {
+		// 使用进入循环时的时间判断是否到期
+		if time.Now().Before(rec.NextRetryAt) {
 			continue
 		}
 
@@ -856,7 +903,9 @@ func (sm *Manager) processCompensationQueue(executor func(types.Action) error) {
 		if backoff > sm.compMaxDelay {
 			backoff = sm.compMaxDelay
 		}
-		rec.NextRetryAt = now.Add(backoff)
+		// 重新取 now：executor 可能很慢（涉及 CF API 调用），用循环入口的 now
+		// 会让 NextRetryAt 偏早，多次慢重试后 backoff 失真叠加。
+		rec.NextRetryAt = time.Now().Add(backoff)
 		sm.markDirty()
 		sm.logger.Warn("Compensation action failed, will retry",
 			"action", action.Kind,

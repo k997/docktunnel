@@ -886,3 +886,35 @@ func TestSetLastKnownActualRules_UpdatesCache(t *testing.T) {
 		t.Errorf("ActualState = %v, want single a.com", resp.ActualState)
 	}
 }
+
+// TestExecuteAction_SkipsDeleteWhenHostnameIsRegistered verifies that the
+// compensation queue cannot delete a route that's been re-registered by a
+// container restart. Without this guard, a stop-then-start cycle could
+// leave a queued delete that fires after the container is back up and
+// removes the live route (controller.go ExecuteAction).
+func TestExecuteAction_SkipsDeleteWhenHostnameIsRegistered(t *testing.T) {
+	c := &Controller{
+		ingressRules: map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{},
+		stateManager: state.NewManager(slog.Default()),
+	}
+	c.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("app.example.com"),
+		Service:  cloudflare.F("http://localhost:8080"),
+	}
+
+	// cfManager is nil but ExecuteAction should return before calling sync
+	// (we'd panic on nil deref if it didn't skip).
+	err := c.ExecuteAction(context.Background(), types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c1",
+		Hostname:    "app.example.com",
+	})
+	if err != nil {
+		t.Errorf("expected nil error when skipping, got %v", err)
+	}
+
+	// Rule must still be present
+	if _, ok := c.ingressRules["app.example.com"]; !ok {
+		t.Error("ingress rule was deleted despite hostname being registered")
+	}
+}

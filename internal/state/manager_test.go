@@ -909,3 +909,170 @@ func TestLoadFromSnapshot_MigratesV1EmptyServiceName(t *testing.T) {
 		t.Errorf("expected ServiceName='default', got %s", entry.ServiceName)
 	}
 }
+
+func TestGetSnapshot_DeepCopiesTunnelEntry(t *testing.T) {
+	sm := NewManager(slog.Default())
+	deletedAt := time.Now().UTC()
+	entry := &types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		DeletedAt:   &deletedAt,
+	}
+	sm.AddActiveTunnel(entry)
+
+	snap := sm.GetSnapshot()
+	got := snap.ActiveTunnels["c1:web"]
+
+	// Mutate the snapshot; original must be untouched
+	got.Status = types.StatusDeleted
+	*got.DeletedAt = time.Time{}
+	got.ContainerID = "MUTATED"
+
+	orig, ok := sm.GetActiveTunnel("c1", "web")
+	if !ok {
+		t.Fatal("entry disappeared from active map")
+	}
+	if orig.Status != types.StatusActive {
+		t.Errorf("snapshot mutation leaked into live state: status=%v", orig.Status)
+	}
+	if orig.ContainerID != "c1" {
+		t.Errorf("snapshot mutation leaked into live state: ContainerID=%s", orig.ContainerID)
+	}
+	if orig.DeletedAt == nil || !orig.DeletedAt.Equal(deletedAt) {
+		t.Errorf("DeletedAt should be preserved; got %v", orig.DeletedAt)
+	}
+}
+
+func TestGetSnapshot_DeepCopiesCompensationRecord(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c1",
+		Hostname:    "app.example.com",
+	}, errorsNew("transient"))
+
+	snap := sm.GetSnapshot()
+	if len(snap.PendingActions) != 1 {
+		t.Fatalf("expected 1 pending action, got %d", len(snap.PendingActions))
+	}
+	for _, rec := range snap.PendingActions {
+		rec.RetryCount = 999
+		rec.Action.Hostname = "MUTATED"
+	}
+
+	// Live state must be untouched
+	for _, rec := range sm.GetAllPendingActions() {
+		if rec.RetryCount == 999 {
+			t.Error("snapshot mutation leaked: RetryCount=999")
+		}
+		if rec.Action.Hostname == "MUTATED" {
+			t.Error("snapshot mutation leaked: Hostname=MUTATED")
+		}
+	}
+}
+
+func TestGetSnapshot_DeepCopiesFlappingTransitions(t *testing.T) {
+	sm := NewManager(slog.Default())
+	now := time.Now()
+	sm.flappingContainers["c1"] = types.FlappingState{
+		Transitions: []time.Time{now, now.Add(time.Second)},
+	}
+
+	snap := sm.GetSnapshot()
+	snap.FlappingContainers["c1"].Transitions[0] = time.Time{}
+
+	// Original transitions slice must be untouched
+	orig := sm.flappingContainers["c1"]
+	if !orig.Transitions[0].Equal(now) {
+		t.Errorf("snapshot mutation leaked into live state: first transition = %v, want %v",
+			orig.Transitions[0], now)
+	}
+}
+
+func TestRestoreActiveTunnel_CancelsPendingDeleteActions(t *testing.T) {
+	sm := NewManager(slog.Default())
+	// Simulate a stop that enqueued a delete, before the container comes back
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c1",
+		ServiceName: "web",
+		Hostname:    "app.example.com",
+	}, errorsNew("transient"))
+
+	if len(sm.GetAllPendingActions()) != 1 {
+		t.Fatal("expected 1 pending action before restore")
+	}
+
+	// Now restore — pending action must be cancelled
+	if err := sm.RestoreActiveTunnel("c1"); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+
+	if got := len(sm.GetAllPendingActions()); got != 0 {
+		t.Errorf("expected 0 pending actions after restore, got %d", got)
+	}
+}
+
+func TestRestoreActiveTunnel_PreservesOtherContainersActions(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c1",
+		ServiceName: "web",
+		Hostname:    "app.example.com",
+	}, errorsNew("transient"))
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c2",
+		ServiceName: "web",
+		Hostname:    "other.example.com",
+	}, errorsNew("transient"))
+
+	if err := sm.RestoreActiveTunnel("c1"); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+
+	// Only c1 should be cancelled; c2 untouched
+	pending := sm.GetAllPendingActions()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending action for c2, got %d", len(pending))
+	}
+	if pending[0].Action.ContainerID != "c2" {
+		t.Errorf("expected c2 to remain, got %s", pending[0].Action.ContainerID)
+	}
+}
+
+func TestRunGC_FlappingExpirationMarksDirty(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.flappingContainers["c1"] = types.FlappingState{
+		CoolingUntil: time.Now().Add(-time.Minute), // already expired
+	}
+
+	// Force a "save" via the dirty flag check
+	sm.mu.Lock()
+	sm.dirty = false
+	sm.mu.Unlock()
+
+	if _, err := sm.RunGC(context.Background()); err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	sm.mu.RLock()
+	dirty := sm.dirty
+	sm.mu.RUnlock()
+	if !dirty {
+		t.Error("RunGC should mark dirty when removing expired flapping state")
+	}
+
+	if _, exists := sm.flappingContainers["c1"]; exists {
+		t.Error("expired flapping state should be removed")
+	}
+}
+
+// errorsNew is a tiny helper so we don't have to import "errors" in every test file.
+func errorsNew(s string) error { return &simpleErr{msg: s} }
+
+type simpleErr struct{ msg string }
+
+func (e *simpleErr) Error() string { return e.msg }
