@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,9 +26,7 @@ type syncWorker struct {
 
 	started atomic.Bool
 
-	// lastErr / errMu will be replaced by atomic.Pointer in Task 5.
-	errMu   sync.RWMutex
-	lastErr error
+	lastErr atomic.Pointer[error]
 }
 
 func newSyncWorker(debounce time.Duration, syncFn func(context.Context) error, log *slog.Logger) *syncWorker {
@@ -82,7 +79,10 @@ func (w *syncWorker) FlushSync(ctx context.Context) error {
 
 	select {
 	case <-myDone:
-		return w.loadErr()
+		if p := w.lastErr.Load(); p != nil {
+			return *p
+		}
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -151,7 +151,7 @@ func (w *syncWorker) runOnce(ctx context.Context, heldFlushers []chan struct{}) 
 		if r := recover(); r != nil {
 			w.log.Error("syncFn panic recovered", "panic", r)
 			err := fmt.Errorf("sync panicked: %v", r)
-			w.storeErr(err)
+			w.lastErr.Store(&err)
 		}
 		// Close all flushers (held + queued) so callers unblock on
 		// both panic and normal paths.
@@ -161,23 +161,10 @@ func (w *syncWorker) runOnce(ctx context.Context, heldFlushers []chan struct{}) 
 		w.drainFlushers()
 	}()
 	err := w.syncFn(ctx)
-	w.storeErr(err)
+	w.lastErr.Store(&err)
 	if err != nil {
 		w.log.Warn("sync failed; will retry on next trigger", "error", err)
 	}
-}
-
-func (w *syncWorker) storeErr(err error) {
-	// Will be replaced by atomic.Pointer store in Task 5.
-	w.errMu.Lock()
-	w.lastErr = err
-	w.errMu.Unlock()
-}
-
-func (w *syncWorker) loadErr() error {
-	w.errMu.RLock()
-	defer w.errMu.RUnlock()
-	return w.lastErr
 }
 
 func (w *syncWorker) drainFlushers() {
