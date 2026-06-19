@@ -258,6 +258,18 @@ func main() {
 		}
 	}()
 
+	// Start the sync worker. Wrapper goroutine exists so wg.Wait() in
+	// shutdown blocks until the worker has fully stopped, not just
+	// until Start returns.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		appLogger.Info("Starting sync worker")
+		controller.Start(ctx)
+		<-ctx.Done()
+		controller.StopSyncWorker()
+	}()
+
 	// Start compensation queue background loop
 	wg.Add(1)
 	go func() {
