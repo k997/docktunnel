@@ -44,14 +44,6 @@ type ControllerOptions struct {
 	ReconcileInterval time.Duration
 }
 
-// ContainerHealth 记录容器的健康状态信息
-type ContainerHealth struct {
-	RestartCount int       // 重启次数
-	LastRestart  time.Time // 上次重启时间
-	IsFlapping   bool      // 是否处于抖动状态
-	CoolingUntil time.Time // 冷却期结束时间
-}
-
 // Controller 负责协调Docker和Cloudflare模块的工作
 type Controller struct {
 	dockerManager     *docker.Manager
@@ -63,7 +55,9 @@ type Controller struct {
 	ruleValidator     RuleValidator
 	mu                sync.RWMutex
 
-	// 熔断器配置
+	// 熔断器配置 — retained on Controller for &Controller{} test-literal
+	// compat (see TestNewController, TestStartupReconciliation). Production
+	// access is via healthTracker methods (health.go).
 	flappingWindow    time.Duration // 检测窗口期
 	flappingThreshold int           // 窗口期内重启阈值
 	coolingPeriod     time.Duration // 基础冷却期
@@ -85,6 +79,7 @@ type Controller struct {
 	compensation      *compensation
 	diagnosticsHelper *diagnosticsHelper
 	syncer            *syncer
+	healthTracker     *healthTracker
 }
 
 // NewController 创建一个新的控制器实例
@@ -134,6 +129,7 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 	controller.gc = newGC(controller, slog.Default())
 	controller.compensation = newCompensation(controller, slog.Default())
 	controller.diagnosticsHelper = newDiagnosticsHelper(controller)
+	controller.healthTracker = newHealthTracker(controller, slog.Default())
 
 	return controller
 }
@@ -264,9 +260,7 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 		c.stateManager.AddActiveTunnel(tunnelEntry)
 	}
 
-	c.mu.Lock()
 	c.updateContainerHealth(event.ContainerID, true)
-	c.mu.Unlock()
 
 	return c.syncToCloudflare(ctx)
 }
@@ -409,8 +403,8 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 			delete(c.ingressRules, action.Hostname)
 		}
 	}
-	c.updateContainerHealth(event.ContainerID, false)
 	c.mu.Unlock()
+	c.updateContainerHealth(event.ContainerID, false)
 
 	if err := c.syncToCloudflare(ctx); err != nil {
 		// Sync failed — enqueue actions for retry
@@ -493,69 +487,20 @@ func (c *Controller) setLastKnownActualRules(rules []diagnostics.RuleView) {
 	c.syncer.setLastKnownActualRules(rules)
 }
 
-// isFlapping 检查容器是否处于抖动状态
+// isFlapping delegates to healthTracker.
 func (c *Controller) isFlapping(containerID string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	health, exists := c.containerHealth[containerID]
-	if !exists {
-		return false
+	if c.healthTracker == nil {
+		c.healthTracker = newHealthTracker(c, slog.Default())
 	}
-
-	// 检查是否在冷却期内
-	if health.IsFlapping && time.Now().Before(health.CoolingUntil) {
-		return true
-	}
-
-	return false
+	return c.healthTracker.isFlapping(containerID)
 }
 
-// updateContainerHealth 更新容器健康状态
+// updateContainerHealth delegates to healthTracker.
 func (c *Controller) updateContainerHealth(containerID string, isStartEvent bool) {
-	now := time.Now()
-
-	health, exists := c.containerHealth[containerID]
-	if !exists {
-		health = &ContainerHealth{}
-		c.containerHealth[containerID] = health
+	if c.healthTracker == nil {
+		c.healthTracker = newHealthTracker(c, slog.Default())
 	}
-
-	if isStartEvent {
-		// 如果是启动事件，检查是否在窗口期内
-		if now.Sub(health.LastRestart) <= c.flappingWindow {
-			health.RestartCount++
-
-			// 如果重启次数超过阈值，标记为抖动状态
-			if health.RestartCount >= c.flappingThreshold {
-				health.IsFlapping = true
-				// 计算冷却期（指数退避，但不超过最大冷却期）
-				coolingMultiplier := 1 << uint(health.RestartCount-c.flappingThreshold)
-				coolingDuration := min(time.Duration(coolingMultiplier)*c.coolingPeriod, c.maxCoolingPeriod)
-				health.CoolingUntil = now.Add(coolingDuration)
-
-				slog.Warn("Container marked as flapping",
-					"containerID", containerID,
-					"restartCount", health.RestartCount,
-					"coolingUntil", health.CoolingUntil)
-			}
-		} else {
-			// 重置重启计数
-			health.RestartCount = 1
-		}
-
-		health.LastRestart = now
-	} else {
-		// 如果是停止事件，不更新重启计数，但可以记录日志
-		slog.Debug("Container stopped", "containerID", containerID)
-	}
-
-	// 检查是否已经过了冷却期
-	if health.IsFlapping && now.After(health.CoolingUntil) {
-		health.IsFlapping = false
-		health.RestartCount = 0
-		slog.Info("Container cooling period ended, flapping status reset", "containerID", containerID)
-	}
+	c.healthTracker.updateContainerHealth(containerID, isStartEvent)
 }
 
 // RunGarbageCollection runs garbage collection for expired retention policies.
