@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"log/slog"
 	"time"
 
 	"docktunnel/internal/diagnostics"
@@ -19,11 +20,14 @@ func newDiagnosticsHelper(c *Controller) *diagnosticsHelper {
 
 // GetDebugState returns the current desired vs actual state for the /debug/state endpoint.
 func (d *diagnosticsHelper) GetDebugState() diagnostics.DebugStateResponse {
-	d.c.actualStateMu.RLock()
-	defer d.c.actualStateMu.RUnlock()
+	if d.c.syncer == nil {
+		d.c.syncer = newSyncer(d.c, slog.Default())
+	}
+	d.c.syncer.actualStateMu.RLock()
+	defer d.c.syncer.actualStateMu.RUnlock()
 
 	desired := d.snapshotRuleViewsLocked()
-	actual := d.c.lastKnownActualRules
+	actual := d.c.syncer.lastKnownActualRules
 	source := "empty"
 	if actual != nil {
 		source = "live_cache"
