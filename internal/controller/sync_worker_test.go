@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -105,8 +106,9 @@ func TestSyncWorker_ShutdownClean(t *testing.T) {
 func TestSyncWorker_FlushSyncBlocks(t *testing.T) {
 	syncStarted := make(chan struct{})
 	syncProceed := make(chan struct{})
+	var startedOnce sync.Once
 	w := newTestWorker(t, 5*time.Millisecond, func(context.Context) error {
-		close(syncStarted)
+		startedOnce.Do(func() { close(syncStarted) })
 		<-syncProceed
 		return nil
 	})
