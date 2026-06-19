@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync/atomic"
 	"testing"
@@ -99,6 +100,83 @@ func TestSyncWorker_ShutdownClean(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Stop() did not return within 500ms of ctx cancel")
 	}
+}
+
+func TestSyncWorker_FlushSyncBlocks(t *testing.T) {
+	syncStarted := make(chan struct{})
+	syncProceed := make(chan struct{})
+	w := newTestWorker(t, 5*time.Millisecond, func(context.Context) error {
+		close(syncStarted)
+		<-syncProceed
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	w.Start(ctx)
+	defer w.Stop()
+	defer cancel()
+
+	w.TriggerSync()
+	<-syncStarted // wait for syncFn to be in flight
+
+	flushDone := make(chan struct{})
+	go func() {
+		_ = w.FlushSync(ctx)
+		close(flushDone)
+	}()
+
+	select {
+	case <-flushDone:
+		t.Fatal("FlushSync returned before syncFn finished")
+	case <-time.After(20 * time.Millisecond):
+		// expected: FlushSync is blocking
+	}
+
+	close(syncProceed) // release syncFn
+	select {
+	case <-flushDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("FlushSync did not return within 500ms after syncFn finished")
+	}
+}
+
+func TestSyncWorker_FlushSyncReturnsSyncErr(t *testing.T) {
+	sentinel := errors.New("boom")
+	w := newTestWorker(t, 5*time.Millisecond, func(context.Context) error {
+		return sentinel
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	w.Start(ctx)
+	defer w.Stop()
+	defer cancel()
+
+	w.TriggerSync()
+	err := w.FlushSync(ctx)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected FlushSync to return sentinel error, got %v", err)
+	}
+}
+
+func TestSyncWorker_FlushSyncCtxTimeout(t *testing.T) {
+	proceed := make(chan struct{})
+	w := newTestWorker(t, 5*time.Millisecond, func(context.Context) error {
+		<-proceed
+		return nil
+	})
+	bg, bgCancel := context.WithCancel(context.Background())
+	w.Start(bg)
+	defer w.Stop()
+	defer bgCancel()
+
+	w.TriggerSync()
+	time.Sleep(20 * time.Millisecond) // let syncFn block on proceed
+
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer flushCancel()
+	err := w.FlushSync(flushCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected DeadlineExceeded, got %v", err)
+	}
+	close(proceed)
 }
 
 // keep atomic import used; will be referenced by later tests

@@ -68,8 +68,28 @@ func (w *syncWorker) FlushSync(ctx context.Context) error {
 	if !w.started.Load() {
 		return errWorkerNotStarted
 	}
-	// Will be filled in by Task 3 — for now, return not-implemented.
-	return errors.New("FlushSync not implemented yet")
+	myDone := make(chan struct{})
+
+	// Ensure worker has something to do.
+	select {
+	case w.triggerCh <- struct{}{}:
+	default:
+	}
+
+	// Register our completion channel. May block briefly if another
+	// flusher is mid-register; that's fine.
+	select {
+	case w.flushQueue <- myDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case <-myDone:
+		return w.loadErr()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Stop blocks until the worker goroutine has exited. Returns
@@ -148,5 +168,12 @@ func (w *syncWorker) loadErr() error {
 }
 
 func (w *syncWorker) drainFlushers() {
-	// Filled in by Task 3.
+	for {
+		select {
+		case done := <-w.flushQueue:
+			close(done)
+		default:
+			return
+		}
+	}
 }
