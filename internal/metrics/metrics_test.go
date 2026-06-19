@@ -76,3 +76,55 @@ func TestAddGCDeletions_IgnoresNonPositive(t *testing.T) {
 func TestObserveSyncDuration_RecordsDuration(t *testing.T) {
 	ObserveSyncDuration(0.456)
 }
+
+// TestRecordEvent_BoundsResultCardinality verifies that an arbitrary string
+// (e.g. err.Error() containing a Cloudflare request ID) collapses to the
+// "unknown" bucket instead of creating a new time series per request.
+func TestRecordEvent_BoundsResultCardinality(t *testing.T) {
+	beforeUnknown := testutil.ToFloat64(EventsTotal.WithLabelValues("start", "unknown"))
+	beforeGarbage := testutil.ToFloat64(EventsTotal.WithLabelValues("start", "some-cloudflare-request-id-abc123"))
+
+	RecordEvent("start", "some-cloudflare-request-id-abc123")
+
+	afterUnknown := testutil.ToFloat64(EventsTotal.WithLabelValues("start", "unknown"))
+	afterGarbage := testutil.ToFloat64(EventsTotal.WithLabelValues("start", "some-cloudflare-request-id-abc123"))
+
+	if afterUnknown-beforeUnknown != 1 {
+		t.Errorf("expected unknown bucket to absorb the bad label by +1, got delta=%v", afterUnknown-beforeUnknown)
+	}
+	if afterGarbage-beforeGarbage != 0 {
+		t.Errorf("expected no new series for arbitrary result string, got delta=%v", afterGarbage-beforeGarbage)
+	}
+}
+
+// TestRecordEvent_BoundsEventTypeCardinality verifies the same protection
+// for the "type" label.
+func TestRecordEvent_BoundsEventTypeCardinality(t *testing.T) {
+	beforeUnknown := testutil.ToFloat64(EventsTotal.WithLabelValues("unknown", "success"))
+	beforeGarbage := testutil.ToFloat64(EventsTotal.WithLabelValues("some-future-event-type", "success"))
+
+	RecordEvent("some-future-event-type", "success")
+
+	afterUnknown := testutil.ToFloat64(EventsTotal.WithLabelValues("unknown", "success"))
+	afterGarbage := testutil.ToFloat64(EventsTotal.WithLabelValues("some-future-event-type", "success"))
+
+	if afterUnknown-beforeUnknown != 1 {
+		t.Errorf("expected unknown type bucket to absorb by +1, got delta=%v", afterUnknown-beforeUnknown)
+	}
+	if afterGarbage-beforeGarbage != 0 {
+		t.Errorf("expected no new series for arbitrary event type, got delta=%v", afterGarbage-beforeGarbage)
+	}
+}
+
+// TestRecordEvent_AcceptsAllEnumeratedResults verifies the closed set of
+// allowed results all pass through unchanged.
+func TestRecordEvent_AcceptsAllEnumeratedResults(t *testing.T) {
+	for _, r := range []string{ResultSuccess, ResultFailure, ResultSkipped, ResultDropped} {
+		before := testutil.ToFloat64(EventsTotal.WithLabelValues("start", r))
+		RecordEvent("start", r)
+		after := testutil.ToFloat64(EventsTotal.WithLabelValues("start", r))
+		if after-before != 1 {
+			t.Errorf("result=%q: expected delta=1, got %v", r, after-before)
+		}
+	}
+}

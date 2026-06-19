@@ -134,10 +134,9 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 func (c *Controller) Dispatch(ctx context.Context, event events.Event) error {
 	err := c.dispatchInner(ctx, event)
 
-	// Record outcome for /metrics (Phase 6)
-	result := "success"
+	result := metrics.ResultSuccess
 	if err != nil {
-		result = "failure"
+		result = metrics.ResultFailure
 	}
 	metrics.RecordEvent(string(event.Type), result)
 

@@ -8,6 +8,52 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Closed label sets for EventsTotal. Anything outside these sets gets bucketed
+// into "unknown" rather than producing a new Prometheus time series. This
+// matters because callers can plausibly pass err.Error() or arbitrary event
+// types — without this guard, a Cloudflare API error containing a request ID
+// would inflate cardinality by one series per request.
+
+const (
+	resultSuccess = "success"
+	resultFailure = "failure"
+	resultSkipped = "skipped"
+	resultDropped = "dropped"
+	resultUnknown = "unknown"
+)
+
+var allowedResults = map[string]struct{}{
+	resultSuccess: {},
+	resultFailure: {},
+	resultSkipped: {},
+	resultDropped: {},
+}
+
+var allowedEventTypes = map[string]struct{}{
+	"start":            {},
+	"stop":             {},
+	"die":              {},
+	"destroy":          {},
+	"health_healthy":   {},
+	"health_unhealthy": {},
+	"health_starting":  {},
+	"resync":           {},
+}
+
+func safeResultLabel(r string) string {
+	if _, ok := allowedResults[r]; ok {
+		return r
+	}
+	return resultUnknown
+}
+
+func safeEventTypeLabel(t string) string {
+	if _, ok := allowedEventTypes[t]; ok {
+		return t
+	}
+	return "unknown"
+}
+
 var (
 	// EventsTotal counts Docker events processed by Dispatch.
 	EventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -68,9 +114,18 @@ var (
 	})
 )
 
-// RecordEvent increments EventsTotal with the given labels.
+// RecordEvent increments EventsTotal with the given labels. Both labels are
+// constrained to closed sets; unknown values collapse to "unknown" rather
+// than creating a new time series. Use the Result* constants for result.
+const (
+	ResultSuccess = resultSuccess
+	ResultFailure = resultFailure
+	ResultSkipped = resultSkipped
+	ResultDropped = resultDropped
+)
+
 func RecordEvent(eventType, result string) {
-	EventsTotal.WithLabelValues(eventType, result).Inc()
+	EventsTotal.WithLabelValues(safeEventTypeLabel(eventType), safeResultLabel(result)).Inc()
 }
 
 // ObserveReconcile records a Reconcile cycle's duration in seconds.
