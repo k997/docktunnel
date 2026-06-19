@@ -58,11 +58,12 @@ controller:
 # 清理配置
 cleanup:
   # 程序退出时是否清理资源 (true/false)
-  # 默认值为 true，即默认清理资源
-  onExit: true
+  # 默认值为 false：进程崩溃/重启时拆 DNS 会让外部域名短暂不可达。
+  # 仅当确认希望退出时回收资源（如临时演示环境）才设为 true。
+  onExit: false
   # 状态文件路径 (用于持久化与清理追踪)
   stateFile: ""
-  # 清理策略: graceful-cleanup | none
+  # 清理策略: graceful-cleanup | force-cleanup | none
   strategy: "graceful-cleanup"
   # 清理超时时间
   timeout: 30s

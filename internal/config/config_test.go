@@ -1,7 +1,10 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,8 +133,8 @@ func TestLoadDefaultConfig(t *testing.T) {
 		t.Errorf("Expected default log format 'text', got '%s'", config.Log.Format)
 	}
 
-	if config.Cleanup.OnExit != true {
-		t.Errorf("Expected default cleanup on exit 'true', got '%v'", config.Cleanup.OnExit)
+	if config.Cleanup.OnExit != false {
+		t.Errorf("Expected default cleanup on exit 'false' (must opt-in to destructive cleanup), got '%v'", config.Cleanup.OnExit)
 	}
 
 	// Test new reconcile configuration defaults
@@ -341,5 +344,126 @@ func TestServerOverride(t *testing.T) {
 	addr := cfg.GetServerAddr()
 	if addr != "0.0.0.0:8080" {
 		t.Errorf("override addr = %q, want 0.0.0.0:8080", addr)
+	}
+}
+
+func TestValidate_RejectsNegativeDurations(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*Config)
+		want string
+	}{
+		{"negative retryDelay", func(c *Config) { c.Cloudflare.RetryDelay = -1 * time.Second }, "cloudflare.retryDelay"},
+		{"negative maxRetryDelay", func(c *Config) { c.Cloudflare.MaxRetryDelay = -1 * time.Second }, "cloudflare.maxRetryDelay"},
+		{"negative flappingWindow", func(c *Config) { c.Controller.FlappingWindow = -1 * time.Second }, "controller.flappingWindow"},
+		{"negative coolingPeriod", func(c *Config) { c.Controller.CoolingPeriod = -1 * time.Second }, "controller.coolingPeriod"},
+		{"negative debounce", func(c *Config) { c.Controller.DebounceDuration = -1 * time.Second }, "controller.debounceDuration"},
+		{"negative compensation pollInterval ignored when unconfigured", func(c *Config) {}, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			// Set sane non-zero defaults so we only trip the targeted rule
+			cfg.Controller.ReconcileEnabled = false
+			tc.mut(cfg)
+			err := cfg.validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestValidate_ReconcileRequiresPositiveInterval(t *testing.T) {
+	cfg := &Config{}
+	cfg.Controller.ReconcileEnabled = true
+	cfg.Controller.ReconcileInterval = 0
+	err := cfg.validate()
+	if err == nil || !strings.Contains(err.Error(), "reconcileInterval") {
+		t.Errorf("expected error about reconcileInterval, got %v", err)
+	}
+}
+
+func TestValidate_RetryDelayExceedingMax(t *testing.T) {
+	cfg := &Config{}
+	cfg.Cloudflare.RetryDelay = 60 * time.Second
+	cfg.Cloudflare.MaxRetryDelay = 10 * time.Second
+	err := cfg.validate()
+	if err == nil || !strings.Contains(err.Error(), "retryDelay must not exceed") {
+		t.Errorf("expected error about retryDelay exceeding max, got %v", err)
+	}
+}
+
+func TestValidate_CleanupStrategy(t *testing.T) {
+	cases := []struct {
+		strategy string
+		wantErr  bool
+	}{
+		{"", false}, // treated as graceful-cleanup by caller
+		{"graceful-cleanup", false},
+		{"force-cleanup", false},
+		{"none", false},
+		{"bogus", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.strategy, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Cleanup.Strategy = tc.strategy
+			err := cfg.validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("strategy=%q err=%v wantErr=%v", tc.strategy, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestVerifyAPIToken_UsesInjectedVerifier(t *testing.T) {
+	cfg := &Config{}
+	cfg.Cloudflare.APIToken = "this_is_a_real_token_for_testing_purposes"
+
+	called := false
+	verifier := func(ctx context.Context, token string) error {
+		called = true
+		if token != cfg.Cloudflare.APIToken {
+			return errors.New("token mismatch")
+		}
+		return nil
+	}
+	if err := cfg.VerifyAPIToken(context.Background(), verifier); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !called {
+		t.Error("injected verifier was not invoked")
+	}
+}
+
+func TestVerifyAPIToken_PropagatesVerifierError(t *testing.T) {
+	cfg := &Config{}
+	cfg.Cloudflare.APIToken = "this_is_a_real_token_for_testing_purposes"
+
+	want := errors.New("simulated 401")
+	verifier := func(ctx context.Context, token string) error { return want }
+	if err := cfg.VerifyAPIToken(context.Background(), verifier); !errors.Is(err, want) {
+		t.Errorf("expected %v, got %v", want, err)
+	}
+}
+
+func TestVerifyAPIToken_FailsFormatCheckFirst(t *testing.T) {
+	cfg := &Config{}
+	cfg.Cloudflare.APIToken = "short"
+
+	verifier := func(ctx context.Context, token string) error {
+		t.Error("verifier should not be called when format check fails")
+		return nil
+	}
+	if err := cfg.VerifyAPIToken(context.Background(), verifier); err == nil {
+		t.Error("expected format error, got nil")
 	}
 }

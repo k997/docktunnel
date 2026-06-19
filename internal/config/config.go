@@ -1,7 +1,11 @@
 package config
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -248,7 +252,9 @@ func New() (*Config, error) {
 	v.SetDefault("controller.debounceDuration", 2*time.Second)    // 默认防抖延迟2秒
 	v.SetDefault("controller.reconcileEnabled", true)
 	v.SetDefault("controller.reconcileInterval", 120*time.Second)
-	v.SetDefault("cleanup.onExit", true)
+	// Default to false: tearing down DNS records on every restart/crash makes
+	// external hostnames briefly unreachable. Operators should opt in.
+	v.SetDefault("cleanup.onExit", false)
 	v.SetDefault("cleanup.strategy", "graceful-cleanup")
 	v.SetDefault("cleanup.timeout", 30*time.Second)
 	// Global defaults for label auto-detection fallback
@@ -307,19 +313,151 @@ func New() (*Config, error) {
 		return nil, fmt.Errorf("cloudflare account ID is required")
 	}
 
+	// 7. 范围校验：负值或零值会让 retry / debounce / reconcile 等运行时路径行为异常
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
 	return &cfg, nil
 }
 
-// ValidateAPIToken tests if the Cloudflare API token is valid by making a simple API call (T103)
+// validate enforces positive/non-zero values on operational fields.
+// Viper silently drops malformed duration strings to zero, which would otherwise
+// bypass debounce, disable cooling periods, or cause tight reconcile loops.
+func (c *Config) validate() error {
+	var errs []string
+
+	add := func(cond bool, msg string) {
+		if cond {
+			errs = append(errs, msg)
+		}
+	}
+
+	// Cloudflare retry/rate
+	add(c.Cloudflare.RateLimit < 0, "cloudflare.rateLimit must be >= 0 (0 disables rate limiting)")
+	add(c.Cloudflare.MaxRetries < 0, "cloudflare.maxRetries must be >= 0")
+	add(c.Cloudflare.RetryDelay < 0, "cloudflare.retryDelay must be >= 0")
+	add(c.Cloudflare.MaxRetryDelay < 0, "cloudflare.maxRetryDelay must be >= 0")
+	add(c.Cloudflare.RetryDelay > 0 && c.Cloudflare.MaxRetryDelay > 0 && c.Cloudflare.RetryDelay > c.Cloudflare.MaxRetryDelay,
+		"cloudflare.retryDelay must not exceed cloudflare.maxRetryDelay")
+
+	// Controller timing
+	add(c.Controller.FlappingWindow < 0, "controller.flappingWindow must be >= 0")
+	add(c.Controller.FlappingThreshold < 0, "controller.flappingThreshold must be >= 0")
+	add(c.Controller.CoolingPeriod < 0, "controller.coolingPeriod must be >= 0")
+	add(c.Controller.MaxCoolingPeriod < 0, "controller.maxCoolingPeriod must be >= 0")
+	add(c.Controller.CoolingPeriod > 0 && c.Controller.MaxCoolingPeriod > 0 && c.Controller.CoolingPeriod > c.Controller.MaxCoolingPeriod,
+		"controller.coolingPeriod must not exceed controller.maxCoolingPeriod")
+	add(c.Controller.DebounceDuration < 0, "controller.debounceDuration must be >= 0")
+	add(c.Controller.ReconcileInterval <= 0 && c.Controller.ReconcileEnabled,
+		"controller.reconcileInterval must be > 0 when reconcile is enabled")
+
+	// Cleanup
+	add(c.Cleanup.Timeout < 0, "cleanup.timeout must be >= 0")
+	switch c.Cleanup.Strategy {
+	case "", "graceful-cleanup", "force-cleanup", "none":
+	default:
+		errs = append(errs, fmt.Sprintf("cleanup.strategy %q is not recognized (expected graceful-cleanup|force-cleanup|none)", c.Cleanup.Strategy))
+	}
+
+	// Compensation
+	add(c.Compensation.InitialDelay < 0, "compensation.initialDelay must be >= 0")
+	add(c.Compensation.MaxDelay < 0, "compensation.maxDelay must be >= 0")
+	add(c.Compensation.MaxRetries < 0, "compensation.maxRetries must be >= 0")
+	add(c.Compensation.PollInterval <= 0 && (c.Compensation.InitialDelay > 0 || c.Compensation.MaxDelay > 0),
+		"compensation.pollInterval must be > 0 when compensation is configured")
+	add(c.Compensation.MaxQueueSize < 0, "compensation.maxQueueSize must be >= 0")
+
+	// Server
+	add(c.Server.Port < 0 || c.Server.Port > 65535, "server.port must be in [0,65535]")
+
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("invalid config: %s", strings.Join(errs, "; "))
+}
+
+// ValidateAPIToken performs a cheap format sanity check on the token.
+// It does NOT verify the token against Cloudflare. Use VerifyAPIToken for that.
 func (c *Config) ValidateAPIToken() error {
-	// Import cloudflare package to make a test API call
-	// This validates the token has the required permissions
-	// TODO: Implement actual Cloudflare API validation call
-	// For now, just validate format (Bearer tokens typically start with certain patterns)
+	if c.Cloudflare.APIToken == "" {
+		return fmt.Errorf("API token is empty")
+	}
 	if len(c.Cloudflare.APIToken) < 20 {
 		return fmt.Errorf("API token appears to be invalid (too short, must be at least 20 characters)")
 	}
 	return nil
+}
+
+// APITokenVerifier performs the actual /user/tokens/verify call against Cloudflare.
+// Returns nil if the token is valid, an error otherwise.
+type APITokenVerifier func(ctx context.Context, token string) error
+
+// VerifyAPIToken validates the configured token against Cloudflare's
+// /user/tokens/verify endpoint. Pass nil verifier to use DefaultAPITokenVerifier.
+func (c *Config) VerifyAPIToken(ctx context.Context, verifier APITokenVerifier) error {
+	if err := c.ValidateAPIToken(); err != nil {
+		return err
+	}
+	if verifier == nil {
+		verifier = DefaultAPITokenVerifier
+	}
+	return verifier(ctx, c.Cloudflare.APIToken)
+}
+
+// DefaultAPITokenVerifier is the production verifier that hits Cloudflare's API.
+// It checks both the HTTP status (200) and the JSON "success" flag, since
+// Cloudflare returns 200 with success=false on bad tokens.
+var DefaultAPITokenVerifier APITokenVerifier = func(ctx context.Context, token string) error {
+	const verifyURL = "https://api.cloudflare.com/client/v4/user/tokens/verify"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, verifyURL, nil)
+	if err != nil {
+		return fmt.Errorf("build verify request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("token verify request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return fmt.Errorf("read verify response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("token verify failed (status %d): %s", resp.StatusCode, truncate(string(body), 256))
+	}
+
+	var parsed struct {
+		Success bool `json:"success"`
+		Errors  []struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return fmt.Errorf("parse verify response: %w", err)
+	}
+	if !parsed.Success {
+		msg := "unknown error"
+		if len(parsed.Errors) > 0 {
+			msg = parsed.Errors[0].Message
+		}
+		return fmt.Errorf("cloudflare rejected token: %s", msg)
+	}
+	return nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // SanitizeForLog returns a log-safe version of config with sensitive fields redacted (T104)

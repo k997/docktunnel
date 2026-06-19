@@ -62,6 +62,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Verify the Cloudflare API token up front so a misconfigured token fails
+	// fast with a clear message instead of bubbling up through tunnel creation.
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, 15*time.Second)
+	if err := cfg.VerifyAPIToken(verifyCtx, nil); err != nil {
+		appLogger.Error("Cloudflare API token verification failed", "error", err)
+		verifyCancel()
+		os.Exit(1)
+	}
+	verifyCancel()
+	appLogger.Info("Cloudflare API token verified")
+
 	// 初始化Docker管理器
 	dockerManager, err := docker.NewManager()
 	if err != nil {
