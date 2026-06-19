@@ -346,53 +346,95 @@ func (m *Manager) GetConfiguration(ctx context.Context) ([]zero_trust.TunnelClou
 }
 
 // getZoneIDForHostname 获取主机名对应的zone ID
+//
+// Cache key is the derived base domain (e.g. "example.com"), not the full
+// hostname. Otherwise every distinct subdomain misses the cache and triggers
+// a fresh Zones.List call, defeating the cache and amplifying API usage.
+//
+// To handle domains under multi-label suffixes (e.g. "app.example.co.uk"),
+// we walk hostname labels from right to left, trying progressively longer
+// suffixes against Zones.List. The first match wins; this naturally handles
+// both "example.com" (2-label) and "example.co.uk" (3-label) zones.
 func (m *Manager) getZoneIDForHostname(ctx context.Context, hostname string) (string, error) {
-	// 检查缓存
+	candidates := zoneLookupCandidates(hostname)
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("invalid hostname: %q", hostname)
+	}
+
+	// 检查缓存：用所有候选 domain 依次查
 	m.cacheMu.RLock()
-	if zoneID, exists := m.zoneCache[hostname]; exists {
-		m.cacheMu.RUnlock()
-		return zoneID, nil
+	for _, dom := range candidates {
+		if zoneID, exists := m.zoneCache[dom]; exists {
+			m.cacheMu.RUnlock()
+			return zoneID, nil
+		}
 	}
 	m.cacheMu.RUnlock()
 
-	// 从主机名提取域名部分
-	domain := hostname
-	parts := strings.Split(hostname, ".")
-	if len(parts) > 2 {
-		// 取最后两个部分作为域名
-		domain = strings.Join(parts[len(parts)-2:], ".")
-	}
-
-	var zoneID string
-	// 使用重试机制执行zone查询操作
-	err := m.callWithRetry(ctx, func() error {
-		// 查询Cloudflare API获取zone信息
-		zonesList, err := m.client.Zones.List(ctx, zones.ZoneListParams{
-			Name: cloudflare.F(domain),
+	// 依次尝试每个候选 domain
+	var lastErr error
+	for _, dom := range candidates {
+		var zoneID string
+		var found bool
+		err := m.callWithRetry(ctx, func() error {
+			zonesList, err := m.client.Zones.List(ctx, zones.ZoneListParams{
+				Name: cloudflare.F(dom),
+			})
+			if err != nil {
+				return err
+			}
+			if len(zonesList.Result) == 0 {
+				// no match — try next candidate
+				return nil
+			}
+			zoneID = zonesList.Result[0].ID
+			found = true
+			return nil
 		})
 		if err != nil {
-			return err
+			lastErr = err
+			continue
 		}
-
-		if len(zonesList.Result) == 0 {
-			return fmt.Errorf("no zone found for domain: %s", domain)
+		if found {
+			// 缓存结果（用 domain 作为 key）
+			m.cacheMu.Lock()
+			m.zoneCache[dom] = zoneID
+			m.cacheMu.Unlock()
+			return zoneID, nil
 		}
-
-		// 使用第一个匹配的zone
-		zoneID = zonesList.Result[0].ID
-		return nil
-	})
-
-	if err != nil {
-		return "", fmt.Errorf("failed to get zone ID for hostname %s: %w", hostname, err)
 	}
 
-	// 缓存结果
-	m.cacheMu.Lock()
-	m.zoneCache[hostname] = zoneID
-	m.cacheMu.Unlock()
+	if lastErr != nil {
+		return "", fmt.Errorf("failed to get zone ID for hostname %s: %w", hostname, lastErr)
+	}
+	return "", fmt.Errorf("no zone found for hostname %s (tried candidates %v)", hostname, candidates)
+}
 
-	return zoneID, nil
+// zoneLookupCandidates returns domain suffixes to try against Zones.List,
+// ordered from most-specific to least-specific. Skips single-label TLDs.
+// e.g. "app.example.co.uk" → ["app.example.co.uk", "example.co.uk", "co.uk"]
+// but stops before ["uk"] (single label).
+func zoneLookupCandidates(hostname string) []string {
+	h := strings.ToLower(strings.TrimSpace(hostname))
+	h = strings.TrimSuffix(h, ".")
+	if h == "" {
+		return nil
+	}
+	parts := strings.Split(h, ".")
+	var out []string
+	for i := 0; i < len(parts)-1; i++ { // skip single-label (i == len(parts)-1)
+		out = append(out, strings.Join(parts[i:], "."))
+	}
+	return out
+}
+
+// normalizeCNAMEContent normalizes a CNAME content string for comparison.
+// DNS is case-insensitive and the trailing dot is optional, so we lowercase
+// and strip a single trailing dot. Without this, records returned by the
+// Cloudflare API as "abc.cfargotunnel.com." would not match our expected
+// "abc.cfargotunnel.com" and would be missed during cleanup scans.
+func normalizeCNAMEContent(s string) string {
+	return strings.TrimSuffix(strings.ToLower(s), ".")
 }
 
 // ListDNSRecords 列出所有与当前隧道相关的DNS记录
@@ -404,7 +446,7 @@ func (m *Manager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, err
 	}
 
 	var allTunnelRecords []dns.RecordResponse
-	expectedContent := fmt.Sprintf("%s.cfargotunnel.com", m.tunnel.ID)
+	expectedContent := normalizeCNAMEContent(fmt.Sprintf("%s.cfargotunnel.com", m.tunnel.ID))
 
 	// 使用重试机制执行操作
 	err := m.callWithRetry(ctx, func() error {
@@ -430,9 +472,9 @@ func (m *Manager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, err
 				continue
 			}
 
-			// 过滤出指向当前隧道的记录
+			// 过滤出指向当前隧道的记录（大小写与 trailing dot 归一化）
 			for _, record := range records.Result {
-				if record.Content == expectedContent {
+				if normalizeCNAMEContent(record.Content) == expectedContent {
 					allTunnelRecords = append(allTunnelRecords, record)
 				}
 			}
@@ -448,7 +490,11 @@ func (m *Manager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, err
 	return allTunnelRecords, nil
 }
 
-// UpsertDNSRecords 批量创建或更新DNS记录
+// UpsertDNSRecords 批量创建或更新DNS记录。
+//
+// 为每个 hostname 先查现有 CNAME：已存在的放进 Patches（按 record ID 更新），
+// 不存在的放进 Posts（新建）。如果只发 Posts，重复 hostname 会让 Cloudflare
+// 整个 batch 失败（错误码 81057），导致该 zone 一条记录都没更新。
 func (m *Manager) UpsertDNSRecords(ctx context.Context, hostnames []string) (err error) {
 	if len(hostnames) == 0 {
 		return nil
@@ -478,33 +524,70 @@ func (m *Manager) UpsertDNSRecords(ctx context.Context, hostnames []string) (err
 		zoneHostnames[zoneID] = append(zoneHostnames[zoneID], hostname)
 	}
 
+	content := fmt.Sprintf("%s.cfargotunnel.com", m.tunnel.ID)
+
 	// 为每个zone执行批量操作
 	for zoneID, zoneHosts := range zoneHostnames {
 		var posts []dns.RecordBatchParamsPostUnion
-		content := fmt.Sprintf("%s.cfargotunnel.com", m.tunnel.ID)
+		var patches []dns.BatchPatchUnionParam
 
 		for _, hostname := range zoneHosts {
-			posts = append(posts, dns.CNAMERecordParam{
-				Name:    cloudflare.F(hostname),
-				Type:    cloudflare.F(dns.CNAMERecordTypeCNAME),
-				Content: cloudflare.F(content),
-				Proxied: cloudflare.F(true),
-				TTL:     cloudflare.F(dns.TTL1),
+			// 查现有 CNAME：DNS 大小写不敏感，按 lowercase key 索引
+			existingID := ""
+			nameParam := dns.RecordListParamsName{Exact: cloudflare.F(hostname)}
+			err := m.callWithRetry(ctx, func() error {
+				records, err := m.client.DNS.Records.List(ctx, dns.RecordListParams{
+					ZoneID: cloudflare.F(zoneID),
+					Name:   cloudflare.F(nameParam),
+					Type:   cloudflare.F(dns.RecordListParamsTypeCNAME),
+				})
+				if err != nil {
+					return err
+				}
+				for _, record := range records.Result {
+					if strings.EqualFold(record.Name, hostname) {
+						existingID = record.ID
+						break
+					}
+				}
+				return nil
 			})
+			if err != nil {
+				return fmt.Errorf("failed to list existing DNS records for hostname %s: %w", hostname, err)
+			}
+
+			if existingID != "" {
+				patches = append(patches, dns.BatchPatchCNAMERecordParam{
+					ID: cloudflare.F(existingID),
+					CNAMERecordParam: dns.CNAMERecordParam{
+						Name:    cloudflare.F(hostname),
+						Type:    cloudflare.F(dns.CNAMERecordTypeCNAME),
+						Content: cloudflare.F(content),
+						Proxied: cloudflare.F(true),
+						TTL:     cloudflare.F(dns.TTL1),
+					},
+				})
+			} else {
+				posts = append(posts, dns.CNAMERecordParam{
+					Name:    cloudflare.F(hostname),
+					Type:    cloudflare.F(dns.CNAMERecordTypeCNAME),
+					Content: cloudflare.F(content),
+					Proxied: cloudflare.F(true),
+					TTL:     cloudflare.F(dns.TTL1),
+				})
+			}
 		}
 
-		// 使用重试机制执行批量创建
 		batchParams := dns.RecordBatchParams{
-			ZoneID: cloudflare.F(zoneID),
-			Posts:  cloudflare.F(posts),
+			ZoneID:  cloudflare.F(zoneID),
+			Posts:   cloudflare.F(posts),
+			Patches: cloudflare.F(patches),
 		}
 
-		err := m.callWithRetry(ctx, func() error {
+		if err := m.callWithRetry(ctx, func() error {
 			_, err := m.client.DNS.Records.Batch(ctx, batchParams)
 			return err
-		})
-
-		if err != nil {
+		}); err != nil {
 			return fmt.Errorf("failed to batch upsert DNS records for zone %s: %w", zoneID, err)
 		}
 	}
@@ -549,13 +632,18 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) (err
 		slog.Debug("Processing zone for deletion", "zoneID", zoneID, "hostnames", zoneHosts)
 
 		// 先获取现有的记录ID
+		// deletes 在 zone 范围累积。重试时每次都从本地 found 重新构建，
+		// 只有调用成功才 swap 进 deletes，避免重试把同一记录 append 多次。
 		var deletes []dns.RecordBatchParamsDelete
-		nameParam := dns.RecordListParamsName{}
 
 		for _, hostname := range zoneHosts {
-			nameParam.Exact = cloudflare.F(hostname)
-			// 使用重试机制获取记录
+			nameParam := dns.RecordListParamsName{Exact: cloudflare.F(hostname)}
+
+			var found []dns.RecordBatchParamsDelete
 			err := m.callWithRetry(ctx, func() error {
+				// 每次尝试都重置 found，重试不会累积重复条目
+				found = nil
+
 				records, err := m.client.DNS.Records.List(ctx, dns.RecordListParams{
 					ZoneID: cloudflare.F(zoneID),
 					Name:   cloudflare.F(nameParam),
@@ -567,18 +655,21 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) (err
 
 				slog.Debug("Found records to delete", "hostname", hostname, "recordCount", len(records.Result))
 
-				// 收集记录ID用于删除
 				for _, record := range records.Result {
-					deletes = append(deletes, dns.RecordBatchParamsDelete{
+					found = append(found, dns.RecordBatchParamsDelete{
 						ID: cloudflare.F(record.ID),
 					})
-					slog.Debug("Adding record for deletion", "recordID", record.ID, "hostname", hostname)
 				}
 				return nil
 			})
 
 			if err != nil {
 				return fmt.Errorf("failed to list DNS records for hostname %s: %w", hostname, err)
+			}
+
+			deletes = append(deletes, found...)
+			if len(found) > 0 {
+				slog.Debug("Collected records for deletion", "hostname", hostname, "count", len(found))
 			}
 		}
 

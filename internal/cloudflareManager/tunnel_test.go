@@ -208,3 +208,103 @@ func TestCallWithRetry_ReturnsNilOnSuccess(t *testing.T) {
 		t.Errorf("expected nil, got %v", err)
 	}
 }
+
+func TestZoneLookupCandidates(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"app.example.com", []string{"app.example.com", "example.com"}},
+		{"APP.Example.COM", []string{"app.example.com", "example.com"}},
+		{"app.example.co.uk", []string{"app.example.co.uk", "example.co.uk", "co.uk"}},
+		{"a.b.c.d.example.com", []string{"a.b.c.d.example.com", "b.c.d.example.com", "c.d.example.com", "d.example.com", "example.com"}},
+		{"example.com", []string{"example.com"}},
+		{"example.com.", []string{"example.com"}}, // trailing dot stripped
+		{"  ", nil},
+		{"singlelabel", nil},
+		{"", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := zoneLookupCandidates(tc.in)
+			if !slicesEqual(got, tc.want) {
+				t.Errorf("zoneLookupCandidates(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestNormalizeCNAMEContent(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"abc.cfargotunnel.com", "abc.cfargotunnel.com"},
+		{"ABC.CFARGOTUNNEL.COM", "abc.cfargotunnel.com"},
+		{"Abc.Cfargotunnel.Com.", "abc.cfargotunnel.com"},
+		{"abc.cfargotunnel.com..", "abc.cfargotunnel.com."}, // only single trailing dot stripped
+		{"", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := normalizeCNAMEContent(tc.in); got != tc.want {
+				t.Errorf("normalizeCNAMEContent(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestZoneCacheKeyIsDomain ensures the cache is keyed by derived domain, not hostname.
+// Multiple hostnames in the same zone should share one cache entry.
+func TestZoneCacheKeyIsDomain(t *testing.T) {
+	m := &Manager{
+		zoneCache: make(map[string]string),
+	}
+
+	// Manually populate cache as getZoneIDForHostname would: key by domain
+	m.cacheMu.Lock()
+	m.zoneCache["example.com"] = "zone-123"
+	m.cacheMu.Unlock()
+
+	for _, hostname := range []string{"app.example.com", "api.example.com", "blog.example.com"} {
+		candidates := zoneLookupCandidates(hostname)
+		m.cacheMu.RLock()
+		var got string
+		var found bool
+		for _, dom := range candidates {
+			if id, ok := m.zoneCache[dom]; ok {
+				got = id
+				found = true
+				break
+			}
+		}
+		m.cacheMu.RUnlock()
+		if !found {
+			t.Errorf("hostname %q should have hit cache via domain key", hostname)
+		}
+		if got != "zone-123" {
+			t.Errorf("hostname %q got zone %q, want zone-123", hostname, got)
+		}
+	}
+
+	// Different zone should NOT hit the same cache entry
+	candidates := zoneLookupCandidates("app.other.com")
+	m.cacheMu.RLock()
+	for _, dom := range candidates {
+		if _, ok := m.zoneCache[dom]; ok {
+			t.Errorf("unexpected cache hit for %q", dom)
+		}
+	}
+	m.cacheMu.RUnlock()
+}
