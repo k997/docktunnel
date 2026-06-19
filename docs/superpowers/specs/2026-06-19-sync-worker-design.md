@@ -407,17 +407,21 @@ Rationale: a single bad sync (e.g., CF SDK returns a value that triggers a nil d
 ```
 main.go:
   sigChan ← SIGTERM
-  cancel()                                  // ctx propagated
   controller.ForceSaveState()
-  switch cleanup strategy:
+  switch cleanup strategy:                  // cleanup runs FIRST, while worker still alive
     "graceful-cleanup":
-      cleanupCtx (with configured timeout)
+      cleanupCtx (derived from context.Background(), with configured timeout)
       controller.CleanupResources(cleanupCtx)
         → FlushSync(cleanupCtx)             // waits for final sync
+  cancel()                                   // ctx propagated AFTER cleanup
   wg.Wait()
-    → sync worker goroutine sees ctx.Done, returns
-    → stopCh closes
+    → sync worker wrapper goroutine sees ctx.Done, calls StopSyncWorker
+    → worker goroutine exits, stopCh closes
 ```
+
+**Ordering is load-bearing.** `cancel()` MUST run after `CleanupResources`, not before. The sync worker wrapper goroutine (in `main.go`) calls `StopSyncWorker()` when `<-ctx.Done()` fires; if `cancel()` runs first, the worker is already dead by the time `FlushSync` enqueues on `triggerCh`, and the cleared-state sync never lands. The wrapper goroutine then parks on `StopSyncWorker()`'s 5s safety timeout while `FlushSync` blocks for the entire `cleanupCtx` deadline. This was a critical bug discovered in final review and fixed by reordering the two operations.
+
+`CleanupResources` derives `cleanupCtx` from `context.Background()` (not the root ctx), so the worker's `syncFn` still sees a live context even after `cancel()` would have fired — though under the correct order, `cancel()` hasn't fired yet at that point anyway.
 
 If `CleanupResources` is skipped (strategy `"fast-exit"`), worker exits via `ctx.Done` without flushing. State on disk + Cloudflare may diverge; reconciliation on next startup recovers.
 
