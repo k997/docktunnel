@@ -74,9 +74,10 @@ type Controller struct {
 	maxCoolingPeriod  time.Duration // 最大冷却期
 
 	// 防抖配置
-	debounceTimer    *time.Timer   // 防抖计时器
 	debounceDuration time.Duration // 防抖持续时间
-	pendingUpdates   bool          // 是否有待处理的更新
+	// syncWorker serializes all Cloudflare writes through a single
+	// goroutine. See sync_worker.go.
+	syncWorker *syncWorker
 	// 对账配置
 	reconcileEnabled  bool
 	reconcileInterval time.Duration
@@ -102,7 +103,6 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 		coolingPeriod:     opts.CoolingPeriod,
 		maxCoolingPeriod:  opts.MaxCoolingPeriod,
 		debounceDuration:  opts.DebounceDuration,
-		pendingUpdates:    false,
 		reconcileEnabled:  opts.ReconcileEnabled,
 		reconcileInterval: opts.ReconcileInterval,
 	}
@@ -127,7 +127,22 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 		controller.reconcileInterval = 120 * time.Second
 	}
 
+	controller.syncWorker = newSyncWorker(controller.debounceDuration, controller.performSync, slog.Default())
+
 	return controller
+}
+
+// Start launches background goroutines requiring explicit lifecycle
+// management. Currently just the sync worker. Called from main.go
+// after NewController.
+func (c *Controller) Start(ctx context.Context) {
+	c.syncWorker.Start(ctx)
+}
+
+// StopSyncWorker blocks until the sync worker goroutine has exited.
+// Called from main.go during shutdown.
+func (c *Controller) StopSyncWorker() {
+	c.syncWorker.Stop()
 }
 
 // Dispatch 是所有事件处理的统一入口
@@ -666,31 +681,12 @@ func (c *Controller) Sync(ctx context.Context) error {
 	return nil
 }
 
-// syncToCloudflare 将当前规则同步到Cloudflare
-func (c *Controller) syncToCloudflare(ctx context.Context) error {
-	c.mu.Lock()
-
-	// 标记有待处理的更新
-	c.pendingUpdates = true
-
-	// 如果防抖计时器已经存在，停止它并重新开始计时
-	if c.debounceTimer != nil {
-		c.debounceTimer.Stop()
-	}
-
-	// 创建新的防抖计时器
-	c.debounceTimer = time.AfterFunc(c.debounceDuration, func() {
-		c.mu.Lock()
-		c.pendingUpdates = false
-		c.mu.Unlock()
-
-		// 在单独的goroutine中执行实际的同步操作
-		go c.performSync(context.Background())
-	})
-
-	c.mu.Unlock()
-
-	// 立即返回，不等待同步完成
+// syncToCloudflare signals the sync worker that a sync is desired.
+// Returns immediately; actual Cloudflare write happens in the worker
+// goroutine after the debounce window. ctx is unused but kept for
+// call-site compatibility.
+func (c *Controller) syncToCloudflare(_ context.Context) error {
+	c.syncWorker.TriggerSync()
 	return nil
 }
 
