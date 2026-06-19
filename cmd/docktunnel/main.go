@@ -141,6 +141,33 @@ func main() {
 	// 启动事件处理循环
 	var wg sync.WaitGroup
 	wg.Add(1)
+
+	// Watchdog: sample EventsDropped every 30s. Any non-zero delta since
+	// the last sample surfaces as a WARN so operators don't have to scrape
+	// Prometheus to learn events are being lost. Pipeline saturation is
+	// otherwise invisible until reconcile catches up (default 120s later).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		last := metrics.EventsDroppedCounterValue()
+		for {
+			select {
+			case <-ticker.C:
+				cur := metrics.EventsDroppedCounterValue()
+				if delta := cur - last; delta > 0 {
+					appLogger.Warn("Events dropped in last 30s — pipeline saturated",
+						"delta", delta, "total", cur,
+						"hint", "consider lowering reconcile interval or scaling up the controller")
+				}
+				last = cur
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	go func() {
 		defer wg.Done()
 		for {

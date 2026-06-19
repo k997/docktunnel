@@ -84,6 +84,10 @@ func (m *Manager) ScanRunningContainers(ctx context.Context) ([]events.Event, er
 //
 // Resync events are NEVER dropped — they're how we recover from drops.
 func trySendEvent(ctx context.Context, eventChannel chan<- events.Event, event events.Event) bool {
+	// Update channel-depth gauge on every attempt so /metrics reflects
+	// saturation between scrapes. len() on a channel is O(1).
+	metrics.SetEventChannelLength(len(eventChannel))
+
 	if event.Type == events.ActionResync {
 		select {
 		case eventChannel <- event:

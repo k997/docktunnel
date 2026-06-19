@@ -139,3 +139,32 @@ func TestIncEventsDropped_IncrementsCounter(t *testing.T) {
 		t.Errorf("expected delta=3, got %v", after-before)
 	}
 }
+
+// TestEventsDroppedCounterValue_MatchesProm tests that the snapshot helper
+// used by the main watchdog goroutine stays in sync with the Prometheus
+// counter — so the WARN log fires exactly when a scrape would also see it.
+func TestEventsDroppedCounterValue_MatchesProm(t *testing.T) {
+	IncEventsDropped()
+	promVal := testutil.ToFloat64(EventsDropped)
+	snapVal := EventsDroppedCounterValue()
+	if snapVal != promVal {
+		t.Errorf("snapshot=%v but prometheus counter=%v; they must match", snapVal, promVal)
+	}
+}
+
+func TestSetEventChannelLength_SetsGauge(t *testing.T) {
+	SetEventChannelLength(42)
+	if got := testutil.ToFloat64(EventChannelLength); got != 42 {
+		t.Errorf("expected 42, got %v", got)
+	}
+}
+
+// TestEventsDroppedDelta is a sanity check on the helper arithmetic.
+func TestEventsDroppedDelta(t *testing.T) {
+	if got := EventsDroppedDelta(10, 25); got != 15 {
+		t.Errorf("expected 15, got %v", got)
+	}
+	if got := EventsDroppedDelta(25, 10); got != -15 {
+		t.Errorf("expected -15, got %v", got)
+	}
+}

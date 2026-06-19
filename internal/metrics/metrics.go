@@ -4,8 +4,17 @@
 package metrics
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+// eventsDroppedMu guards eventsDroppedSnapshot. We keep a shadow float64
+// so production callers can read the counter without importing testutil.
+var (
+	eventsDroppedMu       sync.RWMutex
+	eventsDroppedSnapshot float64
 )
 
 // Closed label sets for EventsTotal. Anything outside these sets gets bucketed
@@ -72,6 +81,15 @@ var (
 		Namespace: "docktunnel",
 		Name:      "events_dropped_total",
 		Help:      "Docker events dropped because the internal event channel was full.",
+	})
+
+	// EventChannelLength exposes the current depth of the internal event
+	// channel. Combined with EventsDropped it gives operators a live view
+	// of pipeline saturation before drops happen.
+	EventChannelLength = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "docktunnel",
+		Name:      "event_channel_length",
+		Help:      "Current number of Docker events queued in the internal channel.",
 	})
 
 	// ReconcileDuration observes wall-clock time of Reconcile cycles.
@@ -143,6 +161,30 @@ func RecordEvent(eventType, result string) {
 // IncEventsDropped increments the EventsDropped counter by 1.
 func IncEventsDropped() {
 	EventsDropped.Inc()
+	eventsDroppedMu.Lock()
+	eventsDroppedSnapshot++
+	eventsDroppedMu.Unlock()
+}
+
+// SetEventChannelLength sets the current depth of the internal event channel.
+// Cheap to call — Go's len() on a channel is O(1).
+func SetEventChannelLength(n int) {
+	EventChannelLength.Set(float64(n))
+}
+
+// EventsDroppedDelta returns the difference in EventsDropped between two
+// samples. Use it from a periodic watcher to detect drop bursts.
+func EventsDroppedDelta(before, after float64) float64 {
+	return after - before
+}
+
+// EventsDroppedCounterValue returns the current value of the EventsDropped
+// counter as a float64. Convenience wrapper for callers (e.g. the main
+// goroutine's drop-rate watchdog) that don't want to import testutil.
+func EventsDroppedCounterValue() float64 {
+	eventsDroppedMu.RLock()
+	defer eventsDroppedMu.RUnlock()
+	return eventsDroppedSnapshot
 }
 
 // ObserveReconcile records a Reconcile cycle's duration in seconds.
