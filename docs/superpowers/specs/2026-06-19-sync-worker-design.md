@@ -60,7 +60,7 @@ Out of scope (deferred to later phases):
 │         │  triggerCh: chan{} (1)   │                       │
 │         │  flushQueue: chan chan{} │                       │
 │         │  stopCh: chan{}          │                       │
-│         │  lastErr: atomic.Value   │                       │
+│         │  lastErr: atomic.Pointer[error] │                │
 │         │  ──────────────────────  │                       │
 │         │  syncFn = performSync    │                       │
 │         └────────────┬─────────────┘                       │
@@ -175,7 +175,7 @@ type syncWorker struct {
     flushQueue chan chan struct{}   // unbuffered; FlushSync registers its done chan
     stopCh     chan struct{}        // closed when run() exits
 
-    lastErr    atomic.Value        // error or nil
+    lastErr    atomic.Pointer[error] // last syncFn result; nil = success or never run
     started    atomic.Bool
 }
 
@@ -231,8 +231,8 @@ func (w *syncWorker) FlushSync(ctx context.Context) error {
     }
     select {
     case <-myDone:
-        if err, ok := w.lastErr.Load().(error); ok {
-            return err
+        if p := w.lastErr.Load(); p != nil {
+            return *p
         }
         return nil
     case <-ctx.Done():
@@ -295,7 +295,7 @@ func (w *syncWorker) runOnce(ctx context.Context) {
         }
     }()
     err := w.syncFn(ctx)
-    w.lastErr.Store(err)
+    w.lastErr.Store(&err) // works for nil too: stores pointer-to-nil
     if err != nil {
         w.log.Warn("sync failed; will retry on next trigger", "error", err)
     }
@@ -320,12 +320,12 @@ return c
 
 **`syncToCloudflare` becomes:**
 ```go
-func (c *Controller) syncToCloudflare(ctx context.Context) error {
+func (c *Controller) syncToCloudflare(_ context.Context) error {
     c.syncWorker.TriggerSync()
     return nil
 }
 ```
-Signature unchanged; the five event-side call sites (lines 292, 436, 473, 658, 968, 1031, 1055, 1157) need zero edits.
+Signature unchanged (the `ctx` param is now unused — renamed to `_` to silence linters). Kept for API stability so the 8 call sites (controller.go lines 292, 436, 473, 658, 968, 1031, 1055, 1157) need zero edits.
 
 **`CleanupResources` line 180:**
 ```go
@@ -349,17 +349,16 @@ func (c *Controller) Start(ctx context.Context) {
 
 ### 3.3 `main.go` changes
 
-Add a new goroutine alongside the compensation loop:
+Add a new goroutine alongside the compensation loop. The wrapper goroutine exists so `wg.Wait()` in shutdown blocks until the worker has fully stopped, not just until `Start` returns:
 
 ```go
 wg.Add(1)
 go func() {
     defer wg.Done()
     appLogger.Info("Starting sync worker")
-    controller.Start(ctx)
-    // Start spawns its own goroutine; we wait on ctx for shutdown.
-    <-ctx.Done()
-    controller.StopSyncWorker() // optional: explicit stop for clean test shutdown
+    controller.Start(ctx)         // non-blocking: spawns worker goroutine, returns immediately
+    <-ctx.Done()                  // wait for shutdown signal
+    controller.StopSyncWorker()   // blocks until worker goroutine exits
 }()
 ```
 
