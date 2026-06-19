@@ -176,50 +176,6 @@ func TestRestoreActiveTunnel(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestFlappingDetection(t *testing.T) {
-	sm := NewManager(slog.Default())
-	containerID := "test-flapping-container"
-
-	// Record transitions below threshold
-	for i := 0; i < 4; i++ {
-		sm.RecordTransition(containerID)
-	}
-
-	// Should not be flapping yet
-	isFlapping := sm.CheckFlapping(containerID)
-	assert.False(t, isFlapping, "Should not be flapping with 4 transitions")
-
-	// Add one more transition to exceed threshold
-	sm.RecordTransition(containerID)
-
-	// Should now be flapping
-	isFlapping = sm.CheckFlapping(containerID)
-	assert.True(t, isFlapping, "Should be flapping with 5 transitions")
-
-	// Check flapping state
-	state, ok := sm.GetFlappingState(containerID)
-	assert.True(t, ok, "Flapping state should exist")
-	assert.True(t, state.LastFlapped.Before(time.Now()), "LastFlapped should be in the past")
-	assert.True(t, state.CoolingUntil.After(time.Now()), "CoolingUntil should be in the future")
-}
-
-func TestFlappingExpiration(t *testing.T) {
-	sm := NewManager(slog.Default())
-	containerID := "test-expiring-container"
-
-	// Manually mark as flapping with short cooling period
-	sm.MarkAsFlapping(containerID, 100*time.Millisecond)
-
-	// Should be flapping
-	assert.True(t, sm.CheckFlapping(containerID))
-
-	// Wait for cooling period to expire
-	time.Sleep(150 * time.Millisecond)
-
-	// Should no longer be flapping
-	assert.False(t, sm.CheckFlapping(containerID))
-}
-
 // containsExpiredEntry checks if the expired entries contain one for the given containerID
 func containsExpiredEntry(entries []*types.TunnelEntry, containerID string) bool {
 	for _, e := range entries {
@@ -304,9 +260,10 @@ func TestLoadFromSnapshot(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "pending-1", pending.ContainerID)
 
-	flapping, ok := sm.GetFlappingState("flapping-1")
-	assert.True(t, ok)
-	assert.True(t, flapping.CoolingUntil.After(now))
+	// Verify flapping state was restored
+	flapping, exists := sm.flappingContainers["flapping-1"]
+	assert.True(t, exists, "Flapping state should be loaded")
+	assert.True(t, flapping.CoolingUntil.After(now), "Cooling period should be in future")
 }
 
 func TestRunGC_ImmediatePolicy(t *testing.T) {
@@ -425,50 +382,16 @@ func TestGetStats(t *testing.T) {
 		DeletedAt:   &now,
 	})
 
-	// Mark flapping
-	sm.MarkAsFlapping("flapping-1", 5*time.Minute)
+	// Mark flapping (direct field population; the public MarkAsFlapping helper
+	// was removed as dead code along with the other flapping-detection methods)
+	sm.flappingContainers["flapping-1"] = types.FlappingState{
+		CoolingUntil: time.Now().Add(5 * time.Minute),
+	}
 
 	stats := sm.GetStats()
 	assert.Equal(t, 2, stats["active_tunnels"])
 	assert.Equal(t, 1, stats["pending_deletions"])
 	assert.Equal(t, 1, stats["flapping_containers"])
-}
-
-func TestFlappingWindowCleanup(t *testing.T) {
-	sm := NewManager(slog.Default())
-	containerID := "test-window-cleanup"
-
-	// Record old transitions outside window
-	oldTime := time.Now().Add(-2 * time.Minute)
-	for i := 0; i < 3; i++ {
-		sm.RecordTransition(containerID)
-	}
-
-	// Manually set old transitions to simulate expired ones
-	sm.mu.Lock()
-	if state, exists := sm.flappingContainers[containerID]; exists {
-		for i := range state.Transitions {
-			state.Transitions[i] = oldTime
-		}
-	}
-	sm.mu.Unlock()
-
-	// Record new transition within window (should trigger cleanup of old ones)
-	sm.RecordTransition(containerID)
-
-	// Verify old transitions were cleaned up by checking transition count
-	state, ok := sm.GetFlappingState(containerID)
-	assert.True(t, ok, "Flapping state should exist")
-	assert.Len(t, state.Transitions, 1, "Old transitions should be cleaned up, leaving only the new one")
-
-	// Add enough new transitions to trigger flapping
-	for i := 0; i < 4; i++ {
-		sm.RecordTransition(containerID)
-	}
-
-	// Now should be flapping (1 old + 4 new = 5 total)
-	isFlapping := sm.CheckFlapping(containerID)
-	assert.True(t, isFlapping, "Should be flapping after 5 transitions within window")
 }
 
 // TestContainerRestartCancelsRetention tests that a container restart

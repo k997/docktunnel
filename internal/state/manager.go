@@ -15,14 +15,6 @@ import (
 )
 
 const (
-	// FlappingWindow is the time window to observe for flapping detection
-	FlappingWindow = 60 * time.Second
-	// FlappingThreshold is the number of transitions to trigger flapping
-	FlappingThreshold = 5
-	// CoolingPeriod is the initial cooling period for flapping containers
-	CoolingPeriod = 300 * time.Second
-	// MaxCoolingPeriod is the maximum cooling period
-	MaxCoolingPeriod = 1800 * time.Second
 	// SaveInterval is the minimum time between state saves
 	SaveInterval = 30 * time.Second
 )
@@ -373,113 +365,6 @@ func (sm *Manager) RestoreActiveTunnel(containerID string) error {
 	}
 
 	return nil
-}
-
-// CheckFlapping checks if a container is flapping based on state transitions
-func (sm *Manager) CheckFlapping(containerID string) bool {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	state, exists := sm.flappingContainers[containerID]
-	if !exists {
-		return false
-	}
-
-	// If no cooling period is set, container is not flapping yet
-	if state.CoolingUntil.IsZero() {
-		return false
-	}
-
-	// Check if still in cooling period
-	if time.Now().Before(state.CoolingUntil) {
-		return true
-	}
-
-	// Cooling period expired, remove from flapping state
-	delete(sm.flappingContainers, containerID)
-	sm.logger.Info("Flapping cooling period expired",
-		"container_id", containerID,
-	)
-	return false
-}
-
-// RecordTransition records a state transition for flapping detection
-func (sm *Manager) RecordTransition(containerID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	state, exists := sm.flappingContainers[containerID]
-	if !exists {
-		state = types.FlappingState{
-			Transitions: []time.Time{},
-		}
-	}
-
-	// Add current transition
-	now := time.Now()
-	state.Transitions = append(state.Transitions, now)
-
-	// Remove old transitions outside the window
-	cutoff := now.Add(-FlappingWindow)
-	var validTransitions []time.Time
-	for _, t := range state.Transitions {
-		if t.After(cutoff) {
-			validTransitions = append(validTransitions, t)
-		}
-	}
-	state.Transitions = validTransitions
-
-	// Check if threshold exceeded
-	if len(state.Transitions) >= FlappingThreshold {
-		// Trigger flapping
-		state.LastFlapped = now
-		state.CoolingUntil = now.Add(CoolingPeriod)
-		state.Transitions = []time.Time{} // Reset transitions
-
-		sm.flappingContainers[containerID] = state
-		sm.logger.Warn("Container flapping detected",
-			"container_id", containerID,
-			"transitions", len(validTransitions),
-			"cooling_until", state.CoolingUntil,
-		)
-		return
-	}
-
-	sm.flappingContainers[containerID] = state
-}
-
-// MarkAsFlapping manually marks a container as flapping
-func (sm *Manager) MarkAsFlapping(containerID string, coolingDuration time.Duration) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if coolingDuration <= 0 {
-		coolingDuration = CoolingPeriod
-	}
-	if coolingDuration > MaxCoolingPeriod {
-		coolingDuration = MaxCoolingPeriod
-	}
-
-	now := time.Now()
-	sm.flappingContainers[containerID] = types.FlappingState{
-		Transitions:  []time.Time{},
-		LastFlapped:  now,
-		CoolingUntil: now.Add(coolingDuration),
-	}
-
-	sm.logger.Warn("Manually marked container as flapping",
-		"container_id", containerID,
-		"cooling_until", now.Add(coolingDuration),
-	)
-}
-
-// GetFlappingState retrieves the flapping state for a container
-func (sm *Manager) GetFlappingState(containerID string) (types.FlappingState, bool) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	state, ok := sm.flappingContainers[containerID]
-	return state, ok
 }
 
 // GetSnapshot returns a snapshot of the current state.

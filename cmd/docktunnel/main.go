@@ -258,6 +258,18 @@ func main() {
 		}
 	}()
 
+	// Start the sync worker. Wrapper goroutine exists so wg.Wait() in
+	// shutdown blocks until the worker has fully stopped, not just
+	// until Start returns.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		appLogger.Info("Starting sync worker")
+		controller.Start(ctx)
+		<-ctx.Done()
+		controller.StopSyncWorker()
+	}()
+
 	// Start compensation queue background loop
 	wg.Add(1)
 	go func() {
@@ -291,10 +303,13 @@ shutdown:
 		appLogger.Warn("Failed to save state before shutdown", "error", err)
 	}
 
-	// Cancel context to notify all goroutines to stop
-	cancel()
-
-	// Execute cleanup based on configured strategy
+	// Execute cleanup BEFORE cancelling the root ctx. CleanupResources
+	// uses FlushSync to push the cleared-state config through the sync
+	// worker, but the worker wrapper goroutine exits the moment ctx is
+	// cancelled. If we cancel first, FlushSync's send on triggerCh
+	// blocks forever because nothing is left to drain it, the cleared
+	// config never lands on Cloudflare, and every graceful-cleanup
+	// shutdown hangs for the full cleanup timeout.
 	switch cfg.Cleanup.Strategy {
 	case "fast-exit":
 		appLogger.Info("Fast exit requested, skipping resource cleanup")
@@ -328,6 +343,11 @@ shutdown:
 		appLogger.Info("Unknown cleanup strategy, skipping cleanup",
 			"strategy", cfg.Cleanup.Strategy)
 	}
+
+	// Cancel context to notify all goroutines to stop. Runs after
+	// cleanup so the sync worker is still alive to drain FlushSync's
+	// trigger.
+	cancel()
 
 	// Wait for all goroutines to finish
 	wg.Wait()

@@ -62,8 +62,11 @@ func TestSaveAndLoadGob(t *testing.T) {
 	}
 	sm1.AddPendingDeletion(pendingEntry)
 
-	// Mark flapping
-	sm1.MarkAsFlapping("flapping-1", 5*time.Minute)
+	// Mark flapping (direct field population; the public MarkAsFlapping helper
+	// was removed as dead code along with the other flapping-detection methods)
+	sm1.flappingContainers["flapping-1"] = types.FlappingState{
+		CoolingUntil: time.Now().Add(5 * time.Minute),
+	}
 
 	// Save state
 	err := sm1.Save(statePath)
@@ -93,9 +96,10 @@ func TestSaveAndLoadGob(t *testing.T) {
 	assert.Equal(t, types.StatusRetaining, loadedPending.Status) // Should be migrated from PendingDelete to Retaining
 	assert.Equal(t, types.Timed, loadedPending.RetentionPolicy.Type)
 
-	// Verify flapping state was restored
-	flappingState, ok := sm2.GetFlappingState("flapping-1")
-	assert.True(t, ok, "Flapping state should be loaded")
+	// Verify flapping state was restored (public GetFlappingState removed as
+	// dead code; the field is still round-tripped via the snapshot)
+	flappingState, exists := sm2.flappingContainers["flapping-1"]
+	assert.True(t, exists, "Flapping state should be loaded")
 	assert.True(t, flappingState.CoolingUntil.After(now), "Cooling period should be in future")
 }
 
