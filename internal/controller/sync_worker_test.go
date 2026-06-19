@@ -44,9 +44,9 @@ func TestSyncWorker_TriggersCoalesce(t *testing.T) {
 		return nil
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	w.Start(ctx)
 	defer w.Stop()
+	defer cancel()
 
 	for i := 0; i < 10; i++ {
 		w.TriggerSync()
@@ -67,9 +67,9 @@ func TestSyncWorker_DebounceHonored(t *testing.T) {
 		return nil
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	w.Start(ctx)
 	defer w.Stop()
+	defer cancel()
 
 	w.TriggerSync()
 	time.Sleep(20 * time.Millisecond) // less than debounce
