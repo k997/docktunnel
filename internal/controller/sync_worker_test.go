@@ -223,9 +223,9 @@ func TestSyncWorker_PanicRecovery(t *testing.T) {
 		return nil
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	w.Start(ctx)
 	defer w.Stop()
+	defer cancel()
 
 	w.TriggerSync()
 	if err := w.FlushSync(ctx); err == nil {
@@ -255,9 +255,9 @@ func TestSyncWorker_ReTriggerAfterSync(t *testing.T) {
 		return nil
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	w.Start(ctx)
 	defer w.Stop()
+	defer cancel()
 
 	w.TriggerSync()
 	<-firstStarted
