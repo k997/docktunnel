@@ -213,5 +213,68 @@ func TestSyncWorker_FlushSyncNoHangOnSlowScheduler(t *testing.T) {
 	}
 }
 
+func TestSyncWorker_PanicRecovery(t *testing.T) {
+	var callCount int32
+	w := newTestWorker(t, 5*time.Millisecond, func(context.Context) error {
+		n := atomic.AddInt32(&callCount, 1)
+		if n == 1 {
+			panic("simulated SDK panic")
+		}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Start(ctx)
+	defer w.Stop()
+
+	w.TriggerSync()
+	if err := w.FlushSync(ctx); err == nil {
+		t.Errorf("expected FlushSync to surface panic-wrapped error, got nil")
+	}
+
+	// Worker should still be alive.
+	w.TriggerSync()
+	if err := w.FlushSync(ctx); err != nil {
+		t.Errorf("expected second sync to succeed, got %v", err)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 2 {
+		t.Errorf("expected 2 syncFn calls (panic + recovery), got %d", got)
+	}
+}
+
+func TestSyncWorker_ReTriggerAfterSync(t *testing.T) {
+	var callCount int32
+	firstStarted := make(chan struct{})
+	firstProceed := make(chan struct{})
+	w := newTestWorker(t, 5*time.Millisecond, func(context.Context) error {
+		n := atomic.AddInt32(&callCount, 1)
+		if n == 1 {
+			close(firstStarted)
+			<-firstProceed
+		}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Start(ctx)
+	defer w.Stop()
+
+	w.TriggerSync()
+	<-firstStarted
+
+	// While syncFn #1 is blocked, queue another trigger.
+	w.TriggerSync()
+
+	close(firstProceed) // release #1
+
+	// FlushSync should wait for #2 to also complete.
+	if err := w.FlushSync(ctx); err != nil {
+		t.Fatalf("FlushSync returned err: %v", err)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 2 {
+		t.Errorf("expected 2 syncFn calls (re-trigger), got %d", got)
+	}
+}
+
 // keep atomic import used; will be referenced by later tests
 var _ = atomic.Bool{}

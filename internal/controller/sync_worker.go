@@ -101,7 +101,8 @@ func (w *syncWorker) Stop() {
 	}
 }
 
-// run is filled in by Task 2.
+// run is the worker goroutine entry point. It debounces triggers and
+// dispatches syncFn calls serially.
 func (w *syncWorker) run(ctx context.Context) {
 	defer close(w.stopCh)
 	timer := time.NewTimer(w.debounce)
