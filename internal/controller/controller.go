@@ -87,8 +87,11 @@ type Controller struct {
 	lastKnownActualRules []diagnostics.RuleView
 
 	// Internal helpers (Phase 2 extraction)
-	dispatcher *dispatcher
-	reconciler *reconciler
+	dispatcher        *dispatcher
+	reconciler        *reconciler
+	gc                *gc
+	compensation      *compensation
+	diagnosticsHelper *diagnosticsHelper
 }
 
 // NewController 创建一个新的控制器实例
@@ -134,6 +137,9 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 
 	controller.dispatcher = newDispatcher(controller)
 	controller.reconciler = newReconciler(controller, slog.Default())
+	controller.gc = newGC(controller, slog.Default())
+	controller.compensation = newCompensation(controller, slog.Default())
+	controller.diagnosticsHelper = newDiagnosticsHelper(controller)
 
 	return controller
 }
@@ -432,76 +438,32 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 	return nil
 }
 
-// ExecuteAction executes a single action (e.g., delete route and sync).
-// Used by the compensation queue to retry failed actions.
-//
-// Race guard: before deleting the ingress rule for a hostname, check whether
-// the rule is still registered. If a stop event enqueued this delete and the
-// container then restarted (handleContainerStart re-added the same hostname
-// at controller.go:224), the queued delete would otherwise fire after the
-// container is back up and remove the live route. Skipping the delete when
-// the rule is present lets the start path win.
+// ExecuteAction executes a single compensation action.
 func (c *Controller) ExecuteAction(ctx context.Context, action types.Action) error {
-	if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
-		c.mu.Lock()
-		_, stillRegistered := c.ingressRules[action.Hostname]
-		if stillRegistered {
-			c.mu.Unlock()
-			slog.Info("Skipping compensation delete: hostname is currently registered (container likely restarted)",
-				"action", action.Kind,
-				"hostname", action.Hostname,
-				"container_id", action.ContainerID,
-			)
-			return nil
-		}
-		delete(c.ingressRules, action.Hostname)
-		c.mu.Unlock()
+	if c.compensation == nil {
+		c.compensation = newCompensation(c, slog.Default())
 	}
-	return c.syncToCloudflare(ctx)
+	return c.compensation.ExecuteAction(ctx, action)
 }
 
 // RunCompensationLoop starts the compensation queue background loop.
-// Blocks until ctx is cancelled.
 func (c *Controller) RunCompensationLoop(ctx context.Context) {
-	executor := func(action types.Action) error {
-		return c.ExecuteAction(ctx, action)
-	}
-
-	// Set up a gauge updater that runs alongside the compensation loop.
-	gaugeDone := make(chan struct{})
-	go func() {
-		defer close(gaugeDone)
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				pending := c.stateManager.GetAllPendingActions()
-				metrics.SetCompensationQueueLength(len(pending))
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	c.stateManager.RunCompensation(ctx, executor)
-	<-gaugeDone
+	c.compensation.RunCompensationLoop(ctx)
 }
 
 // SetCompensationConfig configures the compensation queue parameters.
 func (c *Controller) SetCompensationConfig(initialDelay, maxDelay time.Duration, maxRetries int, pollInterval time.Duration) {
-	c.stateManager.SetCompensationConfig(initialDelay, maxDelay, maxRetries, pollInterval)
+	c.compensation.SetCompensationConfig(initialDelay, maxDelay, maxRetries, pollInterval)
 }
 
 // SetCompensationQueueCap sets the maximum compensation queue size.
 func (c *Controller) SetCompensationQueueCap(size int) {
-	c.stateManager.SetCompensationQueueCap(size)
+	c.compensation.SetCompensationQueueCap(size)
 }
 
 // SetPersistenceConfig configures backup and validation settings.
 func (c *Controller) SetPersistenceConfig(backupCount int, validateOnLoad bool) {
-	c.stateManager.SetBackupCount(backupCount)
-	c.stateManager.SetValidateOnLoad(validateOnLoad)
+	c.compensation.SetPersistenceConfig(backupCount, validateOnLoad)
 }
 
 // Sync 同步Docker容器状态到Cloudflare Tunnel配置
@@ -893,84 +855,9 @@ func (c *Controller) updateContainerHealth(containerID string, isStartEvent bool
 	}
 }
 
-// RunGarbageCollection runs garbage collection for expired retention policies (T062, T063)
-// This should be called periodically (every 60 seconds) to clean up expired entries
+// RunGarbageCollection runs garbage collection for expired retention policies.
 func (c *Controller) RunGarbageCollection(ctx context.Context) error {
-	// Run GC on state manager — returns expired entries with hostname info
-	expiredEntries, err := c.stateManager.RunGC(ctx)
-	if err != nil {
-		return fmt.Errorf("state manager GC failed: %w", err)
-	}
-
-	// If no expired entries, return early
-	if len(expiredEntries) == 0 {
-		// Update retention gauge for /metrics (Phase 6)
-		c.updateRetentionGauge()
-		return nil
-	}
-
-	slog.Info("Garbage collection found expired entries", "count", len(expiredEntries))
-
-	// Remove expired entries from ingress rules
-	removed := 0
-	c.mu.Lock()
-	for _, entry := range expiredEntries {
-		hostname := entry.Config.Hostname
-		if hostname != "" {
-			if _, exists := c.ingressRules[hostname]; exists {
-				delete(c.ingressRules, hostname)
-				removed++
-				slog.Info("Removed expired route from ingress rules",
-					"container_id", entry.ContainerID,
-					"hostname", hostname)
-			}
-		}
-	}
-	c.mu.Unlock()
-
-	if removed > 0 {
-		metrics.AddGCDeletions(removed)
-	}
-
-	// Sync updated rules to Cloudflare (outside lock to avoid deadlock)
-	if err := c.syncToCloudflare(ctx); err != nil {
-		return fmt.Errorf("failed to sync after GC: %w", err)
-	}
-
-	slog.Info("Garbage collection completed successfully",
-		"expired_count", len(expiredEntries))
-
-	// Update retention gauge for /metrics (Phase 6)
-	c.updateRetentionGauge()
-
-	return nil
-}
-
-// updateRetentionGauge counts entries by lifecycle status and updates
-// the docktunnel_retention_entries gauge.
-func (c *Controller) updateRetentionGauge() {
-	snapshot := c.stateManager.GetSnapshot()
-	counts := map[string]int{
-		"Active":        0,
-		"Retaining":     0,
-		"PendingDelete": 0,
-	}
-	for _, entry := range snapshot.ActiveTunnels {
-		if entry.Status == types.StatusActive {
-			counts["Active"]++
-		}
-	}
-	for _, entry := range snapshot.PendingDeletions {
-		switch entry.Status {
-		case types.StatusRetaining:
-			counts["Retaining"]++
-		case types.StatusPendingDelete:
-			counts["PendingDelete"]++
-		}
-	}
-	for status, n := range counts {
-		metrics.SetRetentionEntries(status, n)
-	}
+	return c.gc.RunGarbageCollection(ctx)
 }
 
 // handleHealthHealthy re-exposes a container's services when it becomes healthy.
@@ -1045,25 +932,11 @@ func (c *Controller) ReconcileInterval() time.Duration {
 }
 
 // GetDebugState returns the current desired vs actual state for the /debug/state endpoint.
-// Safe to call from any goroutine. Uses cached state — never makes Cloudflare API calls.
 func (c *Controller) GetDebugState() diagnostics.DebugStateResponse {
-	c.actualStateMu.RLock()
-	defer c.actualStateMu.RUnlock()
-
-	desired := c.snapshotRuleViewsLocked()
-	actual := c.lastKnownActualRules
-	source := "empty"
-	if actual != nil {
-		source = "live_cache"
+	if c.diagnosticsHelper == nil {
+		c.diagnosticsHelper = newDiagnosticsHelper(c)
 	}
-
-	return diagnostics.DebugStateResponse{
-		Timestamp:    time.Now(),
-		DesiredState: desired,
-		ActualState:  actual,
-		Source:       source,
-		Diff:         diagnostics.ComputeDiff(desired, actual),
-	}
+	return c.diagnosticsHelper.GetDebugState()
 }
 
 // refreshActualState fetches the live tunnel config from Cloudflare and
@@ -1098,16 +971,8 @@ func (c *Controller) setLastKnownActualRules(rules []diagnostics.RuleView) {
 	c.actualStateMu.Unlock()
 }
 
-// snapshotRuleViewsLocked builds a slice of RuleView from c.ingressRules.
-// Caller must hold c.mu (read or write).
+// snapshotRuleViewsLocked delegates to diagnosticsHelper. Used by refreshActualState
+// (still on Controller until syncer extraction).
 func (c *Controller) snapshotRuleViewsLocked() []diagnostics.RuleView {
-	views := make([]diagnostics.RuleView, 0, len(c.ingressRules))
-	for _, rule := range c.ingressRules {
-		views = append(views, diagnostics.RuleView{
-			Hostname: rule.Hostname.Value,
-			Service:  rule.Service.Value,
-			Path:     rule.Path.Value,
-		})
-	}
-	return views
+	return c.diagnosticsHelper.snapshotRuleViewsLocked()
 }
