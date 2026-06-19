@@ -191,8 +191,10 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 
 	slog.Info("Cleaning up resources: cleared internal rules")
 
-	// 调用performSync同步空的规则集（这将删除所有DNS记录）
-	if err := c.performSync(ctx); err != nil {
+	// Flush the cleared-state sync through the worker so it lands
+	// before we return. Otherwise a slow worker could lose the cleanup
+	// write on shutdown.
+	if err := c.syncWorker.FlushSync(ctx); err != nil {
 		slog.Error("Failed to perform cleanup sync", "error", err, "result", "failure")
 		return err
 	}

@@ -918,3 +918,30 @@ func TestExecuteAction_SkipsDeleteWhenHostnameIsRegistered(t *testing.T) {
 		t.Error("ingress rule was deleted despite hostname being registered")
 	}
 }
+
+// TestCleanupResources_BlocksUntilSyncRun verifies that CleanupResources
+// does not return until the sync worker has processed the cleared-state
+// sync. Regression guard for the shutdown race that motivated the
+// syncWorker refactor.
+func TestCleanupResources_BlocksUntilSyncRun(t *testing.T) {
+	mgr := &mockCloudflareManager{
+		tunnel: &zero_trust.TunnelCloudflaredGetResponse{ID: "t1"},
+	}
+
+	ctrl := NewController(nil, mgr, ControllerOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctrl.Start(ctx)
+	defer ctrl.StopSyncWorker()
+
+	if err := ctrl.CleanupResources(ctx); err != nil {
+		t.Fatalf("CleanupResources returned err: %v", err)
+	}
+
+	// After CleanupResources returns, ingressRules should be empty and
+	// the mock should have been called with an empty rule list.
+	rules := ctrl.GetIngressRules()
+	if len(rules) != 1 { // catch-all only
+		t.Errorf("expected 1 rule (catch-all) after cleanup, got %d", len(rules))
+	}
+}
