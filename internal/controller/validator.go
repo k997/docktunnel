@@ -43,20 +43,6 @@ func (v *HostnameUniquenessValidator) Validate(rules map[string]*zero_trust.Tunn
 	return nil
 }
 
-// ServiceNameUniquenessValidator 验证服务名唯一性
-type ServiceNameUniquenessValidator struct{}
-
-func (v *ServiceNameUniquenessValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, _ map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
-	serviceNameMap := make(map[string]bool)
-	for serviceName := range rules {
-		if serviceNameMap[serviceName] {
-			return fmt.Errorf("duplicate service name found: %s", serviceName)
-		}
-		serviceNameMap[serviceName] = true
-	}
-	return nil
-}
-
 // RequiredFieldsValidator 验证必需字段
 type RequiredFieldsValidator struct{}
 
@@ -151,41 +137,6 @@ func (v *ServiceURLValidator) Validate(rules map[string]*zero_trust.TunnelCloudf
 	return nil
 }
 
-// ExposedPortValidator 验证容器暴露了端口 (T093)
-// Note: This validator requires container information which is not available in the validator interface.
-// Port validation is handled during label parsing in label_parser.go where container info is available.
-// This validator serves as a placeholder and logs a warning for manual verification.
-type ExposedPortValidator struct{}
-
-func (v *ExposedPortValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, _ map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
-	// Port validation is handled in label_parser.go where container.NetworkSettings.Ports is available
-	// This validator performs basic URL-based port validation
-	for serviceName, rule := range rules {
-		serviceURL := rule.Service.Value
-
-		// Skip special service URLs
-		if strings.HasPrefix(serviceURL, "http_status:") {
-			continue
-		}
-
-		parsedURL, err := url.Parse(serviceURL)
-		if err != nil {
-			// URL validation will be caught by ServiceURLValidator
-			continue
-		}
-
-		// Extract port from URL
-		_, port, err := net.SplitHostPort(parsedURL.Host)
-		if err != nil || port == "" {
-			// No explicit port - this might be using default ports
-			slog.Debug("Service URL has no explicit port, relying on container port configuration",
-				"service", serviceName,
-				"url", serviceURL)
-		}
-	}
-	return nil
-}
-
 // CompositeValidator 组合多个验证器
 type CompositeValidator struct {
 	validators []RuleValidator
@@ -194,11 +145,9 @@ type CompositeValidator struct {
 func NewCompositeValidator() *CompositeValidator {
 	return &CompositeValidator{
 		validators: []RuleValidator{
-			&ServiceNameUniquenessValidator{},
 			&RequiredFieldsValidator{},
 			&ServiceURLValidator{},
 			&HostnameUniquenessValidator{},
-			&ExposedPortValidator{},
 		},
 	}
 }

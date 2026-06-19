@@ -100,30 +100,6 @@ func TestHostnameUniquenessValidator_CaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestServiceNameUniquenessValidator(t *testing.T) {
-	validator := &ServiceNameUniquenessValidator{}
-
-	// 测试正常情况 - 服务名唯一（这个测试实际上不会失败，因为map的key本身就是唯一的）
-	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-		"service1": {
-			Hostname: cloudflare.F("example1.com"),
-			Service:  cloudflare.F("http://localhost:8080"),
-		},
-		"service2": {
-			Hostname: cloudflare.F("example2.com"),
-			Service:  cloudflare.F("http://localhost:8081"),
-		},
-	}
-
-	err := validator.Validate(rules, nil)
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
-	}
-
-	// 注意：由于Go map的特性，我们无法真正测试重复的服务名
-	// 因为map的key本身就是唯一的
-}
-
 func TestRequiredFieldsValidator(t *testing.T) {
 	validator := &RequiredFieldsValidator{}
 
@@ -293,45 +269,11 @@ func TestServiceURLValidator(t *testing.T) {
 	}
 }
 
-func TestExposedPortValidator(t *testing.T) {
-	validator := &ExposedPortValidator{}
-
-	// Test service URLs with ports
-	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-		"service1": {
-			Hostname: cloudflare.F("example1.com"),
-			Service:  cloudflare.F("http://localhost:8080"),
-		},
-		"service2": {
-			Hostname: cloudflare.F("example2.com"),
-			Service:  cloudflare.F("https://example.com:443"),
-		},
-	}
-
-	err := validator.Validate(rules, nil)
-	if err != nil {
-		t.Errorf("Expected no error for service URLs with ports, got %v", err)
-	}
-
-	// Test service URLs without ports (should still pass)
-	rules["service3"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-		Hostname: cloudflare.F("example3.com"),
-		Service:  cloudflare.F("http://localhost"), // No explicit port
-	}
-
-	err = validator.Validate(rules, nil)
-	if err != nil {
-		t.Errorf("Expected no error for service URL without explicit port, got %v", err)
-	}
-
-	// Test special service URL
-	rules["service4"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-		Hostname: cloudflare.F("example4.com"),
-		Service:  cloudflare.F("http_status:404"),
-	}
-
-	err = validator.Validate(rules, nil)
-	if err != nil {
-		t.Errorf("Expected no error for special service URL, got %v", err)
-	}
+func TestExposedPortValidator_Removed(t *testing.T) {
+	// ExposedPortValidator was removed (it only logged Debug and never
+	// returned an error). If real container-port validation is needed,
+	// build it where container info is available (label_parser.go) — not
+	// in the rule validator pipeline, which doesn't have access to
+	// container.NetworkSettings.Ports.
+	t.Log("ExposedPortValidator removed; this test is a placeholder")
 }
