@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,29 +119,54 @@ func TestRunCompensation_SuccessfulRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	// The executor runs on the compensation goroutine while the test goroutine
+	// asserts on the result — protect the shared slice with a mutex instead of
+	// a bare append + time.Sleep (which is a data race under -race).
+	var mu sync.Mutex
 	var executed []types.Action
 	executor := func(a types.Action) error {
+		mu.Lock()
 		executed = append(executed, a)
+		mu.Unlock()
 		return nil
 	}
 
 	go sm.RunCompensation(ctx, executor)
 
-	// Wait for execution
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the action to be executed (bounded, no fixed sleep).
+	eventually(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(executed) == 1
+	})
 
+	mu.Lock()
 	if len(executed) != 1 {
 		t.Fatalf("expected 1 execution, got %d", len(executed))
 	}
 	if executed[0].Hostname != "app.example.com" {
 		t.Errorf("expected hostname app.example.com, got %s", executed[0].Hostname)
 	}
+	mu.Unlock()
 
-	// Record should be removed after successful execution
-	records := sm.GetAllPendingActions()
-	if len(records) != 0 {
-		t.Errorf("expected 0 pending actions after success, got %d", len(records))
+	// Record removal happens on the compensation goroutine after the executor
+	// returns — poll instead of assuming it landed before our next read.
+	eventually(t, 2*time.Second, func() bool {
+		return len(sm.GetAllPendingActions()) == 0
+	})
+}
+
+// eventually polls cond until it returns true or the timeout elapses.
+func eventually(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	t.Fatal("condition not met within timeout")
 }
 
 func TestRunCompensation_RetryableFailureBacksOff(t *testing.T) {

@@ -1,7 +1,6 @@
-version: '3.8'
-
 # DockTunnel - Cloudflare Tunnel Docker Controller
-# This docker-compose file provides development and production configurations
+# 生产部署配置。状态目录使用命名卷持久化，容器重建后
+# retention / 补偿队列 / flapping 状态不丢失。
 
 services:
   docktunnel:
@@ -9,22 +8,21 @@ services:
     container_name: docktunnel
     restart: unless-stopped
 
-    # Mount Docker socket for container monitoring
+    # 挂载 Docker socket（只读）用于监听容器事件
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 命名卷：首次创建时继承镜像内 /var/lib/docktunnel 的属主（uid 10001），
+      # 应用内非 root 用户可直接读写
+      - docktunnel-state:/var/lib/docktunnel
       - ./config.yaml:/etc/docktunnel/config.yaml:ro
 
-    # Optional: Mount state file directory for persistence
-    # volumes:
-    #   - ./state:/var/lib/docktunnel
-
-    # Environment variables (override config file)
+    # 环境变量（覆盖配置文件；命名规则见 README「环境变量配置」章节）
     environment:
       - DOCKTUNNEL_LOG_LEVEL=info
-      # - DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
-      # - DOCKTUNNEL_CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      # - DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID=${DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID}
+      # - DOCKTUNNEL_CLOUDFLARE_API_TOKEN=${DOCKTUNNEL_CLOUDFLARE_API_TOKEN}
 
-    # Resource limits (adjust based on your needs)
+    # 资源限制（按需调整）
     deploy:
       resources:
         limits:
@@ -34,73 +32,21 @@ services:
           memory: 64M
           cpus: '0.25'
 
-    # Health check
+    # 健康检查：镜像为 alpine，自带 busybox wget；
+    # /healthz 是真实存活信号（metrics 服务，默认 127.0.0.1:9100）
     healthcheck:
-      test: ["CMD", "pgrep", "docktunnel"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9100/healthz"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
       start_period: 10s
 
-    # Logging configuration
+    # 日志轮转
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-    # Network mode (host mode required for Docker socket access)
-    network_mode: host
-
-# Production override profile
-# Usage: docker-compose --profile production up -d
-x-production: &production
-  docktunnel:
-    restart: always
-    environment:
-      - DOCKTUNNEL_LOG_LEVEL=warn  # Less verbose in production
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "5"
-
-# Development override profile
-# Usage: docker-compose --profile dev up -d
-x-development: &development
-  docktunnel:
-    environment:
-      - DOCKTUNNEL_LOG_LEVEL=debug  # Verbose logging for development
-    volumes:
-      - ./config.yaml:/etc/docktunnel/config.yaml:rw  # Read-write for config changes
-      - .:/workspace:ro  # Mount source code for development
-    working_dir: /workspace
-    command: ./docktunnel  # Override to run locally built binary
-
-# Optional: Example service to test DockTunnel
-# Usage: docker-compose --profile with-example up -d
-x-with-example: &with-example
-  web-app:
-    image: nginx:alpine
-    container_name: example-web-app
-    ports:
-      - "8080:80"
-    labels:
-      - "docktunnel.enable=true"
-      - "docktunnel.web.hostname=app.example.com"
-      - "docktunnel.web.service=http://localhost:8080"
-    restart: unless-stopped
-
-# Profile usage examples:
-#
-# 1. Basic production deployment:
-#    docker-compose up -d
-#
-# 2. Development mode with debug logging:
-#    docker-compose --profile dev up -d
-#
-# 3. With example web application:
-#    docker-compose --profile with-example up -d
-#
-# 4. Multiple profiles:
-#    docker-compose --profile dev --profile with-example up -d
+volumes:
+  docktunnel-state:

@@ -25,6 +25,9 @@ go.work
 docktunnel
 *.log
 
+# vendored Traefik 源码参考（仅本地参考，不参与构建，勿提交）
+traefik-source/
+
 # IDE specific
 .vscode/
 .idea/

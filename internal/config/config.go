@@ -298,8 +298,84 @@ func New() (*Config, error) {
 	v.AddConfigPath("/etc/docktunnel") // 在/etc/docktunnel目录查找
 
 	// 3. 绑定环境变量
+	//
+	// NOTE: viper's Unmarshal does NOT consult AutomaticEnv-registered keys
+	// (verified against v1.20.1: v.Get reads env, v.Unmarshal returns zero
+	// values). Every runtime key must therefore be explicitly bound with
+	// BindEnv using the canonical DOCKTUNNEL_* names documented in the
+	// README and .env.example. AutomaticEnv is kept so direct v.Get lookups
+	// elsewhere in the process still resolve env vars.
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.SetEnvPrefix("DOCKTUNNEL")
 	v.AutomaticEnv()
+
+	// key → env var name. The credential bindings also accept the legacy
+	// unprefixed names shipped in earlier .env.example files, so existing
+	// deployments that copied those names keep working.
+	envBindings := [][2]string{
+		{"log.level", "DOCKTUNNEL_LOG_LEVEL"},
+		{"log.format", "DOCKTUNNEL_LOG_FORMAT"},
+		{"cloudflare.accountId", "DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID"},
+		{"cloudflare.apiToken", "DOCKTUNNEL_CLOUDFLARE_API_TOKEN"},
+		{"cloudflare.tunnelId", "DOCKTUNNEL_CLOUDFLARE_TUNNEL_ID"},
+		{"cloudflare.tunnelName", "DOCKTUNNEL_CLOUDFLARE_TUNNEL_NAME"},
+		{"cloudflare.catchAll", "DOCKTUNNEL_CLOUDFLARE_CATCH_ALL"},
+		{"cloudflare.rateLimit", "DOCKTUNNEL_CLOUDFLARE_RATE_LIMIT"},
+		{"cloudflare.maxRetries", "DOCKTUNNEL_CLOUDFLARE_MAX_RETRIES"},
+		{"cloudflare.retryDelay", "DOCKTUNNEL_CLOUDFLARE_RETRY_DELAY"},
+		{"cloudflare.maxRetryDelay", "DOCKTUNNEL_CLOUDFLARE_MAX_RETRY_DELAY"},
+		{"cloudflare.originRequest.noTLSVerify", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_NOTLSVERIFY"},
+		{"cloudflare.originRequest.connectTimeout", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_CONNECT_TIMEOUT"},
+		{"cloudflare.originRequest.tlsTimeout", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_TLS_TIMEOUT"},
+		{"cloudflare.originRequest.tcpKeepAlive", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_TCP_KEEPALIVE"},
+		{"cloudflare.originRequest.keepAliveConnections", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_KEEPALIVE_CONNECTIONS"},
+		{"cloudflare.originRequest.keepAliveTimeout", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_KEEPALIVE_TIMEOUT"},
+		{"cloudflare.originRequest.noHappyEyeballs", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_NO_HAPPY_EYEBALLS"},
+		{"cloudflare.originRequest.proxyType", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_PROXY_TYPE"},
+		{"cloudflare.originRequest.httpHostHeader", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_HTTP_HOST_HEADER"},
+		{"cloudflare.originRequest.originServerName", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_ORIGIN_SERVER_NAME"},
+		{"cloudflare.originRequest.caPool", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_CA_POOL"},
+		{"cloudflare.originRequest.http2Origin", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_HTTP2_ORIGIN"},
+		{"cloudflare.originRequest.disableChunkedEncoding", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_DISABLE_CHUNKED_ENCODING"},
+		{"cloudflare.originRequest.accessRequired", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_ACCESS_REQUIRED"},
+		{"cloudflare.originRequest.accessTeamName", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_ACCESS_TEAM_NAME"},
+		{"cloudflare.originRequest.accessAudTag", "DOCKTUNNEL_CLOUDFLARE_ORIGINREQUEST_ACCESS_AUD_TAG"},
+		{"controller.flappingWindow", "DOCKTUNNEL_CONTROLLER_FLAPPING_WINDOW"},
+		{"controller.flappingThreshold", "DOCKTUNNEL_CONTROLLER_FLAPPING_THRESHOLD"},
+		{"controller.coolingPeriod", "DOCKTUNNEL_CONTROLLER_COOLING_PERIOD"},
+		{"controller.maxCoolingPeriod", "DOCKTUNNEL_CONTROLLER_MAX_COOLING_PERIOD"},
+		{"controller.debounceDuration", "DOCKTUNNEL_CONTROLLER_DEBOUNCE_DURATION"},
+		{"controller.reconcileEnabled", "DOCKTUNNEL_CONTROLLER_RECONCILE_ENABLED"},
+		{"controller.reconcileInterval", "DOCKTUNNEL_CONTROLLER_RECONCILE_INTERVAL"},
+		{"cleanup.onExit", "DOCKTUNNEL_CLEANUP_ON_EXIT"},
+		{"cleanup.stateFile", "DOCKTUNNEL_CLEANUP_STATE_FILE"},
+		{"cleanup.strategy", "DOCKTUNNEL_CLEANUP_STRATEGY"},
+		{"cleanup.timeout", "DOCKTUNNEL_CLEANUP_TIMEOUT"},
+		{"cleanup.lockFile", "DOCKTUNNEL_CLEANUP_LOCK_FILE"},
+		{"defaults.scheme", "DOCKTUNNEL_DEFAULTS_SCHEME"},
+		{"defaults.port", "DOCKTUNNEL_DEFAULTS_PORT"},
+		{"defaults.path", "DOCKTUNNEL_DEFAULTS_PATH"},
+		{"compensation.initialDelay", "DOCKTUNNEL_COMPENSATION_INITIAL_DELAY"},
+		{"compensation.maxDelay", "DOCKTUNNEL_COMPENSATION_MAX_DELAY"},
+		{"compensation.maxRetries", "DOCKTUNNEL_COMPENSATION_MAX_RETRIES"},
+		{"compensation.pollInterval", "DOCKTUNNEL_COMPENSATION_POLL_INTERVAL"},
+		{"compensation.maxQueueSize", "DOCKTUNNEL_COMPENSATION_MAX_QUEUE_SIZE"},
+		{"persistence.backupCount", "DOCKTUNNEL_PERSISTENCE_BACKUP_COUNT"},
+		{"persistence.validateOnLoad", "DOCKTUNNEL_PERSISTENCE_VALIDATE_ON_LOAD"},
+		{"server.bindAddr", "DOCKTUNNEL_SERVER_BIND_ADDR"},
+		{"server.port", "DOCKTUNNEL_SERVER_PORT"},
+		{"server.debugToken", "DOCKTUNNEL_SERVER_DEBUG_TOKEN"},
+	}
+	for _, b := range envBindings {
+		if err := v.BindEnv(b[0], b[1]); err != nil {
+			return nil, fmt.Errorf("bind env %s: %w", b[0], err)
+		}
+	}
+	// Legacy unprefixed aliases for the two credentials shipped in older
+	// .env.example files (CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN).
+	// BindEnv tries the names in order and uses the first one found.
+	_ = v.BindEnv("cloudflare.accountId", "DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ACCOUNT_ID")
+	_ = v.BindEnv("cloudflare.apiToken", "DOCKTUNNEL_CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_TOKEN")
 
 	// 4. 读取配置
 	if err := v.ReadInConfig(); err != nil {

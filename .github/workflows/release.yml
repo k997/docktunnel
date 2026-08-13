@@ -1,0 +1,64 @@
+name: Release
+
+# 打 tag（vX.Y.Z）时自动构建并发布：
+#   git tag v0.1.0 && git push origin v0.1.0
+# 产物：GitHub Release 二进制 + Docker 镜像（需配置 DOCKERHUB_USERNAME/PASSWORD secrets）。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+
+      - name: Run tests
+        run: go test -race ./...
+
+      - name: Cross-compile binaries
+        run: |
+          mkdir -p dist
+          for target in "linux amd64" "linux arm64" "darwin amd64" "darwin arm64"; do
+            set -- $target
+            GOOS=$1 GOARCH=$2 CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME} -X main.GitCommit=${GITHUB_SHA} -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              -o dist/docktunnel-$1-$2 ./cmd/docktunnel
+          done
+          sha256sum dist/* > dist/SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+      - name: Build & push Docker image
+        if: github.event_name == 'push'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ]; then
+            echo "DOCKERHUB_USERNAME/PASSWORD secrets not configured — skipping image push"
+            exit 0
+          fi
+          echo "$DOCKERHUB_PASSWORD" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          IMG="${DOCKERHUB_USERNAME}/docktunnel"
+          docker build \
+            --build-arg VERSION=${GITHUB_REF_NAME} \
+            --build-arg GIT_COMMIT=${GITHUB_SHA} \
+            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t "$IMG:${GITHUB_REF_NAME}" -t "$IMG:latest" .
+          docker push "$IMG:${GITHUB_REF_NAME}"
+          docker push "$IMG:latest"

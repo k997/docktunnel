@@ -9,6 +9,7 @@ import (
 
 	"docktunnel/pkg/types"
 	"github.com/cloudflare/cloudflare-go/v5"
+	"github.com/cloudflare/cloudflare-go/v5/dns"
 	"golang.org/x/time/rate"
 )
 
@@ -386,4 +387,48 @@ func TestZoneCacheKeyIsDomain(t *testing.T) {
 		}
 	}
 	m.cacheMu.RUnlock()
+}
+
+func TestMatchExistingCNAME(t *testing.T) {
+	records := []dns.RecordResponse{
+		{ID: "id-1", Name: "App.Example.com."},
+		{ID: "id-2", Name: "other.example.com"},
+	}
+
+	// Case-insensitive + trailing dot on both sides
+	if rec := matchExistingCNAME(records, "app.example.com"); rec == nil || rec.ID != "id-1" {
+		t.Errorf("expected match for app.example.com (case-insensitive), got %+v", rec)
+	}
+	if rec := matchExistingCNAME(records, "APP.EXAMPLE.COM."); rec == nil || rec.ID != "id-1" {
+		t.Errorf("expected match for APP.EXAMPLE.COM., got %+v", rec)
+	}
+
+	// No match
+	if rec := matchExistingCNAME(records, "missing.example.com"); rec != nil {
+		t.Errorf("expected nil for missing hostname, got %+v", rec)
+	}
+
+	// Empty input
+	if rec := matchExistingCNAME(nil, "app.example.com"); rec != nil {
+		t.Errorf("expected nil for empty records, got %+v", rec)
+	}
+}
+
+func TestCollectDeleteIDs(t *testing.T) {
+	records := []dns.RecordResponse{
+		{ID: "id-1"},
+		{ID: "id-2"},
+	}
+	deletes := collectDeleteIDs(records)
+	if len(deletes) != 2 {
+		t.Fatalf("expected 2 delete payloads, got %d", len(deletes))
+	}
+	if deletes[0].ID.Value != "id-1" || deletes[1].ID.Value != "id-2" {
+		t.Errorf("unexpected delete payloads: %+v", deletes)
+	}
+
+	// Empty input yields empty (non-nil) slice
+	if out := collectDeleteIDs(nil); out == nil || len(out) != 0 {
+		t.Errorf("expected empty non-nil slice, got %#v", out)
+	}
 }

@@ -31,6 +31,14 @@ var (
 	memprofile = flag.String("memprofile", "", "write memory profile to `file`")
 )
 
+// Version information, injected at build time via
+// -ldflags "-X main.Version=... -X main.BuildDate=... -X main.GitCommit=...".
+var (
+	Version   = "dev"
+	BuildDate = ""
+	GitCommit = ""
+)
+
 func main() {
 	flag.Parse()
 
@@ -57,7 +65,9 @@ func main() {
 
 	// 初始化日志记录器
 	var appLogger *slog.Logger = logger.New(cfg.Log.Level, cfg.Log.Format)
-	appLogger.Info("Configuration loaded successfully", "log_level", cfg.Log.Level, "log_format", cfg.Log.Format)
+	appLogger.Info("DockTunnel starting",
+		"version", Version, "git_commit", GitCommit, "build_date", BuildDate,
+		"log_level", cfg.Log.Level, "log_format", cfg.Log.Format)
 
 	// Acquire single-instance lock before touching Cloudflare. Two instances
 	// against the same tunnel would race on configuration writes and thrash

@@ -586,6 +586,31 @@ func (m *Manager) ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, err
 	return allTunnelRecords, nil
 }
 
+// matchExistingCNAME returns the first record in records whose name matches
+// hostname case-insensitively. DNS names are case-insensitive and Cloudflare's
+// Exact name filter is case-sensitive, so a server-side Exact query still needs
+// a client-side re-match. Trailing dots are ignored ("App.example.com." matches
+// "app.example.com"). Returns nil when nothing matches.
+func matchExistingCNAME(records []dns.RecordResponse, hostname string) *dns.RecordResponse {
+	want := strings.ToLower(strings.TrimSuffix(hostname, "."))
+	for i := range records {
+		got := strings.ToLower(strings.TrimSuffix(records[i].Name, "."))
+		if got == want {
+			return &records[i]
+		}
+	}
+	return nil
+}
+
+// collectDeleteIDs flattens a set of DNS records into batch-delete payloads.
+func collectDeleteIDs(records []dns.RecordResponse) []dns.RecordBatchParamsDelete {
+	out := make([]dns.RecordBatchParamsDelete, 0, len(records))
+	for _, record := range records {
+		out = append(out, dns.RecordBatchParamsDelete{ID: cloudflare.F(record.ID)})
+	}
+	return out
+}
+
 // UpsertDNSRecords 批量创建或更新DNS记录。
 //
 // 为每个 hostname 先查现有 CNAME：已存在的放进 Patches（按 record ID 更新），
@@ -640,11 +665,8 @@ func (m *Manager) UpsertDNSRecords(ctx context.Context, hostnames []string) (err
 				if err != nil {
 					return err
 				}
-				for _, record := range records.Result {
-					if strings.EqualFold(record.Name, hostname) {
-						existingID = record.ID
-						break
-					}
+				if rec := matchExistingCNAME(records.Result, hostname); rec != nil {
+					existingID = rec.ID
 				}
 				return nil
 			})
@@ -749,13 +771,7 @@ func (m *Manager) DeleteDNSRecords(ctx context.Context, hostnames []string) (err
 					return err
 				}
 
-				slog.Debug("Found records to delete", "hostname", hostname, "recordCount", len(records.Result))
-
-				for _, record := range records.Result {
-					found = append(found, dns.RecordBatchParamsDelete{
-						ID: cloudflare.F(record.ID),
-					})
-				}
+				found = collectDeleteIDs(records.Result)
 				return nil
 			})
 

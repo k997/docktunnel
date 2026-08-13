@@ -486,3 +486,117 @@ func TestVerifyAPIToken_FailsFormatCheckFirst(t *testing.T) {
 		t.Error("expected format error, got nil")
 	}
 }
+
+func TestEnvVarsAreReadByUnmarshal(t *testing.T) {
+	// Regression test: viper's Unmarshal does not consult AutomaticEnv keys
+	// (verified on v1.20.1). Every key must be explicitly BindEnv'd with the
+	// canonical DOCKTUNNEL_* name for env-based configuration to work.
+	tempDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(originalDir) }()
+
+	t.Setenv("DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID", "acc-from-env")
+	t.Setenv("DOCKTUNNEL_CLOUDFLARE_API_TOKEN", "tok-from-env")
+	t.Setenv("DOCKTUNNEL_CLOUDFLARE_RATE_LIMIT", "42")
+	t.Setenv("DOCKTUNNEL_CLOUDFLARE_RETRY_DELAY", "2s")
+	t.Setenv("DOCKTUNNEL_CONTROLLER_RECONCILE_ENABLED", "false")
+	t.Setenv("DOCKTUNNEL_LOG_LEVEL", "debug")
+
+	cfg, err := New()
+	if err != nil {
+		t.Fatalf("New() with env config failed: %v", err)
+	}
+	if cfg.Cloudflare.AccountID != "acc-from-env" {
+		t.Errorf("AccountID = %q, want acc-from-env", cfg.Cloudflare.AccountID)
+	}
+	if cfg.Cloudflare.APIToken != "tok-from-env" {
+		t.Errorf("APIToken = %q, want tok-from-env", cfg.Cloudflare.APIToken)
+	}
+	if cfg.Cloudflare.RateLimit != 42 {
+		t.Errorf("RateLimit = %d, want 42", cfg.Cloudflare.RateLimit)
+	}
+	if cfg.Cloudflare.RetryDelay != 2*time.Second {
+		t.Errorf("RetryDelay = %v, want 2s", cfg.Cloudflare.RetryDelay)
+	}
+	if cfg.Controller.ReconcileEnabled {
+		t.Error("ReconcileEnabled = true, want false (env override)")
+	}
+	if cfg.Log.Level != "debug" {
+		t.Errorf("Log.Level = %q, want debug", cfg.Log.Level)
+	}
+}
+
+func TestEnvVarsOverrideConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	content := `
+log:
+  level: info
+cloudflare:
+  accountId: acc-from-file
+  apiToken: tok-from-file
+`
+	if err := os.WriteFile(tempDir+"/config.yaml", []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(originalDir) }()
+
+	// Env must take precedence over the config file.
+	t.Setenv("DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID", "acc-from-env")
+	t.Setenv("DOCKTUNNEL_CLOUDFLARE_API_TOKEN", "tok-from-env")
+
+	cfg, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if cfg.Cloudflare.AccountID != "acc-from-env" {
+		t.Errorf("AccountID = %q, want env value to override file", cfg.Cloudflare.AccountID)
+	}
+	if cfg.Cloudflare.APIToken != "tok-from-env" {
+		t.Errorf("APIToken = %q, want env value to override file", cfg.Cloudflare.APIToken)
+	}
+	if cfg.Log.Level != "info" {
+		t.Errorf("Log.Level = %q, want info from file (no env set)", cfg.Log.Level)
+	}
+}
+
+func TestEnvVarsLegacyUnprefixedAlias(t *testing.T) {
+	// Older .env.example files shipped CLOUDFLARE_ACCOUNT_ID /
+	// CLOUDFLARE_API_TOKEN without the DOCKTUNNEL_ prefix. Those must keep
+	// working so existing deployments aren't broken by the rename.
+	tempDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(originalDir) }()
+
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "acc-legacy")
+	t.Setenv("CLOUDFLARE_API_TOKEN", "tok-legacy")
+
+	cfg, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if cfg.Cloudflare.AccountID != "acc-legacy" {
+		t.Errorf("AccountID = %q, want legacy alias to work", cfg.Cloudflare.AccountID)
+	}
+	if cfg.Cloudflare.APIToken != "tok-legacy" {
+		t.Errorf("APIToken = %q, want legacy alias to work", cfg.Cloudflare.APIToken)
+	}
+}

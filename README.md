@@ -57,7 +57,7 @@ DockTunnel 采用 **事件驱动 + 状态协调** 的架构模式：
 ### 系统要求
 
 - **Docker**: 18.09+ （用于容器部署）
-- **Go**: 1.21+ （仅开发环境）
+- **Go**: 1.24+ （仅开发环境，见 [go.mod](go.mod)）
 - **Cloudflare 账户**和 API Token，需要以下权限：
   - Account: Read/Write
   - Zone: Read/Write
@@ -71,8 +71,9 @@ DockTunnel 采用 **事件驱动 + 状态协调** 的架构模式：
 docker run -d \
   --name=docktunnel \
   --restart=unless-stopped \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v ./config.yaml:/etc/docktunnel/config.yaml \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v ./config.yaml:/etc/docktunnel/config.yaml:ro \
+  -v docktunnel-state:/var/lib/docktunnel \
   kongque/docktunnel:latest
 ```
 
@@ -142,12 +143,16 @@ cleanup:
 
 #### 环境变量配置
 
+所有环境变量使用 `DOCKTUNNEL_` 前缀 + 配置路径（点转下划线），例如 `cloudflare.accountId` → `DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID`。环境变量优先级高于配置文件。
+
 ```bash
 export DOCKTUNNEL_LOG_LEVEL=debug
 export DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID="your-account-id"
 export DOCKTUNNEL_CLOUDFLARE_API_TOKEN="your-api-token"
 export DOCKTUNNEL_CLOUDFLARE_TUNNEL_NAME="DockTunnel"
 ```
+
+完整变量清单见 [.env.example](.env.example)。
 
 ## 容器标签系统
 
@@ -608,32 +613,53 @@ DockTunnel/
 │       ├── main.go
 │       └── main_test.go
 ├── internal/
-│   ├── cloudflareManager/   # Cloudflare API 管理
+│   ├── cloudflareManager/   # Cloudflare API 管理（隧道/DNS/zone）
 │   │   ├── tunnel.go
 │   │   └── tunnel_test.go
-│   ├── config/              # 配置管理
+│   ├── config/              # 配置管理（文件 + 环境变量 + 默认值）
 │   │   ├── config.go
 │   │   └── config_test.go
-│   ├── controller/          # 核心业务逻辑
-│   │   ├── controller.go
-│   │   ├── controller_test.go
-│   │   ├── label_parser.go
-│   │   ├── label_parser_test.go
-│   │   ├── validator.go
-│   │   └── validator_test.go
-│   ├── docker/              # Docker 监控
+│   ├── controller/          # 核心业务逻辑（状态机/对账/GC/补偿）
+│   │   ├── controller.go    # 编排器
+│   │   ├── dispatcher.go    # 事件分发
+│   │   ├── syncer.go        # 状态同步
+│   │   ├── reconciler.go    # 周期对账
+│   │   ├── handlers.go      # 容器生命周期处理
+│   │   ├── health.go        # 容器抖动检测
+│   │   ├── gc.go            # 过期清理
+│   │   ├── compensation.go  # 失败补偿
+│   │   ├── diagnostics.go   # 诊断数据
+│   │   ├── sync_worker.go   # 串行化 Cloudflare 写入
+│   │   └── validator.go     # 规则校验
+│   ├── docker/              # Docker 监控（事件监听/重连/扫描）
 │   │   ├── monitor.go
 │   │   └── monitor_test.go
 │   ├── events/              # 事件定义
 │   │   └── event.go
-│   └── logger/              # 日志管理
-│       ├── logger.go
-│       └── logger_test.go
+│   ├── label/               # 标签解析（docktunnel.* + Traefik 兼容）
+│   │   ├── parser.go
+│   │   ├── builder.go
+│   │   ├── docktunnel.go
+│   │   ├── traefik.go
+│   │   └── types.go
+│   ├── state/               # 状态管理（持久化/状态机/补偿队列）
+│   │   ├── manager.go
+│   │   ├── persistence.go
+│   │   ├── transition.go
+│   │   └── compensation.go
+│   ├── instance/            # 单实例锁
+│   ├── metrics/             # Prometheus 指标
+│   ├── diagnostics/         # /debug/state 诊断
+│   ├── server/              # HTTP 服务（/metrics /healthz /debug/state）
+│   └── logger/              # 结构化日志
+├── pkg/types/               # 公共类型（错误分类/Tunnel 类型）
+├── tests/                   # 集成测试 + mock
 ├── config.yaml              # 配置文件示例
 ├── go.mod
 ├── go.sum
 ├── Makefile
 ├── Dockerfile
+├── docker-compose.yml
 └── README.md
 ```
 
@@ -735,8 +761,6 @@ sudo systemctl status docktunnel
 ### Docker Compose 部署
 
 ```yaml
-version: '3.8'
-
 services:
   docktunnel:
     image: kongque/docktunnel:latest
@@ -744,16 +768,22 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - docktunnel-state:/var/lib/docktunnel   # 状态持久化，容器重建不丢失
       - ./config.yaml:/etc/docktunnel/config.yaml:ro
     environment:
       - DOCKTUNNEL_LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9100/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  docktunnel-state:
 ```
 
-启动：
-
-```bash
-docker-compose up -d
-```
+仓库内附一份可直接使用的 [docker-compose.yml](docker-compose.yml)。
 
 ### Kubernetes 部署（DaemonSet）
 

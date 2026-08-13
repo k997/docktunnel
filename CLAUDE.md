@@ -67,12 +67,13 @@ DockTunnel follows an **event-driven architecture** with the following component
 - **Structured configuration**: Log, Cloudflare, Controller, and Cleanup sections
 - **Validation**: Ensures required parameters are provided
 
-#### 6. Label Parser (`internal/controller/label_parser.go`)
-- **Label-based configuration** parsing
+#### 6. Label Parser (`internal/label/`)
+- **Label-based configuration** parsing (`parser.go` + `builder.go`)
 - **Flexible label schema**: `docktunnel.<service-name>.<attribute>`
 - **Comprehensive attribute support**: hostname, service, port, path, originRequest settings
 - **Network-aware**: Auto-detects container IPs and handles host network mode
 - **Protocol detection**: Supports HTTP/HTTPS service URL generation
+- **Traefik compatibility**: Reuses Traefik labels (`traefik.*`) when docktunnel labels are absent
 
 #### 7. Validators (`internal/controller/validator.go`)
 - **Rule validation pipeline**: Composite pattern with multiple validators
@@ -296,7 +297,7 @@ docker run -d \
 
 ### Prerequisites
 - Docker 18.09+ (for container usage)
-- Go 1.21+ (for development)
+- Go 1.24+ (for development)
 - Cloudflare account and API token with:
   - Account: Read/Write
   - Zone: Read/Write
