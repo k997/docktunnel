@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -86,12 +87,8 @@ func TestLoadConfigFileNotFound(t *testing.T) {
 
 func TestLoadDefaultConfig(t *testing.T) {
 	// Set required environment variables (Viper maps cloudflare.apiToken to CLOUDFLARE_APITOKEN)
-	os.Setenv("CLOUDFLARE_APITOKEN", "test-token-from-env")
-	os.Setenv("CLOUDFLARE_ACCOUNTID", "test-account-from-env")
-	defer func() {
-		os.Unsetenv("CLOUDFLARE_APITOKEN")
-		os.Unsetenv("CLOUDFLARE_ACCOUNTID")
-	}()
+	t.Setenv("CLOUDFLARE_APITOKEN", "test-token-from-env")
+	t.Setenv("CLOUDFLARE_ACCOUNTID", "test-account-from-env")
 
 	// 创建空的配置文件
 	tempDir := t.TempDir()
@@ -153,6 +150,11 @@ func TestLoadDefaultConfig(t *testing.T) {
 
 	if config.Cleanup.Timeout != 30*time.Second {
 		t.Errorf("Expected default cleanup timeout '30s', got '%v'", config.Cleanup.Timeout)
+	}
+
+	// Cloudflare 官方限额约 1200 请求/5 分钟（≈4 RPS），默认速率限制应为 4。
+	if config.Cloudflare.RateLimit != 4 {
+		t.Errorf("Expected default rateLimit '4' (Cloudflare official limit ~1200 req/5min), got '%d'", config.Cloudflare.RateLimit)
 	}
 }
 
@@ -408,8 +410,9 @@ func TestValidate_CleanupStrategy(t *testing.T) {
 	}{
 		{"", false}, // treated as graceful-cleanup by caller
 		{"graceful-cleanup", false},
-		{"force-cleanup", false},
-		{"none", false},
+		{"fast-exit", false},
+		{"force-cleanup", true}, // deprecated: rejected with migration hint
+		{"none", true},          // deprecated: rejected with migration hint
 		{"bogus", true},
 	}
 	for _, tc := range cases {
@@ -422,6 +425,28 @@ func TestValidate_CleanupStrategy(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Errorf("unexpected error for strategy %q: %v", tc.strategy, err)
+			}
+		})
+	}
+}
+
+// TestValidate_CleanupStrategyDeprecatedHint verifies that the legacy
+// force-cleanup / none values are rejected with a migration hint pointing at
+// the new cleanup semantics (onExit gates cleanup).
+func TestValidate_CleanupStrategyDeprecatedHint(t *testing.T) {
+	for _, legacy := range []string{"force-cleanup", "none"} {
+		t.Run(legacy, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Cleanup.Strategy = legacy
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("expected error for deprecated strategy %q, got nil", legacy)
+			}
+			if !strings.Contains(err.Error(), "cleanup semantics changed") {
+				t.Errorf("expected migration hint in error, got: %v", err)
+			}
+			if !strings.Contains(err.Error(), `"graceful-cleanup" or "fast-exit"`) {
+				t.Errorf("expected new enum in error, got: %v", err)
 			}
 		})
 	}
@@ -598,5 +623,76 @@ func TestEnvVarsLegacyUnprefixedAlias(t *testing.T) {
 	}
 	if cfg.Cloudflare.APIToken != "tok-legacy" {
 		t.Errorf("APIToken = %q, want legacy alias to work", cfg.Cloudflare.APIToken)
+	}
+}
+
+// TestConfigPathEnvVar verifies that CONFIG_PATH selects the config file by
+// its full path (used for systemd deployments), even when the working
+// directory contains no config.yaml.
+func TestConfigPathEnvVar(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "custom.yaml")
+	content := `
+log:
+  level: debug
+cloudflare:
+  accountId: acc-from-custom-path
+  apiToken: tok-from-custom-path
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change into a separate empty dir without any config.yaml so only
+	// CONFIG_PATH can locate the file.
+	emptyDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(emptyDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(originalDir) }()
+
+	t.Setenv("CONFIG_PATH", configPath)
+
+	cfg, err := New()
+	if err != nil {
+		t.Fatalf("New() with CONFIG_PATH failed: %v", err)
+	}
+	if cfg.Cloudflare.AccountID != "acc-from-custom-path" {
+		t.Errorf("AccountID = %q, want acc-from-custom-path", cfg.Cloudflare.AccountID)
+	}
+	if cfg.Cloudflare.APIToken != "tok-from-custom-path" {
+		t.Errorf("APIToken = %q, want tok-from-custom-path", cfg.Cloudflare.APIToken)
+	}
+	if cfg.Log.Level != "debug" {
+		t.Errorf("Log.Level = %q, want debug from CONFIG_PATH file", cfg.Log.Level)
+	}
+}
+
+// TestRateLimitDefault verifies the Cloudflare rate limit default matches the
+// official API limit (~1200 requests / 5 minutes ≈ 4 RPS).
+func TestRateLimitDefault(t *testing.T) {
+	tempDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(originalDir) }()
+
+	t.Setenv("DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID", "acc-for-rate-limit")
+	t.Setenv("DOCKTUNNEL_CLOUDFLARE_API_TOKEN", "tok-for-rate-limit")
+
+	cfg, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if cfg.Cloudflare.RateLimit != 4 {
+		t.Errorf("default RateLimit = %d, want 4 (Cloudflare official limit ~1200 req/5min)", cfg.Cloudflare.RateLimit)
 	}
 }

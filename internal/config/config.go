@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -254,9 +255,11 @@ func New() (*Config, error) {
 	// 1. 设置默认值
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")
-	v.SetDefault("cloudflare.tunnelName", "DockTunnel")           // 默认通道名称
-	v.SetDefault("cloudflare.catchAll", "http_status:404")        // 默认catch-all规则
-	v.SetDefault("cloudflare.rateLimit", 10)                      // 默认每秒10个请求的速率限制
+	v.SetDefault("cloudflare.tunnelName", "DockTunnel")    // 默认通道名称
+	v.SetDefault("cloudflare.catchAll", "http_status:404") // 默认catch-all规则
+	// 默认每秒4个请求的速率限制。Cloudflare 官方 API 限额约为
+	// 1200 请求/5 分钟（约 4 RPS），10 RPS 会触发 429 限流。
+	v.SetDefault("cloudflare.rateLimit", 4)
 	v.SetDefault("cloudflare.maxRetries", 3)                      // 默认最大重试次数
 	v.SetDefault("cloudflare.retryDelay", 1*time.Second)          // 默认初始重试延迟1秒
 	v.SetDefault("cloudflare.maxRetryDelay", 30*time.Second)      // 默认最大重试延迟30秒
@@ -296,6 +299,12 @@ func New() (*Config, error) {
 	v.SetConfigType("yaml")
 	v.AddConfigPath(".")               // 在当前目录查找
 	v.AddConfigPath("/etc/docktunnel") // 在/etc/docktunnel目录查找
+
+	// CONFIG_PATH 指定配置文件的完整路径（如 systemd 部署时指向
+	// /etc/docktunnel/config.yaml）。非空时优先于上面的默认查找路径。
+	if p := os.Getenv("CONFIG_PATH"); p != "" {
+		v.SetConfigFile(p)
+	}
 
 	// 3. 绑定环境变量
 	//
@@ -446,10 +455,22 @@ func (c *Config) validate() error {
 
 	// Cleanup
 	add(c.Cleanup.Timeout < 0, "cleanup.timeout must be >= 0")
+	// 与 cmd 的 shouldSkipCleanup 对齐：onExit=true 时只有 graceful-cleanup
+	// 会真正清理，fast-exit 表示不清理直接退出。旧的 force-cleanup / none
+	// 语义已废弃，给出明确的迁移提示。
 	switch c.Cleanup.Strategy {
-	case "", "graceful-cleanup", "force-cleanup", "none":
+	case "", "graceful-cleanup", "fast-exit":
 	default:
-		errs = append(errs, fmt.Sprintf("cleanup.strategy %q is not recognized (expected graceful-cleanup|force-cleanup|none)", c.Cleanup.Strategy))
+		switch c.Cleanup.Strategy {
+		case "force-cleanup", "none":
+			errs = append(errs, fmt.Sprintf(
+				"cleanup.strategy %q is no longer supported: cleanup semantics changed, strategy must be \"graceful-cleanup\" or \"fast-exit\"; cleanup.onExit gates cleanup (onExit=false never cleans up)",
+				c.Cleanup.Strategy))
+		default:
+			errs = append(errs, fmt.Sprintf(
+				"cleanup.strategy %q is not recognized (expected \"\"|graceful-cleanup|fast-exit)",
+				c.Cleanup.Strategy))
+		}
 	}
 
 	// Compensation
