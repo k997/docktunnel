@@ -25,7 +25,23 @@ func Parse(containerInfo *container.InspectResponse) (map[string]*zero_trust.Tun
 
 	// Stage 1: Decode both label namespaces
 	dtServices := decodeDockTunnel(labels)
-	tfSpecs := decodeTraefikToSpecs(labels, containerInfo)
+
+	// A1: Traefik labels are opt-in. They are only parsed when the container
+	// explicitly sets docktunnel.traefik.enable=true; otherwise every traefik.*
+	// label — including auth-middleware-protected internal routes — would be
+	// published as a public tunnel rule.
+	tfSpecs := map[string]*IngressSpec{}
+	if v, ok := labels["docktunnel.traefik.enable"]; ok {
+		enabled, err := strconv.ParseBool(v)
+		if err == nil && enabled {
+			tfSpecs = decodeTraefikToSpecs(labels, containerInfo)
+		} else {
+			slog.Debug("Skipping traefik.* labels: docktunnel.traefik.enable is not true",
+				"value", v, "error", err)
+		}
+	} else {
+		slog.Debug("Skipping traefik.* labels: docktunnel.traefik.enable not set")
+	}
 
 	// Stage 2: Adapt docktunnel ServiceConfigs -> IngressSpecs
 	dtSpecs := adaptDockTunnelToSpecs(dtServices, containerInfo)

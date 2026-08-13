@@ -1,6 +1,7 @@
 package label
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,42 @@ func TestDecodeToNode_NestedPath(t *testing.T) {
 
 	if current.Value != "8080" {
 		t.Errorf("expected leaf value '8080', got '%s'", current.Value)
+	}
+}
+
+// --- P3-3: DecodeToNode must defend itself against segments that end in ']'
+// without a matching '[' (strings.Index returns -1; v[:indexLeft] would panic
+// out of range). It must return an error, never panic. ---
+
+func TestDecodeToNode_TrailingBracketReturnsError(t *testing.T) {
+	malformed := []string{
+		"traefik.http.routers.foo]",
+		"traefik.tcp.routers.bar]",
+		"traefik.http.services.svc.loadbalancer.server.port]",
+	}
+	for _, key := range malformed {
+		t.Run(key, func(t *testing.T) {
+			labels := map[string]string{key: "Host(`evil.example.com`)"}
+			_, err := DecodeToNode(labels, "traefik", "traefik.http", "traefik.tcp")
+			if err == nil {
+				t.Fatalf("expected error for malformed key %q, got nil", key)
+			}
+			if !strings.Contains(err.Error(), "invalid bracket") {
+				t.Errorf("expected error mentioning invalid bracket, got: %v", err)
+			}
+		})
+	}
+
+	// 段内出现 ']' 但不在末尾（如 "a]b"）不触发切片路径，不应 panic 也不应报错
+	if _, err := DecodeToNode(map[string]string{"traefik.http.routers.a]b": "Host(`x.com`)"}, "traefik", "traefik.http"); err != nil {
+		t.Fatalf("segment containing ']' not at the end must not error, got: %v", err)
+	}
+
+	// 合法键不受影响
+	labels := map[string]string{
+		"traefik.http.routers.app.rule": "Host(`example.com`)",
+	}
+	if _, err := DecodeToNode(labels, "traefik", "traefik.http"); err != nil {
+		t.Fatalf("valid key must still parse, got error: %v", err)
 	}
 }

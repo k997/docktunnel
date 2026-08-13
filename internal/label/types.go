@@ -16,8 +16,9 @@ type HTTPConfiguration struct {
 }
 
 type Router struct {
-	Rule    string
-	Service string
+	Rule        string
+	Service     string
+	Middlewares string
 }
 
 type Service struct {
@@ -69,6 +70,7 @@ type ServiceConfig struct {
 	Proto     string
 	Path      string
 	Retention string
+	Network   string
 
 	// OriginRequest fields (string values, converted in builder)
 	ConnectTimeout         string
@@ -86,7 +88,10 @@ type ServiceConfig struct {
 	ProxyType              string
 	ProxyAddress           string
 	ProxyPort              string
-	MatchSNItoHost         string
+	// MatchSNItoHost is deprecated: the Cloudflare v5 API has no
+	// matchSNItoHost field, so the label is ignored with a warning and this
+	// field is never populated. Retained only for gob/test compatibility.
+	MatchSNItoHost string
 
 	// Access fields
 	AccessRequired string
@@ -104,6 +109,7 @@ type IngressSpec struct {
 	ServiceURL    string
 	OriginRequest *OriginRequestSpec
 	Retention     string
+	Network       string
 }
 
 // OriginRequestSpec holds converted origin request values.
@@ -124,8 +130,11 @@ type OriginRequestSpec struct {
 	ProxyType              string
 	ProxyAddress           string
 	ProxyPort              *int
-	MatchSNItoHost         *bool
-	Access                 *AccessSpec
+	// MatchSNItoHost is deprecated: the Cloudflare v5 API has no matchSNItoHost
+	// field; this pointer is never populated. Retained for gob/test
+	// compatibility only.
+	MatchSNItoHost *bool
+	Access         *AccessSpec
 }
 
 // AccessSpec holds Cloudflare Access configuration.

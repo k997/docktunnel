@@ -100,6 +100,138 @@ func TestGetContainerIP_MultiNetworkDeterministic(t *testing.T) {
 	}
 }
 
+// --- A11: GetContainerIPOnNetwork ---
+
+func TestGetContainerIPOnNetwork_EmptyMatchesDefault(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{NetworkMode: "default"},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	if got := GetContainerIPOnNetwork(containerInfo, ""); got != GetContainerIP(containerInfo) {
+		t.Errorf("GetContainerIPOnNetwork(\"\") should equal GetContainerIP, got %q", got)
+	}
+	if got := GetContainerIPOnNetwork(containerInfo, ""); got != "172.17.0.2" {
+		t.Errorf("expected '172.17.0.2', got '%s'", got)
+	}
+}
+
+func TestGetContainerIPOnNetwork_Host(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{NetworkMode: "host"},
+		},
+		NetworkSettings: &container.NetworkSettings{},
+	}
+
+	if got := GetContainerIPOnNetwork(containerInfo, "host"); got != "localhost" {
+		t.Errorf("expected 'localhost', got '%s'", got)
+	}
+}
+
+func TestGetContainerIPOnNetwork_Specific(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{NetworkMode: "default"},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"custom":  {IPAddress: "10.0.0.5"},
+				"backend": {IPAddress: "10.0.0.10"},
+			},
+		},
+	}
+
+	if got := GetContainerIPOnNetwork(containerInfo, "custom"); got != "10.0.0.5" {
+		t.Errorf("expected '10.0.0.5' from custom network, got '%s'", got)
+	}
+}
+
+func TestGetContainerIPOnNetwork_MissingFallsBack(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{NetworkMode: "default"},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	// Unknown network warns and falls back to default detection (bridge first).
+	if got := GetContainerIPOnNetwork(containerInfo, "no-such-net"); got != "172.17.0.2" {
+		t.Errorf("expected fallback '172.17.0.2', got '%s'", got)
+	}
+}
+
+func TestAdaptDockTunnelToSpecs_Network(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{NetworkMode: "default"},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"custom": {IPAddress: "10.0.0.5"},
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	services := map[string]*ServiceConfig{
+		"web": {Hostname: "example.com", Port: "8080", Scheme: "http", Network: "custom"},
+	}
+
+	specs := adaptDockTunnelToSpecs(services, containerInfo)
+	web := specs["web"]
+	if web == nil {
+		t.Fatal("expected web spec")
+	}
+	if web.Network != "custom" {
+		t.Errorf("expected Network 'custom', got '%s'", web.Network)
+	}
+	if web.ServiceURL != "http://10.0.0.5:8080" {
+		t.Errorf("expected ServiceURL from custom network 'http://10.0.0.5:8080', got '%s'", web.ServiceURL)
+	}
+}
+
+// --- A4: invalid docktunnel port must not panic and must not build a URL ---
+
+func TestAdaptDockTunnelToSpecs_InvalidPortNoPanic(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			HostConfig: &container.HostConfig{NetworkMode: "default"},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	services := map[string]*ServiceConfig{
+		"web": {Hostname: "example.com", Port: "not-a-port", Scheme: "http"},
+	}
+
+	specs := adaptDockTunnelToSpecs(services, containerInfo)
+	web := specs["web"]
+	if web == nil {
+		t.Fatal("expected web spec")
+	}
+	if web.Port != 0 {
+		t.Errorf("expected port 0 on parse failure, got %d", web.Port)
+	}
+	if web.ServiceURL != "" {
+		t.Errorf("expected empty ServiceURL on parse failure, got '%s'", web.ServiceURL)
+	}
+}
+
 func TestAdaptDockTunnelToSpecs_ServiceURL(t *testing.T) {
 	services := map[string]*ServiceConfig{
 		"web": {Hostname: "example.com", Service: "http://localhost:8080"},
@@ -145,7 +277,6 @@ func TestConvertOriginRequest(t *testing.T) {
 		KeepAliveConnections: "50",
 		ProxyAddress:         "127.0.0.1",
 		ProxyPort:            "9050",
-		MatchSNItoHost:       "true",
 		AccessRequired:       "true",
 		AccessTeamName:       "my-team",
 		AccessAUDTag:         "tag1, tag2",
@@ -171,8 +302,8 @@ func TestConvertOriginRequest(t *testing.T) {
 	if spec.ProxyPort == nil || *spec.ProxyPort != 9050 {
 		t.Errorf("expected proxyPort 9050, got %v", spec.ProxyPort)
 	}
-	if spec.MatchSNItoHost == nil || !*spec.MatchSNItoHost {
-		t.Error("expected matchSNItoHost true")
+	if spec.MatchSNItoHost != nil {
+		t.Error("matchSNItoHost is deprecated (no Cloudflare v5 API field) and must never be converted")
 	}
 	if spec.Access == nil {
 		t.Fatal("expected access config")
@@ -300,6 +431,33 @@ func TestMergeSpecs_NoConflict(t *testing.T) {
 	merged := mergeSpecs(traefikSpecs, docktunnelSpecs)
 	if len(merged) != 2 {
 		t.Fatalf("expected 2 merged specs, got %d", len(merged))
+	}
+}
+
+// TestMergeSpecs_CaseInsensitiveConflict verifies that hostnames differing
+// only in case collide, and that the surviving hostname is lower-cased (A3).
+func TestMergeSpecs_CaseInsensitiveConflict(t *testing.T) {
+	traefikSpecs := map[string]*IngressSpec{
+		"http:myapp@Example.COM": {Hostname: "Example.COM", Port: 8080},
+	}
+	docktunnelSpecs := map[string]*IngressSpec{
+		"web": {Hostname: "example.com", ServiceURL: "http://localhost:3000"},
+	}
+
+	merged := mergeSpecs(traefikSpecs, docktunnelSpecs)
+
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged spec (case-insensitive conflict), got %d", len(merged))
+	}
+	web := merged["web"]
+	if web == nil {
+		t.Fatalf("expected docktunnel 'web' key to win, got keys: %v", mapKeys(merged))
+	}
+	if web.Hostname != "example.com" {
+		t.Errorf("expected lower-cased hostname 'example.com', got '%s'", web.Hostname)
+	}
+	if _, ok := merged["http:myapp@Example.COM"]; ok {
+		t.Error("traefik entry should be removed on case-insensitive hostname conflict")
 	}
 }
 

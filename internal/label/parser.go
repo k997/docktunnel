@@ -39,6 +39,13 @@ func DecodeToNode(labels map[string]string, rootName string, filters ...string) 
 
 			if strings.HasSuffix(v, "]") && v[0] != '[' {
 				indexLeft := strings.Index(v, "[")
+				// P3-3: a segment ending in ']' without any '[' (e.g. "foo]")
+				// makes Index return -1, and v[:indexLeft] would slice out of
+				// range and panic. The parser must not trust its input: reject
+				// such a label with an error instead.
+				if indexLeft < 0 {
+					return nil, fmt.Errorf("invalid bracket in field name %q", v)
+				}
 				parts = append(parts, v[:indexLeft], v[indexLeft:])
 			} else {
 				parts = append(parts, v)

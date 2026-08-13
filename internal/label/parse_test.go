@@ -68,6 +68,7 @@ func TestParse_TraefikOnly(t *testing.T) {
 		Config: &container.Config{
 			Labels: map[string]string{
 				"docktunnel.enable":                                    "true",
+				"docktunnel.traefik.enable":                            "true",
 				"traefik.http.routers.myapp.rule":                      "Host(`app.example.com`)",
 				"traefik.http.services.myapp.loadbalancer.server.port": "8080",
 			},
@@ -87,9 +88,9 @@ func TestParse_TraefikOnly(t *testing.T) {
 		t.Fatalf("expected 1 rule, got %d", len(rules))
 	}
 
-	spec := rules["myapp@app.example.com"]
+	spec := rules["http:myapp@app.example.com"]
 	if spec == nil {
-		t.Fatalf("expected 'myapp@app.example.com' rule, got keys: %v", ruleKeys(rules))
+		t.Fatalf("expected 'http:myapp@app.example.com' rule, got keys: %v", ruleKeys(rules))
 	}
 	if spec.Hostname.Value != "app.example.com" {
 		t.Errorf("expected hostname 'app.example.com', got '%s'", spec.Hostname.Value)
@@ -107,6 +108,7 @@ func TestParse_BothLabels_DockTunnelOverrides(t *testing.T) {
 		Config: &container.Config{
 			Labels: map[string]string{
 				"docktunnel.enable":                                    "true",
+				"docktunnel.traefik.enable":                            "true",
 				"docktunnel.web.hostname":                              "example.com",
 				"docktunnel.web.service":                               "http://localhost:3000",
 				"traefik.http.routers.myapp.rule":                      "Host(`example.com`)",
@@ -146,6 +148,7 @@ func TestParse_BothLabels_NoConflict(t *testing.T) {
 		Config: &container.Config{
 			Labels: map[string]string{
 				"docktunnel.enable":                                  "true",
+				"docktunnel.traefik.enable":                          "true",
 				"docktunnel.web.hostname":                            "web.example.com",
 				"docktunnel.web.service":                             "http://localhost:8080",
 				"traefik.http.routers.api.rule":                      "Host(`api.example.com`)",
@@ -257,6 +260,110 @@ func TestParseRetentionPolicy_Invalid(t *testing.T) {
 		if err == nil {
 			t.Errorf("expected error for '%s'", input)
 		}
+	}
+}
+
+// --- A1: Traefik parsing is opt-in via docktunnel.traefik.enable ---
+
+func TestParse_TraefikDisabled_OnlyTraefikLabels(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		Config: &container.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":                                    "true",
+				"traefik.http.routers.myapp.rule":                      "Host(`app.example.com`)",
+				"traefik.http.services.myapp.loadbalancer.server.port": "8080",
+			},
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: "172.17.0.2"},
+			},
+		},
+	}
+
+	_, err := Parse(containerInfo)
+	if err == nil {
+		t.Error("expected error: without docktunnel.traefik.enable no ingress rules should be derived")
+	}
+}
+
+func TestParse_TraefikDisabled_WithDockTunnelLabels(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		Config: &container.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":                                    "true",
+				"docktunnel.web.hostname":                              "web.example.com",
+				"docktunnel.web.service":                               "http://localhost:8080",
+				"traefik.http.routers.myapp.rule":                      "Host(`app.example.com`)",
+				"traefik.http.services.myapp.loadbalancer.server.port": "8080",
+			},
+		},
+	}
+
+	rules, err := Parse(containerInfo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected exactly the docktunnel rule, got %d: %v", len(rules), ruleKeys(rules))
+	}
+	if _, ok := rules["http:myapp@app.example.com"]; ok {
+		t.Error("traefik rule must not be parsed when docktunnel.traefik.enable is not set")
+	}
+}
+
+func TestParse_TraefikEnableFalse(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		Config: &container.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":                                    "true",
+				"docktunnel.traefik.enable":                            "false",
+				"docktunnel.web.hostname":                              "web.example.com",
+				"docktunnel.web.service":                               "http://localhost:8080",
+				"traefik.http.routers.myapp.rule":                      "Host(`app.example.com`)",
+				"traefik.http.services.myapp.loadbalancer.server.port": "8080",
+			},
+		},
+	}
+
+	rules, err := Parse(containerInfo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected exactly the docktunnel rule, got %d: %v", len(rules), ruleKeys(rules))
+	}
+	if _, ok := rules["http:myapp@app.example.com"]; ok {
+		t.Error("traefik rule must not be parsed when docktunnel.traefik.enable=false")
+	}
+}
+
+// TestParse_TraefikUnsafeRuleNotExposed is the end-to-end P0 regression:
+// even with the opt-in flag set, an unsafe (negated / broad) rule must never
+// surface as a public ingress rule.
+func TestParse_TraefikUnsafeRuleNotExposed(t *testing.T) {
+	containerInfo := &container.InspectResponse{
+		Config: &container.Config{
+			Labels: map[string]string{
+				"docktunnel.enable":                                       "true",
+				"docktunnel.traefik.enable":                               "true",
+				"docktunnel.web.hostname":                                 "web.example.com",
+				"docktunnel.web.service":                                  "http://localhost:8080",
+				"traefik.http.routers.internal.rule":                      "!Host(`internal.example.com`)",
+				"traefik.http.services.internal.loadbalancer.server.port": "8080",
+			},
+		},
+	}
+
+	rules, err := Parse(containerInfo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected exactly the docktunnel rule, got %d: %v", len(rules), ruleKeys(rules))
+	}
+	if _, ok := rules["http:internal@internal.example.com"]; ok {
+		t.Error("negated host rule must never be inverted into a public route")
 	}
 }
 

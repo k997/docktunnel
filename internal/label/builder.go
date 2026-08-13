@@ -13,7 +13,39 @@ import (
 )
 
 // GetContainerIP detects the container IP address.
+// It is a convenience wrapper around GetContainerIPOnNetwork with no
+// specific network requested.
 func GetContainerIP(containerInfo *container.InspectResponse) string {
+	return GetContainerIPOnNetwork(containerInfo, "")
+}
+
+// GetContainerIPOnNetwork detects the container IP address, preferring the
+// given Docker network when one is specified.
+//   - network "" behaves exactly like the historical GetContainerIP: host
+//     mode -> "localhost", bridge first, otherwise the first non-empty IP in
+//     deterministic (sorted) network-name order.
+//   - network "host" -> "localhost".
+//   - network names an attached network -> that network's IP.
+//   - network names an unknown network -> warns and falls back to the default
+//     detection.
+func GetContainerIPOnNetwork(containerInfo *container.InspectResponse, network string) string {
+	if network != "" {
+		if containerInfo == nil || containerInfo.NetworkSettings == nil {
+			return ""
+		}
+		if network == "host" {
+			return "localhost"
+		}
+		if ep, exists := containerInfo.NetworkSettings.Networks[network]; exists {
+			return ep.IPAddress
+		}
+		slog.Warn("Container network not found, falling back to default IP detection",
+			"network", network)
+	}
+	return defaultContainerIP(containerInfo)
+}
+
+func defaultContainerIP(containerInfo *container.InspectResponse) string {
 	if containerInfo == nil {
 		return ""
 	}
@@ -53,24 +85,33 @@ func GetContainerIP(containerInfo *container.InspectResponse) string {
 // adaptDockTunnelToSpecs converts decoded docktunnel ServiceConfigs into IngressSpecs.
 func adaptDockTunnelToSpecs(services map[string]*ServiceConfig, containerInfo *container.InspectResponse) map[string]*IngressSpec {
 	specs := map[string]*IngressSpec{}
-	containerIP := GetContainerIP(containerInfo)
 
 	for name, sc := range services {
 		spec := &IngressSpec{
 			Hostname:      sc.Hostname,
 			Path:          sc.Path,
 			Retention:     sc.Retention,
+			Network:       sc.Network,
 			OriginRequest: convertOriginRequest(sc),
 		}
+
+		// A11: resolve the container IP on the service's requested network
+		// (empty network falls back to the default detection).
+		containerIP := GetContainerIPOnNetwork(containerInfo, sc.Network)
 
 		if sc.Service != "" {
 			spec.ServiceURL = sc.Service
 		} else if sc.Port != "" {
 			scheme := resolveScheme(sc)
-			port, _ := strconv.Atoi(sc.Port)
+			port, err := strconv.Atoi(sc.Port)
+			if err != nil {
+				slog.Error("Invalid docktunnel service port, using 0",
+					"service", name, "value", sc.Port, "error", err)
+				port = 0
+			}
 			spec.Port = port
 			spec.Scheme = scheme
-			if containerIP != "" {
+			if err == nil && containerIP != "" {
 				spec.ServiceURL = scheme + "://" + containerIP + ":" + sc.Port
 			}
 		}
@@ -194,12 +235,11 @@ func convertOriginRequest(sc *ServiceConfig) *OriginRequestSpec {
 				"value", v, "error", err)
 		}
 	}
-	if v := sc.MatchSNItoHost; v != "" {
-		if b, err := parseBoolLabel("originRequest.matchSNItoHost", v); err == nil {
-			spec.MatchSNItoHost = &b
-			hasAny = true
-		}
-	}
+	// F3: matchSNItoHost is not supported by the Cloudflare v5 SDK (zero_trust
+	// has no MatchSNI field); the decoder now ignores the label with a warning,
+	// so nothing is converted here. OriginRequestSpec.MatchSNItoHost is
+	// retained (deprecated) only to keep gob/tests stable and is never
+	// populated.
 
 	// Access
 	if sc.AccessRequired != "" || sc.AccessTeamName != "" || sc.AccessAUDTag != "" {
@@ -246,6 +286,8 @@ func parseBoolLabel(label, value string) (bool, error) {
 }
 
 // mergeSpecs merges traefik and docktunnel specs. On hostname conflict, docktunnel wins.
+// Hostname comparison is case-insensitive and written hostnames are normalized
+// to lower case so Host(`Example.COM`) and Host(`example.com`) collide.
 func mergeSpecs(traefikSpecs, docktunnelSpecs map[string]*IngressSpec) map[string]*IngressSpec {
 	merged := map[string]*IngressSpec{}
 
@@ -253,17 +295,18 @@ func mergeSpecs(traefikSpecs, docktunnelSpecs map[string]*IngressSpec) map[strin
 	for key, spec := range traefikSpecs {
 		merged[key] = spec
 		if spec.Hostname != "" {
-			traefikByHostname[spec.Hostname] = key
+			traefikByHostname[strings.ToLower(spec.Hostname)] = key
 		}
 	}
 
 	for key, dtSpec := range docktunnelSpecs {
 		if dtSpec.Hostname != "" {
-			if tfKey, exists := traefikByHostname[dtSpec.Hostname]; exists {
+			if tfKey, exists := traefikByHostname[strings.ToLower(dtSpec.Hostname)]; exists {
 				delete(merged, tfKey)
 				slog.Info("DockTunnel label overrides Traefik for hostname",
 					"hostname", dtSpec.Hostname, "docktunnel_key", key, "traefik_key", tfKey)
 			}
+			dtSpec.Hostname = strings.ToLower(dtSpec.Hostname)
 		}
 		merged[key] = dtSpec
 	}
