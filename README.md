@@ -1,6 +1,9 @@
 # DockTunnel
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/kongque/docktunnel)](https://goreportcard.com/report/github.com/kongque/docktunnel)
+<!-- 发布前替换：将下方 <your-github-org> / <your-dockerhub> 占位符替换为实际
+     仓库组织/用户名；Go Report Card 徽章需仓库公开后才会生效。 -->
+
+[![Go Report Card](https://goreportcard.com/badge/<your-github-org>/docktunnel)](https://goreportcard.com/report/<your-github-org>/docktunnel)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## 简介
@@ -11,7 +14,7 @@
 
 - **事件驱动架构**: 实时监听 Docker 容器启动/停止事件，自动同步配置
 - **智能标签解析**: 支持多层级配置优先级（自定义标签 → Traefik 兼容 → 自动检测 → 全局默认）
-- **Traefik 兼容**: 完美支持 Traefik 标签，实现平滑迁移
+- **Traefik 兼容**: 可选的最小兼容子集，需 `docktunnel.traefik.enable=true` 显式开启（见 [Traefik 兼容标签](#traefik-兼容标签)）
 - **高级网络支持**: 自动检测容器 IP，支持 Bridge/Host 网络模式
 - **强大的容错机制**:
   - 容器抖动检测（Flapping Detection）
@@ -74,14 +77,18 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v ./config.yaml:/etc/docktunnel/config.yaml:ro \
   -v docktunnel-state:/var/lib/docktunnel \
-  kongque/docktunnel:latest
+  <your-dockerhub>/docktunnel:latest
 ```
+
+> 镜像占位符 `<your-dockerhub>/docktunnel:latest`：发布前替换为实际镜像仓库
+> （Docker Hub 或 `ghcr.io/<your-github-org>/docktunnel`，后者见
+> [Release 工作流](.github/workflows/release.yml)）。
 
 #### 方式 2: 从源码构建
 
 ```bash
-# 克隆仓库
-git clone https://github.com/kongque/docktunnel.git
+# 克隆仓库（发布前替换为实际仓库地址）
+git clone https://github.com/<your-github-org>/docktunnel.git
 cd docktunnel
 
 # 构建二进制文件
@@ -102,12 +109,32 @@ make build
 make run
 ```
 
+### 运行 cloudflared 连接器（必需）
+
+> **重要**：DockTunnel **只管理隧道配置与 DNS 记录**（通过 Cloudflare API 写入
+> ingress 规则），它**本身不承载流量**。要让域名真正生效，你必须在**能够访问
+> 容器网络**的机器上运行 **cloudflared 连接器**（即 Cloudflare Tunnel 的
+> `cloudflared tunnel run` 守护进程），并在 Cloudflare 中把该隧道注册到
+> DockTunnel 管理的同一个 Tunnel ID。
+
+- 安装与连接 cloudflared 请参考 Cloudflare 官方文档：
+  - 安装：<https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/>
+  - 创建并运行隧道：<https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-remote-tunnel/>
+- **可达性前提**：DockTunnel 默认使用容器的**桥接网络 IP**（如
+  `172.17.0.2`）作为 ingress 的源站地址。该 IP 只有**与容器位于同一 Docker
+  网络**（或同主机）的进程才能访问，因此 cloudflared 连接器必须运行在
+  **能 ping 通容器 IP 的机器**上——常见做法是把连接器作为容器放进与业务容器
+  相同的 Docker 网络，或使用 `docktunnel.<svc>.network` / `traefik.docker.network`
+  标签指定正确的网络（`host` 表示 `localhost`）。
+- 若未运行连接器，DNS 与隧道配置虽然正确，但访问域名会超时/报错。
+
 ### 配置
 
 DockTunnel 支持多种配置方式，按优先级从高到低：
 
 1. 环境变量（前缀 `DOCKTUNNEL_`）
-2. 配置文件 `./config.yaml` 或 `/etc/docktunnel/config.yaml`
+2. 配置文件 `./config.yaml`、`/etc/docktunnel/config.yaml`，或由
+   `CONFIG_PATH` 环境变量指定的完整路径（常用于 systemd 部署）
 3. 默认值
 
 #### 配置文件示例
@@ -125,7 +152,9 @@ cloudflare:
   tunnelName: "DockTunnel"      # 隧道名称，为空则自动创建
   tunnelId: ""                   # 可选：指定现有隧道 ID
   catchAll: "http_status:404"   # 默认 catch-all 规则
-  rateLimit: 10                  # API 速率限制（请求/秒）
+  # API 速率限制（请求/秒）。Cloudflare 官方限额约 1200 请求/5 分钟（≈4 RPS），
+  # 默认 4，超过会触发 429 限流。
+  rateLimit: 4
   maxRetries: 3                  # 最大重试次数
   retryDelay: 1s                 # 初始重试延迟
   maxRetryDelay: 30s             # 最大重试延迟
@@ -138,7 +167,16 @@ controller:
   debounceDuration: 2s           # 事件防抖延迟
 
 cleanup:
-  onExit: true                   # 退出时清理资源
+  # 退出清理总开关（默认 false）。false 时任何策略都不会清理；
+  # true 时策略才生效：graceful-cleanup（清理）| fast-exit（不清理直接退出）。
+  onExit: false
+  strategy: "graceful-cleanup"
+
+server:
+  bindAddr: "127.0.0.1"  # 诊断/指标服务绑定地址（默认仅回环）
+  port: 9100             # 端口（/metrics /healthz /debug/state）
+  # debugToken: "..."    # 非回环绑定（如 0.0.0.0）时必须设置，
+                         # 否则 /debug/state 会泄露全部 hostname/service URL
 ```
 
 #### 环境变量配置
@@ -182,14 +220,16 @@ docktunnel.<service-name>.<attribute>
 
 | 标签 | 类型 | 说明 | 默认值 |
 |------|------|------|--------|
-| `docktunnel.id` | string | 指定隧道 ID | 使用全局默认 |
-| `docktunnel.delete_retention` | string | 清理策略 | `1h` |
-| `docktunnel.service` | string | Catch-all 服务 | `http_status:404` |
+| `docktunnel.traefik.enable` | boolean | 显式开启 `traefik.*` 标签解析（默认关闭） | `false` |
+| `docktunnel.delete_retention` | string | 全局保留策略（对所有服务生效） | `immediate` |
+
+> `docktunnel.retention` 是 `delete_retention` 的**旧别名**，两者等价；
+> 文档主推 `delete_retention`。
 
 **清理策略说明**：
-- `0` / `immediate`: 立即删除
+- `0` / `immediate`: 立即删除（默认，容器停止即删除）
 - `forever` / `keep`: 永久保留
-- `30m` / `1h` / `7d`: 延时删除（支持时间单位：`s`, `m`, `h`）
+- `30m` / `1h` / `7d`: 延时删除（支持时间单位：`s`, `m`, `h`, `d`）
 
 #### 局部规则标签
 
@@ -200,6 +240,8 @@ docktunnel.<service-name>.<attribute>
 | `docktunnel.<name>.path` | string | 路径前缀 | `/api` |
 | `docktunnel.<name>.scheme` | string | 内部协议 | `https` |
 | `docktunnel.<name>.port` | int | 内部端口 | `8080` |
+| `docktunnel.<name>.network` | string | 指定取 IP 的 Docker 网络（`host` 表示 `localhost`） | `my-net` |
+| `docktunnel.<name>.delete_retention` | string | 该服务的保留策略（覆盖全局） | `30m` |
 
 **优先级回退**（端口检测）：
 1. `docktunnel.<name>.port` 标签
@@ -215,8 +257,10 @@ docktunnel.<service-name>.<attribute>
 |------|------|------|
 | `docktunnel.<name>.originRequest.noTLSVerify` | boolean | 跳过 TLS 验证（允许自签名证书） |
 | `docktunnel.<name>.originRequest.originServerName` | string | TLS 握手的 SNI 域名 |
-| `docktunnel.<name>.originRequest.matchSniToHost` | boolean | 自动将 Hostname 设置为 SNI |
 | `docktunnel.<name>.originRequest.caPool` | string | CA 证书路径（需挂载到容器） |
+
+> 注：`matchSNItoHost`（含旧拼写 `matchSniToHost`）已移除——Cloudflare API
+> 无此字段，设置该标签会被忽略并记录 WARN。
 
 #### 超时设置
 
@@ -252,19 +296,60 @@ docktunnel.<service-name>.<attribute>
 
 | 标签 | 类型 | 说明 |
 |------|------|------|
+| `docktunnel.<name>.access.required` | boolean | 强制鉴权（未验证则拒绝） |
 | `docktunnel.<name>.access.team_name` | string | Zero Trust 团队名称 |
 | `docktunnel.<name>.access.aud_tag` | string | JWT Application Audience Tag |
-| `docktunnel.<name>.access.required` | boolean | 强制鉴权（未验证则拒绝） |
+
+> 代码同时兼容以下别名（取值相同）：`docktunnel.<name>.originRequest.access.*`
+> 前缀，以及驼峰拼写 `access.teamName` / `access.audTag`。
 
 ### Traefik 兼容标签
 
-DockTunnel 支持解析 Traefik 标签，实现平滑迁移：
+DockTunnel 支持解析 Traefik 标签，但**只实现一个可选的最小兼容子集**，
+且必须用 `docktunnel.traefik.enable=true` **显式开启**（默认不解析任何
+`traefik.*` 标签，避免把 Traefik 内部/受中间件保护的路由意外发布为公网规则）。
 
-| Traefik 标签 | 对应 DockTunnel 标签 | 解析逻辑 |
-|--------------|---------------------|----------|
-| `traefik.http.routers.<name>.rule` | `docktunnel.<name>.hostname` | 正则提取 `Host('...')` |
-| `traefik.http.services.<name>.loadbalancer.server.port` | `docktunnel.<name>.port` | 直接读取 |
-| `traefik.http.services.<name>.loadbalancer.server.scheme` | `docktunnel.<name>.scheme` | 直接读取 |
+**支持**：
+
+| Traefik 标签 | 解析逻辑 |
+|--------------|----------|
+| `traefik.http.routers.<name>.rule` | 提取 `Host(...)` 与 `Path(...)` 子句 → hostname / path |
+| `traefik.http.services.<name>.loadbalancer.server.port` | 源站端口 |
+| `traefik.http.services.<name>.loadbalancer.server.scheme` | 源站协议 |
+| `traefik.http.services.<name>.loadbalancer.server.url` | 源站 URL（**优先于** port/scheme） |
+| `traefik.tcp.routers.<name>.rule` | 提取 `HostSNI(...)` → TCP 规则 |
+| `traefik.tcp.services.<name>.loadbalancer.server.port` | TCP 源站端口 |
+| `traefik.docker.network` | 指定取 IP 的 Docker 网络（同 `docktunnel.<svc>.network`） |
+
+**拒绝 + WARN**（无法安全映射，相关 router 被跳过并记录 WARN，绝不暴露）：
+
+- `!`（取反）、`&&`、`||`（布尔运算）
+- `HostRegexp`、`PathPrefix`、`PathRegexp`
+- `Method`、`Header`、`Query`、`ClientIP`
+- `middlewares`（引用中间件的 router 会被拒绝——避免不带认证直接暴露）
+- `weighted` services，以及引用了不存在或没有 `loadbalancer.server` 的
+  service 的 router（否则会静默退化成无端口路由）
+
+**良性忽略**（不影响安全，仅 Info 日志，不产生路由）：
+
+- `entryPoints`、`priority`、`tls`、UDP
+
+**其它行为**：
+- 只有 `Path(...)` 而没有 `Host(...)` 子句的 router 会被跳过并 WARN；
+  `Host(a.com)` 这类无引号写法同样视为无 hostname 并跳过并 WARN；
+- TCP rule 只允许 `HostSNI(...)`，混入 `Host(...)`/`Path(...)` 会被拒绝；
+- HTTP rule 中 `Host(...)`/`Path(...)` 之外的任何内容都会被拒绝。
+
+```bash
+# 开启 Traefik 兼容解析的最小示例
+docker run -d \
+  --name=legacy-app \
+  -l docktunnel.enable=true \
+  -l docktunnel.traefik.enable=true \
+  -l traefik.http.routers.app.rule=Host\('legacy.example.com'\) \
+  -l traefik.http.services.app.loadbalancer.server.port=8080 \
+  legacy-app:latest
+```
 
 ### 容器 IP 检测
 
@@ -272,7 +357,11 @@ DockTunnel 自动检测容器 IP 地址：
 
 - **Host 网络模式**: 使用 `localhost`
 - **Bridge 网络**: 使用容器的 Bridge IP 地址（如 `172.17.0.2`）
-- **其他网络**: 使用第一个可用网络的 IP 地址
+- **其他网络**: 使用第一个可用网络的 IP 地址（按网络名排序，结果确定）
+
+可通过 `docktunnel.<svc>.network`（或 Traefik 的 `traefik.docker.network`）
+显式指定取 IP 的网络；值为 `host` 时使用 `localhost`，网络不存在时告警并回退
+到默认检测。
 
 ### 完整标签示例
 
@@ -314,14 +403,14 @@ docker run -d \
 
 ### 示例 2: 多服务容器
 
+一个容器内暴露多个服务：
+
 ```bash
 docker run -d \
   --name=fullstack-app \
   -l docktunnel.enable=true \
-  # 前端服务
   -l docktunnel.frontend.hostname=app.example.com \
   -l docktunnel.frontend.service=http://localhost:3000 \
-  # API 服务
   -l docktunnel.api.hostname=api.example.com \
   -l docktunnel.api.service=http://localhost:8080 \
   -l docktunnel.api.path=/api \
@@ -329,13 +418,17 @@ docker run -d \
   myapp:latest
 ```
 
+> 其中 `frontend` 为前端服务、`api` 为 API 服务（带 `/api` 路径与 HTTP/2）。
+
 ### 示例 3: Traefik 兼容模式
+
+> 必须显式设置 `docktunnel.traefik.enable=true` 才会解析 `traefik.*` 标签。
 
 ```bash
 docker run -d \
   --name=legacy-app \
   -l docktunnel.enable=true \
-  # Traefik 标签（DockTunnel 会自动解析）
+  -l docktunnel.traefik.enable=true \
   -l traefik.http.routers.app.rule=Host\('legacy.example.com'\) \
   -l traefik.http.services.app.loadbalancer.server.port=8080 \
   -l traefik.http.services.app.loadbalancer.server.scheme=http \
@@ -405,37 +498,31 @@ docker run -d \
 
 ### 示例 8: 完整配置（所有选项）
 
+覆盖服务、TLS、超时、连接池、HTTP、代理、Access 与清理策略的全部选项：
+
 ```bash
 docker run -d \
   --name=full-config \
   -l docktunnel.enable=true \
-  # 服务配置
   -l docktunnel.full.hostname=full.example.com \
   -l docktunnel.full.service=http://172.17.0.2:8080 \
   -l docktunnel.full.path=/api \
-  # TLS 配置
   -l docktunnel.full.originRequest.noTLSVerify=true \
   -l docktunnel.full.originRequest.originServerName=origin.example.com \
   -l docktunnel.full.originRequest.caPool=/etc/ssl/certs/ca.pem \
-  # 超时配置
   -l docktunnel.full.originRequest.connectTimeout=30s \
   -l docktunnel.full.originRequest.tlsTimeout=10s \
   -l docktunnel.full.originRequest.tcpKeepAlive=30s \
-  # 连接池配置
   -l docktunnel.full.originRequest.keepAliveConnections=100 \
   -l docktunnel.full.originRequest.keepAliveTimeout=90s \
-  # HTTP 配置
   -l docktunnel.full.originRequest.httpHostHeader=full.example.com \
   -l docktunnel.full.originRequest.http2Origin=false \
   -l docktunnel.full.originRequest.disableChunkedEncoding=false \
-  # 代理配置
   -l docktunnel.full.originRequest.proxyType=socks \
   -l docktunnel.full.originRequest.noHappyEyeballs=false \
-  # Access 配置
   -l docktunnel.full.access.required=true \
   -l docktunnel.full.access.team_name=myteam \
   -l docktunnel.full.access.aud_tag=abc123 \
-  # 清理策略
   -l docktunnel.full.delete_retention=1h \
   full-config:latest
 ```
@@ -732,10 +819,13 @@ Requires=docker.service
 
 [Service]
 Type=simple
-User=root
+# 建议使用非 root 用户运行（最小权限原则）
+User=docktunnel
 ExecStart=/usr/local/bin/docktunnel
 Restart=always
 RestartSec=10
+# CONFIG_PATH 指定配置文件的完整路径（已获 config 加载器支持），
+# 适用于 systemd 部署（不会去当前目录找 config.yaml）
 Environment=CONFIG_PATH=/etc/docktunnel/config.yaml
 
 # 安全加固
@@ -743,7 +833,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/docktunnel
+# 状态持久化目录：ProtectSystem=strict 下 /var/lib 只读，必须显式放行
+# StateDirectory 会创建 /var/lib/docktunnel 并把属主设为 User
+StateDirectory=docktunnel
+ReadWritePaths=/var/lib/docktunnel
 
 [Install]
 WantedBy=multi-user.target
@@ -763,7 +856,7 @@ sudo systemctl status docktunnel
 ```yaml
 services:
   docktunnel:
-    image: kongque/docktunnel:latest
+    image: <your-dockerhub>/docktunnel:latest
     container_name: docktunnel
     restart: unless-stopped
     volumes:
@@ -787,6 +880,9 @@ volumes:
 
 ### Kubernetes 部署（DaemonSet）
 
+> **示例未验证**，生产使用前建议先在测试集群验证（标签解析依赖 Docker
+> socket，DaemonSet 模式需确认 `hostPath` 挂载与节点权限）。
+
 ```yaml
 apiVersion: apps/v1
 kind: DaemonSet
@@ -804,7 +900,7 @@ spec:
     spec:
       containers:
       - name: docktunnel
-        image: kongque/docktunnel:latest
+        image: <your-dockerhub>/docktunnel:latest
         resources:
           limits:
             memory: "128Mi"
@@ -833,13 +929,15 @@ spec:
 ### API 速率限制
 
 默认配置：
-- 速率限制：10 请求/秒
+- 速率限制：4 请求/秒（Cloudflare 官方 API 限额约 1200 请求/5 分钟，≈4 RPS；
+  默认值即贴近该限额，超过会触发 429）
 - 最大重试：3 次
 - 重试延迟：1s（指数增长，最大 30s）
 
 调整建议：
-- 大规模部署（100+ 容器）：提高到 20-30 请求/秒
-- 小规模部署（< 20 容器）：保持默认或降低到 5 请求/秒
+- 大规模部署（100+ 容器）：可提高到 10-20 请求/秒（注意仍可能触发
+  Cloudflare 官方 429 限流，需结合实际用量）
+- 小规模部署（< 20 容器）：保持默认 4 请求/秒即可
 
 ### 事件防抖优化
 
@@ -928,19 +1026,35 @@ docker run -d \
 
 ### 场景 4: Traefik 迁移
 
-从 Traefik 平滑迁移到 Cloudflare Tunnel：
+从 Traefik 迁移到 Cloudflare Tunnel（需显式开启 Traefik 标签解析）：
 
 ```bash
-# 原有 Traefik 标签保持不变
 docker run -d \
   --name=legacy-app \
   -l docktunnel.enable=true \
+  -l docktunnel.traefik.enable=true \
   -l traefik.http.routers.app.rule=Host\('app.example.com'\) \
   -l traefik.http.services.app.loadbalancer.server.port=8080 \
   legacy-app:latest
 ```
 
 ## 监控与日志
+
+### 诊断与监控端点
+
+诊断/指标 HTTP 服务默认绑定 `127.0.0.1:9100`，提供三个端点：
+
+| 端点 | 说明 |
+|------|------|
+| `/healthz` | 存活探针（返回 200；Docker HEALTHCHECK 与 compose healthcheck 都打这里） |
+| `/metrics` | Prometheus 指标 |
+| `/debug/state` | 当前期望状态快照（**泄露全部 hostname 与 service URL**） |
+
+安全说明：
+- 默认只监听回环地址（`127.0.0.1`），无需额外保护；
+- 若将 `server.bindAddr` 改为非回环地址（如 `0.0.0.0`），**必须**配置
+  `server.debugToken`（对应环境变量 `DOCKTUNNEL_SERVER_DEBUG_TOKEN`），
+  否则启动校验会拒绝，`/debug/state` 也需要 Bearer token 才能访问。
 
 ### 日志输出示例
 
@@ -994,9 +1108,10 @@ docker run -d \
 
 ## 联系方式
 
-- **问题反馈**: [GitHub Issues](https://github.com/kongque/docktunnel/issues)
-- **功能建议**: [GitHub Discussions](https://github.com/kongque/docktunnel/discussions)
-- **邮件**: kongque@example.com
+<!-- 发布前替换：以下链接与邮箱均为占位 -->
+- **问题反馈**: [GitHub Issues](https://github.com/<your-github-org>/docktunnel/issues)
+- **功能建议**: [GitHub Discussions](https://github.com/<your-github-org>/docktunnel/discussions)
+- **邮件**: `kongque@example.com`（**占位邮箱，发布前替换为实际地址**）
 
 ---
 

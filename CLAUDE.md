@@ -71,9 +71,13 @@ DockTunnel follows an **event-driven architecture** with the following component
 - **Label-based configuration** parsing (`parser.go` + `builder.go`)
 - **Flexible label schema**: `docktunnel.<service-name>.<attribute>`
 - **Comprehensive attribute support**: hostname, service, port, path, originRequest settings
-- **Network-aware**: Auto-detects container IPs and handles host network mode
+- **Network-aware**: Auto-detects container IPs and handles host network mode;
+  `docktunnel.<svc>.network` / `traefik.docker.network` select the Docker
+  network used for the IP (`host` → `localhost`)
 - **Protocol detection**: Supports HTTP/HTTPS service URL generation
-- **Traefik compatibility**: Reuses Traefik labels (`traefik.*`) when docktunnel labels are absent
+- **Traefik compatibility**: Optional minimal subset, opt-in via
+  `docktunnel.traefik.enable=true`; unsafe/unsupported rules are rejected with
+  a WARN (see Container Label System below)
 
 #### 7. Validators (`internal/controller/validator.go`)
 - **Rule validation pipeline**: Composite pattern with multiple validators
@@ -171,9 +175,11 @@ gofmt -s -w .
 
 ### Configuration
 Default configuration locations (in order of precedence):
-1. `/etc/docktunnel/config.yaml`
+1. `CONFIG_PATH` env var — full path to the config file (e.g. systemd
+   deployments); when set, it overrides the search paths below
 2. `./config.yaml` (current directory)
-3. Environment variables (e.g., `DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID`)
+3. `/etc/docktunnel/config.yaml`
+4. Environment variables (e.g., `DOCKTUNNEL_CLOUDFLARE_ACCOUNT_ID`)
 
 ### Docker Usage
 ```bash
@@ -207,6 +213,33 @@ docktunnel.<service-name>.originRequest.noTLSVerify=true
 
 ### Supported Labels
 - **Core configuration**: `hostname`, `service`, `port`, `path`
+- **Retention**: `docktunnel.<svc>.delete_retention` (primary spelling;
+  `docktunnel.<svc>.retention` legacy alias) and the global
+  `docktunnel.delete_retention` / `docktunnel.retention`. Values:
+  `immediate`/`0`, `forever`/`keep`, or a duration like `30m`/`1h`/`7d`.
+  Default is `immediate`.
+- **Access (Zero Trust)**: `docktunnel.<svc>.access.required` /
+  `access.team_name` / `access.aud_tag` (aliases: `originRequest.access.*`
+  prefix and camelCase `teamName` / `audTag`).
+- **Network selection**: `docktunnel.<svc>.network` (Docker network used for
+  the container IP; `host` → `localhost`) and `traefik.docker.network`.
+- **Traefik opt-in**: `docktunnel.traefik.enable=true` is REQUIRED before any
+  `traefik.*` label is parsed. HTTP rules may only contain `Host(...)` /
+  `Path(...)` clauses; TCP rules only `HostSNI(...)`. Unsupported labels fall
+  into three categories:
+  (a) **rejected with a WARN** (cannot be mapped safely; the router is skipped
+  and never exposed): `!`, `&&`, `||`, `HostRegexp`, `PathPrefix`,
+  `PathRegexp`, `Method`, `Header`, `Query`, `ClientIP`, `middlewares`
+  (refusing to expose auth-protected routes without auth), and `weighted`
+  services or routers pointing at a service without a usable
+  `loadbalancer.server` (would otherwise silently degrade to a port-0 route);
+  (b) **benignly ignored** (no security impact, Info log only): `entryPoints`,
+  `priority`, `tls`, UDP;
+  (c) **supported**: `Host(...)`/`Path(...)`, `server.port`/`server.scheme`/
+  `server.url`, `HostSNI(...)`.
+  Path-only (no `Host`) HTTP routers, and unquoted `Host(a.com)` styles that
+  yield no hostname, are skipped with a WARN. `server.url` takes priority over
+  `server.port`/`server.scheme`.
 - **Network settings**: `proto`, automatic IP detection
 - **Origin request settings**: 20+ configuration options for TLS, timeouts, proxy settings
 - **Container detection**: `docktunnel.enable` (required)
@@ -256,7 +289,8 @@ docker run -d \
 - **Fallback**: Uses first available network IP
 
 ### 2. Cloudflare API Integration
-- **Rate limiting**: Configurable requests per second (default: 10)
+- **Rate limiting**: Configurable requests per second (default: 4, matching
+  Cloudflare's official ~1200 req/5min limit; higher values risk 429s)
 - **Retry logic**: Configurable max retries (default: 3) with exponential backoff
 - **Error categorization**: Retries rate limits, server errors, and timeouts
 
@@ -329,7 +363,7 @@ cloudflare:
   apiToken: "your-api-token"
   tunnelName: "DockTunnel"
   catchAll: "http_status:404"
-  rateLimit: 10
+  rateLimit: 4
   maxRetries: 3
   retryDelay: 1s
   maxRetryDelay: 30s
@@ -342,7 +376,8 @@ controller:
   debounceDuration: 2s
 
 cleanup:
-  onExit: true
+  onExit: false   # 总开关，默认 false（false 时退出绝不清理）
+  # strategy: graceful-cleanup | fast-exit（仅 onExit=true 时生效）
 ```
 
 ## Known Limitations
@@ -350,12 +385,15 @@ cleanup:
 ### Current Constraints
 - **Single tunnel support**: Currently manages one Cloudflare tunnel per instance
 - **Host network limitation**: IP detection limited to bridge and host networks
+  (selectable via `docktunnel.<svc>.network` / `traefik.docker.network`)
+- **Traefik compatibility**: Only the documented minimal subset is supported
+  (see Container Label System); unsafe labels are rejected with a WARN and
+  benign unsupported fields are ignored with an Info log — nothing is silently
+  exposed
 - **Label validation**: Limited validation of service URLs and hostnames
-- **State persistence**: State lost on restart (no persistence yet)
 
 ### Future Enhancements
 - Multi-tunnel support
-- State persistence with database integration
 - Advanced container networking support
 - Configuration drift detection
 - Metrics and monitoring integration
@@ -383,3 +421,13 @@ This CLAUDE.md file provides comprehensive context for future Claude Code instan
 
 ## Recent Changes
 - 001-cftunnel-architecture: Added Go 1.24
+- 002-release-engineering: Aligned docs/config/CI/Docker with fixed behavior —
+  Traefik labels are opt-in (`docktunnel.traefik.enable=true`) with a minimal
+  safe subset (Host/Path/HostSNI only, middlewares & unsafe matchers rejected);
+  cleanup is gated by `cleanup.onExit` (default false) with
+  `graceful-cleanup`/`fast-exit` strategies; `cloudflare.rateLimit` default is
+  now 4 (Cloudflare official ~1200 req/5min); `CONFIG_PATH` selects the config
+  file path; state persistence is implemented (no longer a limitation); image
+  builds are multi-arch (amd64/arm64) to GHCR + optional Docker Hub; CI runs
+  govulncheck; Dockerfile pins golang:1.24.6-alpine with GOTOOLCHAIN=local and
+  a HEALTHCHECK on /healthz.

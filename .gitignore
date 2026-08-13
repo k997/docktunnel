@@ -25,6 +25,11 @@ go.work
 docktunnel
 *.log
 
+# Environment files（.env 已被忽略，勿提交真实 token；.env.example 保留为模板）
+.env
+.env.*
+!.env.example
+
 # vendored Traefik 源码参考（仅本地参考，不参与构建，勿提交）
 traefik-source/
 

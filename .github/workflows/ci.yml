@@ -33,6 +33,10 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # govulncheck 以 @latest 方式临时运行，不修改 go.mod / go.sum。
+      - name: Vulnerability scan (govulncheck)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Unit tests (with race detector)
         run: go test -race ./...
 

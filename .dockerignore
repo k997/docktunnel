@@ -1,0 +1,25 @@
+# DockTunnel .dockerignore
+# 目的：瘦身构建上下文 + 防止二进制/凭据进入镜像。
+
+# 本机构建产物（不应打进镜像）
+docktunnel
+dist/
+*.test
+integration.test
+
+# VCS / CI 元数据
+.git
+.github/
+
+# 本地参考源码（仅开发参考，不参与构建）
+traefik-source/
+
+# 文档（镜像内不需要）
+docs/
+
+# 凭据 / 环境文件（绝不进镜像）
+.env
+.env.*
+
+# 配置文件模板（运行时通过挂载/环境变量注入，镜像内不需要）
+config.yaml

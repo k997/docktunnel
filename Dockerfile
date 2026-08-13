@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1
 
 # 构建阶段
-FROM golang:1.24-alpine AS builder
+# 固定到具体补丁版本：滚动标签 golang:1.24-alpine 在补丁版本切换时
+# 可能触发 GOTOOLCHAIN 自动下载，导致构建失败或不可复现。
+FROM golang:1.24.6-alpine AS builder
+
+# 禁止 GOTOOLCHAIN 自动下载/切换工具链（与 go.mod 中 go 1.24.6 一致）
+ENV GOTOOLCHAIN=local
 
 # 安装构建依赖（ca-certificates 用于最终阶段的证书；构建期不需要，保持精简）
 RUN apk add --no-cache git
@@ -52,6 +57,11 @@ USER docktunnel
 
 # 诊断/指标端口（/metrics /healthz /debug/state，默认绑定 127.0.0.1）
 EXPOSE 9100
+
+# 健康检查：busybox wget 打 /healthz（与 docker-compose.yml 一致）。
+# /healthz 是真实存活信号（诊断服务默认 127.0.0.1:9100）。
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
+  CMD wget -q -O - http://127.0.0.1:9100/healthz || exit 1
 
 # 状态目录：挂载 volume 以在容器重建后保留 retention/补偿队列状态
 VOLUME ["/var/lib/docktunnel"]

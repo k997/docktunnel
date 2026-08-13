@@ -36,17 +36,19 @@ fmt-check:
 		exit 1; \
 	fi;
 
-# 安装依赖
+# 安装依赖（显式目标：仅在需要时运行）
+# 注意：go mod tidy 可能改写 go.mod/go.sum，build 不再自动依赖它，
+# 以避免无意间改动依赖锁定文件。
 deps:
 	${GO_DEPS}
 
-# 构建二进制文件
-build: deps
-	${GO_BUILD} ${GOFLAGS} ${LDFLAGS} -o ${BINARY} ./${MAIN_DIR}
+# 构建二进制文件（-trimpath 与 CI/Dockerfile 保持一致：可复现构建）
+build:
+	${GO_BUILD} ${GOFLAGS} -trimpath ${LDFLAGS} -o ${BINARY} ./${MAIN_DIR}
 
 # 安装二进制文件到GOPATH
-install: deps
-	${GO_BUILD} ${GOFLAGS} ${LDFLAGS} -o ${GOPATH}/bin/${BINARY} ./${MAIN_DIR}
+install:
+	${GO_BUILD} ${GOFLAGS} -trimpath ${LDFLAGS} -o ${GOPATH}/bin/${BINARY} ./${MAIN_DIR}
 
 # 运行测试
 test:
@@ -79,9 +81,9 @@ help:
 	@echo "  all               - 格式化代码并构建 (default)"
 	@echo "  fmt               - 格式化代码"
 	@echo "  fmt-check         - 检查代码格式"
-	@echo "  deps              - 安装依赖"
-	@echo "  build             - 构建二进制文件"
-	@echo "  install           - 安装二进制文件到GOPATH"
+	@echo "  deps              - 下载/整理依赖 (go mod tidy; 显式目标，build 不再自动执行)"
+	@echo "  build             - 构建二进制文件 (-trimpath)"
+	@echo "  install           - 安装二进制文件到GOPATH (-trimpath)"
 	@echo "  test              - 运行测试"
 	@echo "  test-coverage     - 运行测试并显示覆盖率"
 	@echo "  clean             - 清理构建产物"
