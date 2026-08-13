@@ -13,6 +13,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"testing"
@@ -45,7 +46,21 @@ func helperEnsureImage(t *testing.T, ctx context.Context, dockerClient *client.C
 		t.Logf("Image %s pull failed (network error), but exists locally, continuing...", imageName)
 		return true
 	}
-	defer pullResp.Close()
+	// Drain the pull stream: ImagePull returns before the image is actually
+	// registered by the daemon, so creating a container immediately after this
+	// call races with the pull ("No such image"). Reading the stream to
+	// completion blocks until the pull finishes (or fails — in which case we
+	// fall back to checking local existence).
+	_, copyErr := io.Copy(io.Discard, pullResp)
+	pullResp.Close()
+	if copyErr != nil {
+		if _, inspectErr := dockerClient.ImageInspect(ctx, imageName); inspectErr == nil {
+			t.Logf("Image %s pull stream errored, but image exists locally, continuing...", imageName)
+			return true
+		}
+		t.Logf("Image %s pull failed: %v", imageName, copyErr)
+		return false
+	}
 	t.Logf("Image %s pulled successfully", imageName)
 	return true
 }
@@ -492,6 +507,15 @@ func TestConcurrentContainerStarts(t *testing.T) {
 		}
 		t.Log("Image pull failed (network error), but image exists locally, continuing...")
 	} else {
+		// Drain the pull stream so the image is registered before containers
+		// are created (mirrors helperEnsureImage).
+		if _, copyErr := io.Copy(io.Discard, pullResp); copyErr != nil {
+			if _, inspectErr := dockerClient.ImageInspect(ctx, imageName); inspectErr != nil {
+				t.Skipf("Image pull stream failed and image not found locally: %v", copyErr)
+				return
+			}
+			t.Log("Image pull stream failed, but image exists locally, continuing...")
+		}
 		pullResp.Close()
 		t.Log("Image pulled successfully")
 	}
