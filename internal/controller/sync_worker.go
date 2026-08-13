@@ -19,6 +19,10 @@ type syncWorker struct {
 	debounce time.Duration
 	syncFn   func(context.Context) error
 	log      *slog.Logger
+	// onError, when set, is invoked with the syncFn error so callers can
+	// compensate (e.g. enqueue an ActionSync for the compensation queue,
+	// B3). Not called for successful syncs.
+	onError func(error)
 
 	triggerCh chan chan struct{} // size 1; nil = trigger, non-nil = flush
 	stopCh    chan struct{}      // closed when run() exits
@@ -36,6 +40,11 @@ func newSyncWorker(debounce time.Duration, syncFn func(context.Context) error, l
 		triggerCh: make(chan chan struct{}, 1),
 		stopCh:    make(chan struct{}),
 	}
+}
+
+// SetOnError installs the error callback invoked when a sync cycle fails.
+func (w *syncWorker) SetOnError(fn func(error)) {
+	w.onError = fn
 }
 
 // Start launches the worker goroutine. Idempotent.
@@ -150,6 +159,9 @@ func (w *syncWorker) runOnce(ctx context.Context, heldFlushers []chan struct{}) 
 			w.log.Error("syncFn panic recovered", "panic", r)
 			err := fmt.Errorf("sync panicked: %v", r)
 			w.lastErr.Store(&err)
+			if w.onError != nil {
+				w.onError(err)
+			}
 		}
 		// Close all flushers (held + queued) so callers unblock on
 		// both panic and normal paths.
@@ -161,5 +173,8 @@ func (w *syncWorker) runOnce(ctx context.Context, heldFlushers []chan struct{}) 
 	w.lastErr.Store(&err)
 	if err != nil {
 		w.log.Warn("sync failed; will retry on next trigger", "error", err)
+		if w.onError != nil {
+			w.onError(err)
+		}
 	}
 }

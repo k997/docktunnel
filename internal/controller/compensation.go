@@ -19,30 +19,44 @@ func newCompensation(c *Controller, log *slog.Logger) *compensation {
 	return &compensation{c: c, log: log}
 }
 
-// ExecuteAction executes a single action (e.g., delete route and sync).
-// Used by the compensation queue to retry failed actions.
+// ExecuteAction executes a single action (e.g., delete route and sync, or a
+// full sync retry). Used by the compensation queue to retry failed actions.
 //
-// Race guard: before deleting the ingress rule for a hostname, check whether
-// the rule is still registered. If a stop event enqueued this delete and the
-// container then restarted (handleContainerStart re-added the same hostname),
-// the queued delete would otherwise fire after the container is back up and
-// remove the live route. Skipping the delete when the rule is present lets
-// the start path win.
+// Race guard (delete route): before deleting the ingress rule for a hostname,
+// check whether the rule is still registered. If a stop event enqueued this
+// delete and the container then restarted (handleContainerStart re-added the
+// same hostname), the queued delete would otherwise fire after the container
+// is back up and remove the live route. Skipping the delete when the rule is
+// present lets the start path win.
 func (comp *compensation) ExecuteAction(ctx context.Context, action types.Action) error {
-	if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
-		comp.c.mu.Lock()
-		_, stillRegistered := comp.c.ingressRules[action.Hostname]
-		if stillRegistered {
-			comp.c.mu.Unlock()
-			slog.Info("Skipping compensation delete: hostname is currently registered (container likely restarted)",
-				"action", action.Kind,
-				"hostname", action.Hostname,
-				"container_id", action.ContainerID,
-			)
-			return nil
+	switch action.Kind {
+	case types.ActionSync:
+		// A full sync retry: flush one sync cycle through the worker. The
+		// bounded 30s context prevents a wedged Cloudflare call from pinning
+		// the compensation queue (B3).
+		if comp.c.syncer == nil {
+			comp.c.syncer = newSyncer(comp.c, slog.Default())
 		}
-		delete(comp.c.ingressRules, action.Hostname)
-		comp.c.mu.Unlock()
+		flushCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		return comp.c.syncer.FlushSync(flushCtx)
+
+	case types.ActionDeleteRoute:
+		if action.Hostname != "" {
+			comp.c.mu.Lock()
+			stillRegistered := hostnameRegisteredLocked(comp.c, action.Hostname)
+			if stillRegistered {
+				comp.c.mu.Unlock()
+				slog.Info("Skipping compensation delete: hostname is currently registered (container likely restarted)",
+					"action", action.Kind,
+					"hostname", action.Hostname,
+					"container_id", action.ContainerID,
+				)
+				return nil
+			}
+			deleteIngressByHostnameLocked(comp.c, action.Hostname)
+			comp.c.mu.Unlock()
+		}
 	}
 	return comp.c.syncToCloudflare(ctx)
 }

@@ -28,8 +28,16 @@ type mockCloudflareManager struct {
 	// that a code path actually waits for the sync to land.
 	updateBlock chan struct{}
 
+	// updateErr, when non-nil, makes UpdateConfiguration fail. Used to
+	// exercise the sync-failure compensation path (B3).
+	updateErr error
+
 	// updateCalls counts UpdateConfiguration invocations.
 	updateCalls int
+
+	// getConfigResult/getConfigErr override GetConfiguration when set (B2).
+	getConfigResult []zero_trust.TunnelCloudflaredConfigurationGetResponseConfigIngress
+	getConfigErr    error
 }
 
 // GetTunnel 返回模拟的隧道信息
@@ -40,6 +48,9 @@ func (m *mockCloudflareManager) GetTunnel() *zero_trust.TunnelCloudflaredGetResp
 // UpdateConfiguration 模拟更新配置
 func (m *mockCloudflareManager) UpdateConfiguration(ctx context.Context, ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	m.updateCalls++
+	if m.updateErr != nil {
+		return m.updateErr
+	}
 	if m.updateBlock != nil {
 		select {
 		case <-m.updateBlock:
@@ -52,7 +63,10 @@ func (m *mockCloudflareManager) UpdateConfiguration(ctx context.Context, ingress
 
 // GetConfiguration 模拟获取配置
 func (m *mockCloudflareManager) GetConfiguration(ctx context.Context) ([]zero_trust.TunnelCloudflaredConfigurationGetResponseConfigIngress, error) {
-	return nil, nil
+	if m.getConfigErr != nil {
+		return nil, m.getConfigErr
+	}
+	return m.getConfigResult, nil
 }
 
 // ListDNSRecords 模拟列出DNS记录
@@ -216,12 +230,12 @@ func TestCleanupResourcesLogic(t *testing.T) {
 	controller := NewController(nil, nil, opts)
 
 	// 添加一些测试规则
-	controller.ingressRules["example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	controller.ingressRules[ingressKey("example.com", "")] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("example.com"),
 		Service:  cloudflare.F("http://localhost:8080"),
 	}
 
-	controller.ingressRules["test.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	controller.ingressRules[ingressKey("test.com", "")] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("test.com"),
 		Service:  cloudflare.F("http://localhost:3000"),
 	}
@@ -606,7 +620,7 @@ func TestStopUsesStoredRetentionPolicyWithoutContainerInfo(t *testing.T) {
 	})
 
 	// Manually set up state: container with rules and a Timed retention policy
-	ctrl.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	ctrl.ingressRules[ingressKey("app.example.com", "")] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("app.example.com"),
 		Service:  cloudflare.F("http://localhost:8080"),
 	}
@@ -655,7 +669,7 @@ func TestReconcile_NoDriftWithNilDockerManager(t *testing.T) {
 	})
 
 	// Set up current state with a retaining rule
-	ctrl.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	ctrl.ingressRules[ingressKey("app.example.com", "")] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("app.example.com"),
 		Service:  cloudflare.F("http://localhost:8080"),
 	}
@@ -669,7 +683,7 @@ func TestReconcile_NoDriftWithNilDockerManager(t *testing.T) {
 
 	// Rules should be unchanged
 	ctrl.mu.RLock()
-	_, exists := ctrl.ingressRules["app.example.com"]
+	_, exists := ctrl.ingressRules[ingressKey("app.example.com", "")]
 	ctrl.mu.RUnlock()
 	if !exists {
 		t.Error("expected app.example.com to remain in ingressRules")
@@ -684,7 +698,7 @@ func TestReconcile_RetainingRulesPreserved(t *testing.T) {
 	})
 
 	// Set up a retaining rule: in ingressRules but NOT in containerRules
-	ctrl.ingressRules["retained.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	ctrl.ingressRules[ingressKey("retained.example.com", "")] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("retained.example.com"),
 		Service:  cloudflare.F("http://localhost:8080"),
 	}
@@ -697,7 +711,7 @@ func TestReconcile_RetainingRulesPreserved(t *testing.T) {
 	}
 
 	ctrl.mu.RLock()
-	_, exists := ctrl.ingressRules["retained.example.com"]
+	_, exists := ctrl.ingressRules[ingressKey("retained.example.com", "")]
 	ctrl.mu.RUnlock()
 	if !exists {
 		t.Error("retaining rule should be preserved")
@@ -726,7 +740,7 @@ func TestStop_Immediate_DeletesRouteViaTransition(t *testing.T) {
 	})
 
 	// Set up: container has rules and active tunnel with Immediate policy
-	ctrl.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	ctrl.ingressRules[ingressKey("app.example.com", "")] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("app.example.com"),
 		Service:  cloudflare.F("http://localhost:8080"),
 	}
@@ -746,7 +760,7 @@ func TestStop_Immediate_DeletesRouteViaTransition(t *testing.T) {
 
 	// Ingress should be deleted
 	ctrl.mu.RLock()
-	_, ingressExists := ctrl.ingressRules["app.example.com"]
+	_, ingressExists := ctrl.ingressRules[ingressKey("app.example.com", "")]
 	ctrl.mu.RUnlock()
 	if ingressExists {
 		t.Error("ingress should be deleted for Immediate retention")
@@ -774,7 +788,7 @@ func TestStop_Timed_KeepsRouteViaTransition(t *testing.T) {
 		DebounceDuration: 2 * time.Second,
 	})
 
-	ctrl.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	ctrl.ingressRules[ingressKey("app.example.com", "")] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("app.example.com"),
 		Service:  cloudflare.F("http://localhost:8080"),
 	}
@@ -794,7 +808,7 @@ func TestStop_Timed_KeepsRouteViaTransition(t *testing.T) {
 
 	// Ingress should be KEPT (Timed retention)
 	ctrl.mu.RLock()
-	_, ingressExists := ctrl.ingressRules["app.example.com"]
+	_, ingressExists := ctrl.ingressRules[ingressKey("app.example.com", "")]
 	ctrl.mu.RUnlock()
 	if !ingressExists {
 		t.Error("ingress should be kept for Timed retention")
@@ -913,7 +927,7 @@ func TestExecuteAction_SkipsDeleteWhenHostnameIsRegistered(t *testing.T) {
 		ingressRules: map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{},
 		stateManager: state.NewManager(slog.Default()),
 	}
-	c.ingressRules["app.example.com"] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+	c.ingressRules[ingressKey("app.example.com", "")] = zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 		Hostname: cloudflare.F("app.example.com"),
 		Service:  cloudflare.F("http://localhost:8080"),
 	}
@@ -930,7 +944,7 @@ func TestExecuteAction_SkipsDeleteWhenHostnameIsRegistered(t *testing.T) {
 	}
 
 	// Rule must still be present
-	if _, ok := c.ingressRules["app.example.com"]; !ok {
+	if _, ok := c.ingressRules[ingressKey("app.example.com", "")]; !ok {
 		t.Error("ingress rule was deleted despite hostname being registered")
 	}
 }

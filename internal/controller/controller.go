@@ -13,8 +13,6 @@ import (
 
 	"github.com/cloudflare/cloudflare-go/v5/dns"
 	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
-
-	"docktunnel/internal/docker"
 )
 
 // CloudflareManager defines the interface for Cloudflare tunnel management
@@ -25,6 +23,12 @@ type CloudflareManager interface {
 	ListDNSRecords(ctx context.Context) ([]dns.RecordResponse, error)
 	DeleteDNSRecords(ctx context.Context, hostnames []string) error
 	UpsertDNSRecords(ctx context.Context, hostnames []string) error
+}
+
+// DockerScanner abstracts the Docker manager's container-scanning capability.
+// Kept narrow so controller tests can substitute a fake.
+type DockerScanner interface {
+	ScanRunningContainers(ctx context.Context) ([]events.Event, error)
 }
 
 // ControllerOptions 用于配置Controller的选项
@@ -44,14 +48,18 @@ type ControllerOptions struct {
 
 // Controller 负责协调Docker和Cloudflare模块的工作
 type Controller struct {
-	dockerManager     *docker.Manager
+	dockerManager     DockerScanner
 	cloudflareManager CloudflareManager
 	stateManager      *state.Manager                                                                // State manager for retention policies
-	ingressRules      map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress // hostname -> rule map
+	ingressRules      map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress // key: ingressKey(hostname, path)
 	containerRules    map[string][]string                                                           // containerID -> hostnames map
 	containerHealth   map[string]*ContainerHealth                                                   // containerID -> health info
 	ruleValidator     RuleValidator
 	mu                sync.RWMutex
+
+	// catchAllService is the service value for the trailing catch-all ingress
+	// rule (e.g. "http_status:404"). Empty means default.
+	catchAllService string
 
 	// 熔断器配置 — retained on Controller for &Controller{} test-literal
 	// compat (see TestNewController, TestStartupReconciliation). Production
@@ -81,7 +89,7 @@ type Controller struct {
 }
 
 // NewController 创建一个新的控制器实例
-func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareManager, opts ControllerOptions) *Controller {
+func NewController(dockerManager DockerScanner, cloudflareManager CloudflareManager, opts ControllerOptions) *Controller {
 	controller := &Controller{
 		dockerManager:     dockerManager,
 		cloudflareManager: cloudflareManager,
@@ -90,6 +98,7 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 		containerRules:    make(map[string][]string),
 		containerHealth:   make(map[string]*ContainerHealth),
 		ruleValidator:     NewCompositeValidator(),
+		catchAllService:   opts.CatchAllService,
 		flappingWindow:    opts.FlappingWindow,
 		flappingThreshold: opts.FlappingThreshold,
 		coolingPeriod:     opts.CoolingPeriod,
@@ -121,6 +130,16 @@ func NewController(dockerManager *docker.Manager, cloudflareManager CloudflareMa
 
 	controller.syncer = newSyncer(controller, slog.Default())
 	controller.syncWorker = newSyncWorker(controller.debounceDuration, controller.syncer.performSync, slog.Default())
+
+	// Wire sync failures into the compensation queue: whenever the worker's
+	// syncFn returns an error, enqueue an ActionSync so the failure is retried
+	// even if no further event arrives (B3). Deduplicate: if an unfinished
+	// ActionSync is already queued, don't stack another one.
+	controller.syncWorker.SetOnError(func(err error) {
+		if !controller.stateManager.HasPendingActionKind(types.ActionSync) {
+			controller.stateManager.EnqueueAction(types.Action{Kind: types.ActionSync}, err)
+		}
+	})
 
 	controller.dispatcher = newDispatcher(controller)
 	controller.reconciler = newReconciler(controller, slog.Default())
@@ -172,6 +191,21 @@ func (c *Controller) CleanupResources(ctx context.Context) error {
 // into handlers.go once handlers are extracted.
 func (c *Controller) isDocktunnelEnabled(event events.Event) bool {
 	return c.dispatcher.isDocktunnelEnabled(event)
+}
+
+// getCatchAllService returns the service value used for the trailing
+// catch-all ingress rule, falling back to http_status:404 when unset (B4).
+func (c *Controller) getCatchAllService() string {
+	if c.catchAllService != "" {
+		return c.catchAllService
+	}
+	return "http_status:404"
+}
+
+// GetCatchAllService exposes the configured catch-all service to callers
+// outside the controller package (e.g. cmd/docktunnel diagnostics).
+func (c *Controller) GetCatchAllService() string {
+	return c.getCatchAllService()
 }
 
 // SetStatePath sets the path for state persistence

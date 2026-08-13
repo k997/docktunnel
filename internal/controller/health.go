@@ -50,6 +50,21 @@ func (h *healthTracker) isFlapping(containerID string) bool {
 	return false
 }
 
+// IsCooling reports whether the container is inside a flapping cooling
+// period. Same semantics as isFlapping but exposed for periodic
+// reconciliation, which must not re-register cooling containers' routes
+// (B11).
+func (h *healthTracker) IsCooling(containerID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	health, exists := h.c.containerHealth[containerID]
+	if !exists {
+		return false
+	}
+	return health.IsFlapping && time.Now().Before(health.CoolingUntil)
+}
+
 // updateContainerHealth 更新容器健康状态
 func (h *healthTracker) updateContainerHealth(containerID string, isStartEvent bool) {
 	h.mu.Lock()
@@ -69,7 +84,13 @@ func (h *healthTracker) updateContainerHealth(containerID string, isStartEvent b
 
 			if health.RestartCount >= h.c.flappingThreshold {
 				health.IsFlapping = true
-				coolingMultiplier := 1 << uint(health.RestartCount-h.c.flappingThreshold)
+				// Review R5: clamp the exponent — an unbounded shift wraps to
+				// zero past 64 restarts and would disable cooling entirely.
+				shift := health.RestartCount - h.c.flappingThreshold
+				if shift > 20 {
+					shift = 20
+				}
+				coolingMultiplier := 1 << uint(shift)
 				coolingDuration := min(time.Duration(coolingMultiplier)*h.c.coolingPeriod, h.c.maxCoolingPeriod)
 				health.CoolingUntil = now.Add(coolingDuration)
 

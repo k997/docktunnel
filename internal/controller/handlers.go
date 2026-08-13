@@ -9,11 +9,13 @@ import (
 	"docktunnel/internal/events"
 	"docktunnel/internal/label"
 	"docktunnel/pkg/types"
+
+	"github.com/cloudflare/cloudflare-go/v5/zero_trust"
 )
 
 // registerContainerRules parses labels, validates, and registers ingress rules for a container.
-// Returns a map of serviceName → hostname for per-service state management.
-func (c *Controller) registerContainerRules(ctx context.Context, event events.Event) (map[string]string, error) {
+// Returns the parsed rules (serviceName → rule) for per-service state management.
+func (c *Controller) registerContainerRules(ctx context.Context, event events.Event) (map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, error) {
 	parsedRules, err := label.Parse(event.ContainerInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse container labels for container %s: %w", event.ContainerID, err)
@@ -26,26 +28,26 @@ func (c *Controller) registerContainerRules(ctx context.Context, event events.Ev
 	}
 	c.mu.RUnlock()
 
-	serviceHostnames := make(map[string]string)
-	for serviceName, rule := range parsedRules {
-		if rule.Hostname.Value != "" {
-			c.mu.Lock()
-			c.ingressRules[rule.Hostname.Value] = *rule
-			c.mu.Unlock()
-			serviceHostnames[serviceName] = rule.Hostname.Value
+	var hostnames []string
+	seen := make(map[string]bool)
+	c.mu.Lock()
+	for _, rule := range parsedRules {
+		if rule.Hostname.Value == "" {
+			continue
+		}
+		// Key is (hostname, path) since B10, so one hostname may expose
+		// multiple paths.
+		setIngressRuleLocked(c, *rule)
+		if !seen[rule.Hostname.Value] {
+			seen[rule.Hostname.Value] = true
+			hostnames = append(hostnames, rule.Hostname.Value)
 		}
 	}
-
 	// Update containerRules for aggregate lookup
-	hostnames := make([]string, 0, len(serviceHostnames))
-	for _, h := range serviceHostnames {
-		hostnames = append(hostnames, h)
-	}
-	c.mu.Lock()
 	c.containerRules[event.ContainerID] = hostnames
 	c.mu.Unlock()
 
-	return serviceHostnames, nil
+	return parsedRules, nil
 }
 
 // handleContainerStart 处理容器启动事件
@@ -68,7 +70,7 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 		return nil
 	}
 
-	serviceHostnames, err := c.registerContainerRules(ctx, event)
+	parsedRules, err := c.registerContainerRules(ctx, event)
 	if err != nil {
 		slog.Error("Failed to register container rules",
 			"action", "register_rules",
@@ -78,11 +80,23 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 		return err
 	}
 
-	// Create one TunnelEntry per service with per-service retention policy
+	// Create one TunnelEntry per service with per-service retention policy.
+	// The full ingress rule is persisted as RuleJSON so retention can survive
+	// a process restart (B1).
 	labels := event.ContainerInfo.Config.Labels
 	now := time.Now()
-	for serviceName, hostname := range serviceHostnames {
+	for serviceName, rule := range parsedRules {
+		if rule.Hostname.Value == "" {
+			continue
+		}
 		policy := c.getServiceRetentionPolicy(labels, serviceName)
+		ruleJSON, marshalErr := marshalIngressRule(rule)
+		if marshalErr != nil {
+			slog.Warn("Failed to serialize ingress rule for state persistence",
+				"containerID", event.ContainerID,
+				"service", serviceName,
+				"error", marshalErr)
+		}
 		tunnelEntry := &types.TunnelEntry{
 			ContainerID:     event.ContainerID,
 			ServiceName:     serviceName,
@@ -90,7 +104,10 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 			Status:          types.StatusActive,
 			CreatedAt:       now,
 			LastSyncAt:      now,
-			Config:          types.TunnelConfiguration{Hostname: hostname},
+			Config: types.TunnelConfiguration{
+				Hostname: rule.Hostname.Value,
+				RuleJSON: ruleJSON,
+			},
 		}
 		c.stateManager.AddActiveTunnel(tunnelEntry)
 	}
@@ -101,18 +118,23 @@ func (c *Controller) handleContainerStart(ctx context.Context, event events.Even
 }
 
 // getServiceRetentionPolicy parses the retention policy for a specific service.
-// Priority: docktunnel.<service>.retention > docktunnel.retention > Immediate.
+// Priority: per-service delete_retention/retention > global
+// delete_retention/retention > Immediate. Both key spellings are accepted:
+// README documents delete_retention (review R1), retention is the legacy name.
 func (c *Controller) getServiceRetentionPolicy(labels map[string]string, serviceName string) types.RetentionPolicy {
-	// Check per-service retention: docktunnel.<serviceName>.retention
-	if v, ok := labels["docktunnel."+serviceName+".retention"]; ok {
-		if policy, err := label.ParseRetentionPolicy(v); err == nil {
-			return policy
-		}
-	}
-
-	// Check global retention: docktunnel.retention
-	if v, ok := labels["docktunnel.retention"]; ok {
-		if policy, err := label.ParseRetentionPolicy(v); err == nil {
+	for _, key := range []string{
+		"docktunnel." + serviceName + ".delete_retention",
+		"docktunnel." + serviceName + ".retention",
+		"docktunnel.delete_retention",
+		"docktunnel.retention",
+	} {
+		if v, ok := labels[key]; ok {
+			policy, err := label.ParseRetentionPolicy(v)
+			if err != nil {
+				slog.Warn("Ignoring invalid retention policy value",
+					"label", key, "value", v, "error", err)
+				continue
+			}
 			return policy
 		}
 	}
@@ -151,8 +173,13 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 			parsedRules, err := label.Parse(event.ContainerInfo)
 			if err == nil {
 				now := time.Now()
-				for serviceName := range parsedRules {
+				for serviceName, rule := range parsedRules {
 					policy := c.getServiceRetentionPolicy(labels, serviceName)
+					ruleJSON, _ := marshalIngressRule(rule)
+					hostname := ""
+					if rule.Hostname.Value != "" {
+						hostname = rule.Hostname.Value
+					}
 					c.stateManager.AddActiveTunnel(&types.TunnelEntry{
 						ContainerID:     event.ContainerID,
 						ServiceName:     serviceName,
@@ -160,6 +187,12 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 						Status:          types.StatusActive,
 						CreatedAt:       now,
 						LastSyncAt:      now,
+						// B12: fill Hostname (and RuleJSON) so downstream GC /
+						// buildDesiredRules can act on the correct route.
+						Config: types.TunnelConfiguration{
+							Hostname: hostname,
+							RuleJSON: ruleJSON,
+						},
 					})
 				}
 				entries = c.stateManager.GetActiveTunnelsByContainer(event.ContainerID)
@@ -186,46 +219,27 @@ func (c *Controller) handleContainerStop(ctx context.Context, event events.Event
 		}
 	}
 
-	// Transition each service independently
-	var allActions []types.Action
-	for _, entry := range entries {
-		actions, err := c.stateManager.Transition(
-			event.ContainerID, entry.ServiceName,
-			types.EventContainerStopped, &entry.RetentionPolicy,
-		)
-		if err != nil {
-			slog.Error("State transition failed",
-				"action", "state_transition",
-				"result", "failure",
-				"container_id", event.ContainerID,
-				"service_name", entry.ServiceName,
-				"error", err)
-			continue
-		}
-		allActions = append(allActions, actions...)
-	}
+	// Transition each service independently (shared with the disconnect
+	// difference-set in buildDesiredRules, B8)
+	allActions := c.transitionEntriesStopped(event.ContainerID, entries)
 
 	// Execute actions: clear containerRules, handle ingress based on actions
 	c.mu.Lock()
 	delete(c.containerRules, event.ContainerID)
 	for _, action := range allActions {
 		if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
-			delete(c.ingressRules, action.Hostname)
+			// Keys are (hostname, path) since B10 — remove every path of the
+			// hostname.
+			deleteIngressByHostnameLocked(c, action.Hostname)
 		}
 	}
 	c.mu.Unlock()
 	c.updateContainerHealth(event.ContainerID, false)
 
-	if err := c.syncToCloudflare(ctx); err != nil {
-		// Sync failed — enqueue actions for retry
-		for _, action := range allActions {
-			if action.Kind == types.ActionDeleteRoute && action.Hostname != "" {
-				c.stateManager.EnqueueAction(action, err)
-			}
-		}
-		return err
-	}
-	return nil
+	// NOTE: sync failures are compensated by the syncWorker onError callback,
+	// which enqueues a single ActionSync (B3). The old per-action enqueue here
+	// was unreachable because syncToCloudflare never returns an error.
+	return c.syncToCloudflare(ctx)
 }
 
 // handleHealthHealthy re-exposes a container's services when it becomes healthy.
@@ -271,7 +285,7 @@ func (c *Controller) handleHealthUnhealthy(ctx context.Context, event events.Eve
 
 	delete(c.containerRules, event.ContainerID)
 	for _, hostname := range hostnamesToRemove {
-		delete(c.ingressRules, hostname)
+		deleteIngressByHostnameLocked(c, hostname)
 	}
 	c.mu.Unlock()
 

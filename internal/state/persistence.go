@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"docktunnel/pkg/types"
@@ -24,6 +25,11 @@ const (
 	StateVersion = 3
 )
 
+// saveMu serializes the whole "write tmp → fsync → rename → backup rotation"
+// sequence so concurrent Save/ForceSave/SaveJSON calls cannot write the same
+// .tmp file (B14).
+var saveMu sync.Mutex
+
 // Save persists the state manager's snapshot to disk (T070)
 // Uses gob encoding with atomic write (tmp file + rename)
 func (sm *Manager) Save(statePath string) error {
@@ -35,6 +41,10 @@ func (sm *Manager) Save(statePath string) error {
 	// Note: GetSnapshot acquires its own lock, so we shouldn't hold sm.mu here
 	snapshot := sm.GetSnapshot()
 
+	// Serialize the write sequence across concurrent savers.
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	// Rotate backups before writing new state
 	sm.rotateBackups(statePath)
 
@@ -44,9 +54,10 @@ func (sm *Manager) Save(statePath string) error {
 		return fmt.Errorf("failed to create state directory: %w", err)
 	}
 
-	// Write to temporary file first (atomic write)
+	// Write to temporary file first (atomic write). 0600: the file contains
+	// container IDs and hostnames — keep it private to the docktunnel user.
 	tmpFile := statePath + ".tmp"
-	file, err := os.Create(tmpFile)
+	file, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create temp state file: %w", err)
 	}
@@ -199,7 +210,6 @@ func (sm *Manager) loadGob(statePath string) error {
 		"timestamp", snapshot.Timestamp,
 		"active_tunnels", len(snapshot.ActiveTunnels),
 		"pending_deletions", len(snapshot.PendingDeletions),
-		"flapping_containers", len(snapshot.FlappingContainers),
 	)
 
 	return nil
@@ -247,7 +257,6 @@ func (sm *Manager) loadJSON(statePath string) error {
 		"timestamp", snapshot.Timestamp,
 		"active_tunnels", len(snapshot.ActiveTunnels),
 		"pending_deletions", len(snapshot.PendingDeletions),
-		"flapping_containers", len(snapshot.FlappingContainers),
 	)
 
 	return nil
@@ -261,6 +270,10 @@ func (sm *Manager) SaveJSON(statePath string) error {
 
 	snapshot := sm.GetSnapshot()
 
+	// Serialize the write sequence across concurrent savers (B14).
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	// Ensure directory exists
 	stateDir := filepath.Dir(statePath)
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
@@ -269,7 +282,7 @@ func (sm *Manager) SaveJSON(statePath string) error {
 
 	// Write to temporary file first
 	tmpFile := statePath + ".tmp"
-	file, err := os.Create(tmpFile)
+	file, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create temp JSON state file: %w", err)
 	}
@@ -318,9 +331,7 @@ func RegisterGobTypes() {
 	gob.Register(types.RetentionPolicy{})
 	gob.Register(types.PolicyType(0))
 	gob.Register(types.EntryStatus(0))
-	gob.Register(types.FlappingState{})
 	gob.Register(map[string]*types.TunnelEntry{})
-	gob.Register(map[string]types.FlappingState{})
 	gob.Register(types.TransitionEvent(0))
 	gob.Register(types.ActionKind(0))
 	gob.Register(types.Action{})

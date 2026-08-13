@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,12 +63,6 @@ func TestSaveAndLoadGob(t *testing.T) {
 	}
 	sm1.AddPendingDeletion(pendingEntry)
 
-	// Mark flapping (direct field population; the public MarkAsFlapping helper
-	// was removed as dead code along with the other flapping-detection methods)
-	sm1.flappingContainers["flapping-1"] = types.FlappingState{
-		CoolingUntil: time.Now().Add(5 * time.Minute),
-	}
-
 	// Save state
 	err := sm1.Save(statePath)
 	require.NoError(t, err, "Save should succeed")
@@ -95,12 +90,6 @@ func TestSaveAndLoadGob(t *testing.T) {
 	assert.Equal(t, "pending-1", loadedPending.ContainerID)
 	assert.Equal(t, types.StatusRetaining, loadedPending.Status) // Should be migrated from PendingDelete to Retaining
 	assert.Equal(t, types.Timed, loadedPending.RetentionPolicy.Type)
-
-	// Verify flapping state was restored (public GetFlappingState removed as
-	// dead code; the field is still round-tripped via the snapshot)
-	flappingState, exists := sm2.flappingContainers["flapping-1"]
-	assert.True(t, exists, "Flapping state should be loaded")
-	assert.True(t, flappingState.CoolingUntil.After(now), "Cooling period should be in future")
 }
 
 // TestLoadCorruptedFile tests handling of corrupted state files (T067, T075)
@@ -344,6 +333,69 @@ func TestVersionMismatch(t *testing.T) {
 
 	// Should succeed with current version
 	assert.NoError(t, err)
+}
+
+// TestSave_FileMode0600 verifies B14(1): state files are created with 0600
+// permissions (they contain container IDs and hostnames).
+func TestSave_FileMode0600(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		Config:      types.TunnelConfiguration{Hostname: "a.example.com"},
+	})
+	require.NoError(t, sm.Save(statePath))
+
+	info, err := os.Stat(statePath)
+	require.NoError(t, err)
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("state file perm = %o, want 600", perm)
+	}
+
+	// JSON fallback file gets the same treatment.
+	jsonPath := filepath.Join(tmpDir, "state.json")
+	require.NoError(t, sm.SaveJSON(jsonPath))
+	info, err = os.Stat(jsonPath)
+	require.NoError(t, err)
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("json state file perm = %o, want 600", perm)
+	}
+}
+
+// TestSave_ConcurrentSavesDoNotCorrupt verifies B14(2): concurrent Save and
+// ForceSave calls are serialized by saveMu and never corrupt the file.
+func TestSave_ConcurrentSavesDoNotCorrupt(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetStatePath(statePath)
+	for i := 0; i < 20; i++ {
+		sm.AddActiveTunnel(&types.TunnelEntry{
+			ContainerID: "c",
+			ServiceName: "s",
+			Status:      types.StatusActive,
+			Config:      types.TunnelConfiguration{Hostname: "a.example.com"},
+		})
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = sm.Save(statePath)
+		}()
+	}
+	wg.Wait()
+
+	// The file must still load cleanly.
+	sm2 := NewManager(slog.Default())
+	require.NoError(t, sm2.Load(statePath))
 }
 
 // TestNewManager_DefaultBackupCount tests default backupCount value

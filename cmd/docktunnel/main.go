@@ -148,16 +148,14 @@ func main() {
 	// trySendEvent in monitor.go drops + counts when even this fills up.
 	eventChan := make(chan events.Event, 256)
 
-	// 启动事件处理循环
 	var wg sync.WaitGroup
-	wg.Add(1)
 
 	// Watchdog: sample EventsDropped every 30s. Any non-zero delta since
 	// the last sample surfaces as a WARN so operators don't have to scrape
 	// Prometheus to learn events are being lost. Pipeline saturation is
 	// otherwise invisible until reconcile catches up (default 120s later).
 	wg.Add(1)
-	go func() {
+	go runWithRecover("event-drop-watchdog", func() {
 		defer wg.Done()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -176,45 +174,22 @@ func main() {
 				return
 			}
 		}
-	}()
+	})
 
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case event := <-eventChan:
-				appLogger.Debug("Processing Docker event", "type", event.Type, "containerID", event.ContainerID)
-				if err := controller.Dispatch(ctx, event); err != nil {
-					appLogger.Error("Failed to dispatch event", "error", err)
-				}
-			case <-ctx.Done():
-				appLogger.Info("Event processing loop stopped")
-				return
-			}
-		}
-	}()
-	// Start HTTP server for metrics and diagnostics (Phase 6)
-	debugServer := server.New(cfg.GetServerAddr(), cfg.Server.DebugToken, controller.GetDebugState)
+	// 启动Docker事件监听器 goroutine（只灌 channel，不处理事件）。
+	// 放在初始 Sync 之前：监听器只会向 channel 投递事件，真正的处理在
+	// dispatch 循环启动后才开始，因此初始 Sync 的全量重建不会覆盖
+	// 并发到达的事件（B6 启动竞态修复）。
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		appLogger.Info("Starting diagnostics HTTP server", "addr", cfg.GetServerAddr())
-		if err := debugServer.Start(ctx); err != nil {
-			appLogger.Error("Diagnostics HTTP server stopped with error", "error", err)
-		}
-	}()
-
-	// 启动Docker事件监听器
-	wg.Add(1)
-	go func() {
+	go runWithRecover("docker-event-listener", func() {
 		defer wg.Done()
 		appLogger.Info("Starting Docker event listener")
 		if err := dockerManager.ListenForEvents(ctx, eventChan); err != nil {
 			appLogger.Error("Docker event listener error", "error", err)
 		}
-	}()
+	})
 
-	// 首次同步配置
+	// 首次同步配置 — 在事件 dispatch 循环启动之前执行，先建立完整期望状态。
 	appLogger.Info("Performing initial synchronization")
 	if err := controller.Sync(ctx); err != nil {
 		appLogger.Error("Initial synchronization failed", "error", err)
@@ -222,9 +197,50 @@ func main() {
 		appLogger.Info("Initial synchronization completed successfully")
 	}
 
+	// 启动事件处理循环 — 最后启动（B6）：初始 Sync 完成后才开始处理
+	// 排队的事件，避免事件处理器与全量重建互相覆盖。
+	wg.Add(1)
+	go runWithRecover("event-dispatch-loop", func() {
+		defer wg.Done()
+		for {
+			select {
+			case event := <-eventChan:
+				// 单个事件的 panic 只记录并继续（B7）
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							appLogger.Error("Panic recovered while dispatching event",
+								"type", event.Type,
+								"containerID", event.ContainerID,
+								"panic", r)
+						}
+					}()
+					appLogger.Debug("Processing Docker event", "type", event.Type, "containerID", event.ContainerID)
+					if err := controller.Dispatch(ctx, event); err != nil {
+						appLogger.Error("Failed to dispatch event", "error", err)
+					}
+				}()
+			case <-ctx.Done():
+				appLogger.Info("Event processing loop stopped")
+				return
+			}
+		}
+	})
+
+	// Start HTTP server for metrics and diagnostics (Phase 6)
+	debugServer := server.New(cfg.GetServerAddr(), cfg.Server.DebugToken, controller.GetDebugState)
+	wg.Add(1)
+	go runWithRecover("debug-http-server", func() {
+		defer wg.Done()
+		appLogger.Info("Starting diagnostics HTTP server", "addr", cfg.GetServerAddr())
+		if err := debugServer.Start(ctx); err != nil {
+			appLogger.Error("Diagnostics HTTP server stopped with error", "error", err)
+		}
+	})
+
 	// 启动垃圾回收和对账定时器 (T062)
 	wg.Add(1)
-	go func() {
+	go runWithRecover("gc-reconcile-ticker", func() {
 		defer wg.Done()
 
 		gcTicker := time.NewTicker(60 * time.Second)
@@ -266,27 +282,27 @@ func main() {
 				return
 			}
 		}
-	}()
+	})
 
 	// Start the sync worker. Wrapper goroutine exists so wg.Wait() in
 	// shutdown blocks until the worker has fully stopped, not just
 	// until Start returns.
 	wg.Add(1)
-	go func() {
+	go runWithRecover("sync-worker", func() {
 		defer wg.Done()
 		appLogger.Info("Starting sync worker")
 		controller.Start(ctx)
 		<-ctx.Done()
 		controller.StopSyncWorker()
-	}()
+	})
 
 	// Start compensation queue background loop
 	wg.Add(1)
-	go func() {
+	go runWithRecover("compensation-loop", func() {
 		defer wg.Done()
 		appLogger.Info("Starting compensation queue background loop")
 		controller.RunCompensationLoop(ctx)
-	}()
+	})
 
 	// 设置系统信号处理
 	sigChan := make(chan os.Signal, 1)
@@ -320,10 +336,18 @@ shutdown:
 	// blocks forever because nothing is left to drain it, the cleared
 	// config never lands on Cloudflare, and every graceful-cleanup
 	// shutdown hangs for the full cleanup timeout.
-	switch cfg.Cleanup.Strategy {
-	case "fast-exit":
-		appLogger.Info("Fast exit requested, skipping resource cleanup")
-	case "graceful-cleanup":
+	//
+	// B5: cleanup runs only when cleanup.onExit=true AND the strategy is
+	// graceful-cleanup; otherwise it is skipped (with a Warn for non-default
+	// strategies) so force-cleanup/none/fast-exit configs don't delete DNS.
+	if shouldSkipCleanup(cfg.Cleanup.OnExit, cfg.Cleanup.Strategy) {
+		if !cfg.Cleanup.OnExit {
+			appLogger.Info("skipping cleanup (cleanup.onExit=false)")
+		} else {
+			appLogger.Warn("Skipping cleanup: strategy is not graceful-cleanup",
+				"strategy", cfg.Cleanup.Strategy)
+		}
+	} else {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), cfg.Cleanup.Timeout)
 		defer cleanupCancel()
 
@@ -335,8 +359,9 @@ shutdown:
 				// Collect remaining hostnames for diagnostic logging
 				rules := controller.GetIngressRules()
 				var remaining []string
+				catchAll := controller.GetCatchAllService()
 				for _, rule := range rules {
-					if rule.Hostname.Value != "" && rule.Service.Value != "http_status:404" {
+					if rule.Hostname.Value != "" && rule.Service.Value != catchAll {
 						remaining = append(remaining, rule.Hostname.Value)
 					}
 				}
@@ -349,9 +374,6 @@ shutdown:
 		} else {
 			appLogger.Info("Resources cleaned up successfully")
 		}
-	default:
-		appLogger.Info("Unknown cleanup strategy, skipping cleanup",
-			"strategy", cfg.Cleanup.Strategy)
 	}
 
 	// Cancel context to notify all goroutines to stop. Runs after
@@ -380,3 +402,29 @@ shutdown:
 }
 
 var memStats runtime.MemStats
+
+// runWithRecover runs f, recovering any panic and logging it so a single
+// goroutine failure (event dispatch, listener, watchdog, ticker, ...) cannot
+// take down the whole process (B7).
+func runWithRecover(name string, f func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic recovered; goroutine continues",
+				"goroutine", name,
+				"panic", r)
+		}
+	}()
+	f()
+}
+
+// shouldSkipCleanup reports whether shutdown should skip resource cleanup
+// entirely. Cleanup runs only when cleanup.onExit=true AND the strategy is
+// graceful-cleanup; onExit=false, fast-exit and unknown strategies all skip
+// (B5). Config validation currently still accepts force-cleanup/none — they
+// are treated as unknown here and skipped with a warning.
+func shouldSkipCleanup(onExit bool, strategy string) bool {
+	if !onExit {
+		return true
+	}
+	return strategy != "graceful-cleanup"
+}

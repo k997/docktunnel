@@ -15,30 +15,36 @@ type RuleValidator interface {
 	Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, existingRules map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error
 }
 
-// HostnameUniquenessValidator 验证主机名唯一性
+// HostnameUniquenessValidator 验证 (hostname, path) 键的唯一性
+//
+// Since B10 the route identity is (hostname, path): one hostname may expose
+// multiple paths (README microservice scenario), so only identical
+// (hostname, path) pairs collide. DNS is case-insensitive, so hostnames are
+// lowercased before keying — App.example.com and app.example.com resolve to
+// the same record.
 type HostnameUniquenessValidator struct{}
 
 func (v *HostnameUniquenessValidator) Validate(rules map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, existingRules map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
-	// DNS is case-insensitive: App.example.com and app.example.com resolve
-	// to the same record. Lowercase before keying so case variants can't
-	// both pass validation and then collide at the Cloudflare API.
-	hostnameMap := make(map[string]string) // lowercased hostname -> service name
+	// (lowercased hostname, path) -> service name, for error messages
+	routeMap := make(map[string]string)
 
-	// 从现有规则中填充主机名
+	// 从现有规则中填充 (hostname, path) 键。existingRules 的 map 键是
+	// ingressKey(hostname, path)（B10），这里直接读规则字段更可靠。
 	if existingRules != nil {
-		for hostname := range existingRules {
-			hostnameMap[strings.ToLower(hostname)] = "an existing service"
+		for _, rule := range existingRules {
+			key := strings.ToLower(rule.Hostname.Value) + "\x00" + rule.Path.Value
+			routeMap[key] = "an existing service"
 		}
 	}
 
-	// 检查新规则中的主机名
+	// 检查新规则中的 (hostname, path) 键
 	for serviceName, rule := range rules {
-		key := strings.ToLower(rule.Hostname.Value)
-		if existingService, exists := hostnameMap[key]; exists {
-			return fmt.Errorf("duplicate hostname %s found. It is already used by %s, and new service %s also tries to use it", rule.Hostname.Value, existingService, serviceName)
+		key := strings.ToLower(rule.Hostname.Value) + "\x00" + rule.Path.Value
+		if existingService, exists := routeMap[key]; exists {
+			return fmt.Errorf("duplicate route %s%s found. It is already used by %s, and new service %s also tries to use it",
+				rule.Hostname.Value, rule.Path.Value, existingService, serviceName)
 		}
-
-		hostnameMap[key] = serviceName
+		routeMap[key] = serviceName
 	}
 	return nil
 }

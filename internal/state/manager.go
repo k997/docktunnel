@@ -21,18 +21,17 @@ const (
 
 // Manager manages the state of all tunnel entries
 type Manager struct {
-	mu                 sync.RWMutex
-	activeTunnels      map[string]*types.TunnelEntry  // key: containerID:serviceName (compound)
-	pendingDeletes     map[string]*types.TunnelEntry  // key: containerID:serviceName (compound)
-	flappingContainers map[string]types.FlappingState // key: containerID
-	pendingActions     map[string]*types.CompensationRecord
-	compInitialDelay   time.Duration
-	compMaxDelay       time.Duration
-	compMaxRetries     int
-	compPollInterval   time.Duration
-	compMaxQueueSize   int
-	backupCount        int
-	validateOnLoad     bool
+	mu               sync.RWMutex
+	activeTunnels    map[string]*types.TunnelEntry // key: containerID:serviceName (compound)
+	pendingDeletes   map[string]*types.TunnelEntry // key: containerID:serviceName (compound)
+	pendingActions   map[string]*types.CompensationRecord
+	compInitialDelay time.Duration
+	compMaxDelay     time.Duration
+	compMaxRetries   int
+	compPollInterval time.Duration
+	compMaxQueueSize int
+	backupCount      int
+	validateOnLoad   bool
 
 	logger    *slog.Logger
 	statePath string
@@ -64,21 +63,20 @@ func containerIDFromKey(key string) string {
 // NewManager creates a new state manager
 func NewManager(logger *slog.Logger) *Manager {
 	return &Manager{
-		activeTunnels:      make(map[string]*types.TunnelEntry),
-		pendingDeletes:     make(map[string]*types.TunnelEntry),
-		flappingContainers: make(map[string]types.FlappingState),
-		pendingActions:     make(map[string]*types.CompensationRecord),
-		logger:             logger,
-		statePath:          "",
-		lastSaved:          time.Time{},
-		dirty:              false,
-		compInitialDelay:   30 * time.Second,
-		compMaxDelay:       30 * time.Minute,
-		compMaxRetries:     10,
-		compPollInterval:   30 * time.Second,
-		compMaxQueueSize:   1000,
-		backupCount:        3,
-		validateOnLoad:     true,
+		activeTunnels:    make(map[string]*types.TunnelEntry),
+		pendingDeletes:   make(map[string]*types.TunnelEntry),
+		pendingActions:   make(map[string]*types.CompensationRecord),
+		logger:           logger,
+		statePath:        "",
+		lastSaved:        time.Time{},
+		dirty:            false,
+		compInitialDelay: 30 * time.Second,
+		compMaxDelay:     30 * time.Minute,
+		compMaxRetries:   10,
+		compPollInterval: 30 * time.Second,
+		compMaxQueueSize: 1000,
+		backupCount:      3,
+		validateOnLoad:   true,
 	}
 }
 
@@ -251,8 +249,9 @@ func (sm *Manager) AddPendingDeletion(entry *types.TunnelEntry) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Remove from active if present
-	delete(sm.activeTunnels, entry.ContainerID)
+	// Remove from active if present — use the compound key so per-service
+	// entries are removed individually instead of leaking the entry (B13).
+	delete(sm.activeTunnels, activeTunnelKey(entry.ContainerID, entry.ServiceName))
 
 	// Add to pending deletions with compound key (containerID:serviceName)
 	key := pendingDeleteKey(entry.ContainerID, entry.ServiceName)
@@ -323,6 +322,32 @@ func (sm *Manager) GetAllPendingDeletions() map[string]*types.TunnelEntry {
 	return result
 }
 
+// ListRetaining returns a read-only snapshot of all entries currently in
+// retention (StatusRetaining). Entries are deep-copied so callers cannot
+// mutate live state. Expiry is handled by RunGC; callers treat every entry
+// returned here as still-valid retention (B1).
+func (sm *Manager) ListRetaining() []*types.TunnelEntry {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	var out []*types.TunnelEntry
+	for _, entry := range sm.pendingDeletes {
+		if entry.Status != types.StatusRetaining {
+			continue
+		}
+		copied := *entry
+		if entry.DeletedAt != nil {
+			t := *entry.DeletedAt
+			copied.DeletedAt = &t
+		}
+		if entry.Config.RuleJSON != nil {
+			copied.Config.RuleJSON = append([]byte(nil), entry.Config.RuleJSON...)
+		}
+		out = append(out, &copied)
+	}
+	return out
+}
+
 // RestoreActiveTunnel moves all pending deletion entries for a container back to active.
 //
 // Also cancels any pending ActionDeleteRoute records for the container: if a
@@ -385,6 +410,9 @@ func (sm *Manager) GetSnapshot() *types.StateSnapshot {
 			t := *v.DeletedAt
 			copied.DeletedAt = &t
 		}
+		if v.Config.RuleJSON != nil {
+			copied.Config.RuleJSON = append([]byte(nil), v.Config.RuleJSON...)
+		}
 		activeTunnels[k] = &copied
 	}
 
@@ -395,19 +423,10 @@ func (sm *Manager) GetSnapshot() *types.StateSnapshot {
 			t := *v.DeletedAt
 			copied.DeletedAt = &t
 		}
-		pendingDeletions[k] = &copied
-	}
-
-	flappingContainers := make(map[string]types.FlappingState, len(sm.flappingContainers))
-	for k, v := range sm.flappingContainers {
-		// FlappingState has a []time.Time slice — copy it so callers appending
-		// to the original don't mutate the snapshot.
-		if v.Transitions != nil {
-			t := make([]time.Time, len(v.Transitions))
-			copy(t, v.Transitions)
-			v.Transitions = t
+		if v.Config.RuleJSON != nil {
+			copied.Config.RuleJSON = append([]byte(nil), v.Config.RuleJSON...)
 		}
-		flappingContainers[k] = v
+		pendingDeletions[k] = &copied
 	}
 
 	pendingActions := make(map[string]*types.CompensationRecord, len(sm.pendingActions))
@@ -417,12 +436,11 @@ func (sm *Manager) GetSnapshot() *types.StateSnapshot {
 	}
 
 	return &types.StateSnapshot{
-		Version:            3,
-		Timestamp:          time.Now().UTC(),
-		ActiveTunnels:      activeTunnels,
-		PendingDeletions:   pendingDeletions,
-		FlappingContainers: flappingContainers,
-		PendingActions:     pendingActions,
+		Version:          3,
+		Timestamp:        time.Now().UTC(),
+		ActiveTunnels:    activeTunnels,
+		PendingDeletions: pendingDeletions,
+		PendingActions:   pendingActions,
 	}
 }
 
@@ -435,7 +453,6 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 	if snapshot == nil {
 		sm.activeTunnels = make(map[string]*types.TunnelEntry)
 		sm.pendingDeletes = make(map[string]*types.TunnelEntry)
-		sm.flappingContainers = make(map[string]types.FlappingState)
 		sm.logger.Warn("Nil snapshot received, starting with empty state")
 		return
 	}
@@ -473,8 +490,6 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 		}
 	}
 
-	sm.flappingContainers = snapshot.FlappingContainers
-
 	// Restore pending actions (migrate v2 → v3)
 	if snapshot.PendingActions != nil {
 		sm.pendingActions = snapshot.PendingActions
@@ -487,7 +502,6 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 		"timestamp", snapshot.Timestamp,
 		"active_tunnels", len(sm.activeTunnels),
 		"pending_deletions", len(sm.pendingDeletes),
-		"flapping_containers", len(sm.flappingContainers),
 	)
 }
 
@@ -542,23 +556,6 @@ func (sm *Manager) RunGC(ctx context.Context) ([]*types.TunnelEntry, error) {
 		}
 	}
 
-	// Clean up expired flapping states
-	flappingRemoved := 0
-	for containerID, state := range sm.flappingContainers {
-		if now.After(state.CoolingUntil) {
-			delete(sm.flappingContainers, containerID)
-			flappingRemoved++
-			sm.logger.Debug("Removed expired flapping state",
-				"container_id", containerID,
-			)
-		}
-	}
-	if flappingRemoved > 0 {
-		// Must mark dirty: without it, SaveIfDirty skips writing and the
-		// expired flapping state reappears from the on-disk snapshot on restart.
-		sm.markDirty()
-	}
-
 	return expiredEntries, nil
 }
 
@@ -568,9 +565,8 @@ func (sm *Manager) GetStats() map[string]int {
 	defer sm.mu.RUnlock()
 
 	return map[string]int{
-		"active_tunnels":      len(sm.activeTunnels),
-		"pending_deletions":   len(sm.pendingDeletes),
-		"flapping_containers": len(sm.flappingContainers),
+		"active_tunnels":    len(sm.activeTunnels),
+		"pending_deletions": len(sm.pendingDeletes),
 	}
 }
 
@@ -677,15 +673,36 @@ func (sm *Manager) EnqueueAction(action types.Action, err error) {
 }
 
 // GetAllPendingActions returns a copy of all compensation records.
+//
+// Each *CompensationRecord is cloned by value under the read lock. The
+// compensation goroutine (processCompensationQueue) mutates RetryCount,
+// NextRetryAt, LastError and Dead outside this lock — returning live pointers
+// would let callers race with those writes. See TestGetAllPendingActions_ReturnsCopies.
 func (sm *Manager) GetAllPendingActions() []*types.CompensationRecord {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
 	result := make([]*types.CompensationRecord, 0, len(sm.pendingActions))
 	for _, rec := range sm.pendingActions {
-		result = append(result, rec)
+		copied := *rec
+		result = append(result, &copied)
 	}
 	return result
+}
+
+// HasPendingActionKind reports whether the compensation queue already holds a
+// non-dead record of the given kind. Used to deduplicate repeated enqueues of
+// the same compensation (e.g. one ActionSync per sync failure burst, B3).
+func (sm *Manager) HasPendingActionKind(kind types.ActionKind) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	for _, rec := range sm.pendingActions {
+		if rec.Action.Kind == kind && !rec.Dead {
+			return true
+		}
+	}
+	return false
 }
 
 // GetDeadActions returns compensation records that are permanently failed.
@@ -799,6 +816,20 @@ func (sm *Manager) processCompensationQueue(executor func(types.Action) error) {
 			"retry_count", rec.RetryCount,
 			"next_retry_at", rec.NextRetryAt,
 			"error", err)
+	}
+
+	// Clean up Dead records so permanently-failed or retry-exhausted actions
+	// cannot occupy the queue forever (B3/B15).
+	cleaned := 0
+	for id, rec := range sm.pendingActions {
+		if rec.Dead {
+			delete(sm.pendingActions, id)
+			cleaned++
+		}
+	}
+	if cleaned > 0 {
+		sm.markDirty()
+		sm.logger.Info("Cleaned up dead compensation records", "count", cleaned)
 	}
 
 	sm.mu.Unlock()

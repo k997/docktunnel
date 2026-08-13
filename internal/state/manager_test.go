@@ -19,7 +19,6 @@ func TestNewManager(t *testing.T) {
 	assert.NotNil(t, sm)
 	assert.NotNil(t, sm.activeTunnels)
 	assert.NotNil(t, sm.pendingDeletes)
-	assert.NotNil(t, sm.flappingContainers)
 }
 
 func TestAddActiveTunnel(t *testing.T) {
@@ -241,11 +240,6 @@ func TestLoadFromSnapshot(t *testing.T) {
 				DeletedAt:   &now,
 			},
 		},
-		FlappingContainers: map[string]types.FlappingState{
-			"flapping-1": {
-				CoolingUntil: now.Add(1 * time.Hour),
-			},
-		},
 	}
 
 	// Load snapshot
@@ -259,11 +253,6 @@ func TestLoadFromSnapshot(t *testing.T) {
 	pending, ok := sm.GetPendingDeletion("pending-1")
 	assert.True(t, ok)
 	assert.Equal(t, "pending-1", pending.ContainerID)
-
-	// Verify flapping state was restored
-	flapping, exists := sm.flappingContainers["flapping-1"]
-	assert.True(t, exists, "Flapping state should be loaded")
-	assert.True(t, flapping.CoolingUntil.After(now), "Cooling period should be in future")
 }
 
 func TestRunGC_ImmediatePolicy(t *testing.T) {
@@ -382,16 +371,9 @@ func TestGetStats(t *testing.T) {
 		DeletedAt:   &now,
 	})
 
-	// Mark flapping (direct field population; the public MarkAsFlapping helper
-	// was removed as dead code along with the other flapping-detection methods)
-	sm.flappingContainers["flapping-1"] = types.FlappingState{
-		CoolingUntil: time.Now().Add(5 * time.Minute),
-	}
-
 	stats := sm.GetStats()
 	assert.Equal(t, 2, stats["active_tunnels"])
 	assert.Equal(t, 1, stats["pending_deletions"])
-	assert.Equal(t, 1, stats["flapping_containers"])
 }
 
 // TestContainerRestartCancelsRetention tests that a container restart
@@ -895,24 +877,6 @@ func TestGetSnapshot_DeepCopiesCompensationRecord(t *testing.T) {
 	}
 }
 
-func TestGetSnapshot_DeepCopiesFlappingTransitions(t *testing.T) {
-	sm := NewManager(slog.Default())
-	now := time.Now()
-	sm.flappingContainers["c1"] = types.FlappingState{
-		Transitions: []time.Time{now, now.Add(time.Second)},
-	}
-
-	snap := sm.GetSnapshot()
-	snap.FlappingContainers["c1"].Transitions[0] = time.Time{}
-
-	// Original transitions slice must be untouched
-	orig := sm.flappingContainers["c1"]
-	if !orig.Transitions[0].Equal(now) {
-		t.Errorf("snapshot mutation leaked into live state: first transition = %v, want %v",
-			orig.Transitions[0], now)
-	}
-}
-
 func TestRestoreActiveTunnel_CancelsPendingDeleteActions(t *testing.T) {
 	sm := NewManager(slog.Default())
 	// Simulate a stop that enqueued a delete, before the container comes back
@@ -966,36 +930,191 @@ func TestRestoreActiveTunnel_PreservesOtherContainersActions(t *testing.T) {
 	}
 }
 
-func TestRunGC_FlappingExpirationMarksDirty(t *testing.T) {
-	sm := NewManager(slog.Default())
-	sm.flappingContainers["c1"] = types.FlappingState{
-		CoolingUntil: time.Now().Add(-time.Minute), // already expired
-	}
-
-	// Force a "save" via the dirty flag check
-	sm.mu.Lock()
-	sm.dirty = false
-	sm.mu.Unlock()
-
-	if _, err := sm.RunGC(context.Background()); err != nil {
-		t.Fatalf("RunGC failed: %v", err)
-	}
-
-	sm.mu.RLock()
-	dirty := sm.dirty
-	sm.mu.RUnlock()
-	if !dirty {
-		t.Error("RunGC should mark dirty when removing expired flapping state")
-	}
-
-	if _, exists := sm.flappingContainers["c1"]; exists {
-		t.Error("expired flapping state should be removed")
-	}
-}
-
 // errorsNew is a tiny helper so we don't have to import "errors" in every test file.
 func errorsNew(s string) error { return &simpleErr{msg: s} }
 
 type simpleErr struct{ msg string }
 
 func (e *simpleErr) Error() string { return e.msg }
+
+// TestListRetaining_ReturnsOnlyRetainingDeepCopies verifies ListRetaining
+// (B1): only StatusRetaining entries are returned, deep-copied so callers
+// cannot mutate live state.
+func TestListRetaining_ReturnsOnlyRetainingDeepCopies(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	ruleJSON := []byte(`{"hostname":"retained.example.com","service":"http://origin:8080"}`)
+	past := time.Now().Add(-time.Minute)
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: time.Hour},
+		DeletedAt:       &past,
+		Config:          types.TunnelConfiguration{Hostname: "retained.example.com", RuleJSON: ruleJSON},
+	})
+	// Immediate-pending entry must NOT be listed.
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c2",
+		ServiceName:     "web",
+		Status:          types.StatusPendingDelete,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+		DeletedAt:       &past,
+	})
+
+	retaining := sm.ListRetaining()
+	if len(retaining) != 1 {
+		t.Fatalf("expected 1 retaining entry, got %d", len(retaining))
+	}
+	if retaining[0].ContainerID != "c1" {
+		t.Errorf("expected c1, got %s", retaining[0].ContainerID)
+	}
+
+	// Deep copy: mutating the returned RuleJSON must not touch live state.
+	retaining[0].Config.RuleJSON[0] = 'X'
+	retaining[0].Config.Hostname = "MUTATED"
+
+	live, _ := sm.GetPendingDeletion("c1")
+	if live.Config.Hostname == "MUTATED" {
+		t.Error("snapshot mutation leaked into live state (Hostname)")
+	}
+	if live.Config.RuleJSON[0] == 'X' {
+		t.Error("snapshot mutation leaked into live state (RuleJSON)")
+	}
+}
+
+// TestAddPendingDeletion_RemovesActiveWithCompoundKey verifies B13: moving a
+// per-service entry to pending deletion removes only that service's active
+// entry, leaving sibling services of the same container untouched.
+func TestAddPendingDeletion_RemovesActiveWithCompoundKey(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "c1", ServiceName: "web", Status: types.StatusActive})
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "c1", ServiceName: "api", Status: types.StatusActive})
+
+	now := time.Now()
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+	})
+
+	if _, ok := sm.GetActiveTunnel("c1", "web"); ok {
+		t.Error("web entry should be removed from active tunnels")
+	}
+	if _, ok := sm.GetActiveTunnel("c1", "api"); !ok {
+		t.Error("api entry must remain active (compound-key delete, B13)")
+	}
+	if _, ok := sm.GetPendingDeletion("c1"); !ok {
+		t.Error("web entry should be in pending deletions")
+	}
+}
+
+// TestHasPendingActionKind verifies the dedup helper used by the sync-failure
+// compensation path (B3).
+func TestHasPendingActionKind(t *testing.T) {
+	sm := NewManager(slog.Default())
+	if sm.HasPendingActionKind(types.ActionSync) {
+		t.Error("no actions yet — HasPendingActionKind must be false")
+	}
+
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "a.example.com"},
+		&types.RetryableError{Err: errorsNew("503")})
+	if sm.HasPendingActionKind(types.ActionSync) {
+		t.Error("ActionDeleteRoute must not satisfy ActionSync lookup")
+	}
+
+	sm.EnqueueAction(types.Action{Kind: types.ActionSync}, &types.RetryableError{Err: errorsNew("503")})
+	if !sm.HasPendingActionKind(types.ActionSync) {
+		t.Error("expected ActionSync record to be found")
+	}
+
+	// A Dead ActionSync must not block re-enqueue. Mark the live record dead
+	// via the internal map: GetAllPendingActions returns copies (so mutations
+	// through it cannot reach live state).
+	for _, rec := range sm.pendingActions {
+		if rec.Action.Kind == types.ActionSync {
+			rec.Dead = true
+		}
+	}
+	if sm.HasPendingActionKind(types.ActionSync) {
+		t.Error("Dead ActionSync record must not count as pending")
+	}
+}
+
+// TestProcessCompensationQueue_CleansDeadRecords verifies B3(6)/B15: dead
+// records are removed at the end of each compensation round so they cannot
+// occupy the queue forever.
+func TestProcessCompensationQueue_CleansDeadRecords(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "dead.example.com"},
+		&types.PermanentError{Err: errorsNew("403")}) // dead immediately
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "alive.example.com"},
+		&types.RetryableError{Err: errorsNew("503")})
+
+	if got := len(sm.GetDeadActions()); got != 1 {
+		t.Fatalf("expected 1 dead record before processing, got %d", got)
+	}
+
+	sm.processCompensationQueue(func(types.Action) error { return nil })
+
+	if got := len(sm.GetAllPendingActions()); got != 1 {
+		t.Fatalf("expected 1 pending record after cleanup, got %d", got)
+	}
+	for _, rec := range sm.GetAllPendingActions() {
+		if rec.Action.Hostname == "dead.example.com" {
+			t.Error("dead record should have been cleaned up")
+		}
+	}
+}
+
+// TestGetSnapshot_DeepCopiesRuleJSON verifies B14(3): the RuleJSON byte slice
+// is deep-copied in GetSnapshot so gob encoding outside the lock cannot tear.
+func TestGetSnapshot_DeepCopiesRuleJSON(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		Config:      types.TunnelConfiguration{Hostname: "a.example.com", RuleJSON: []byte("payload")},
+	})
+
+	snap := sm.GetSnapshot()
+	snap.ActiveTunnels["c1:web"].Config.RuleJSON[0] = 'X'
+
+	live, _ := sm.GetActiveTunnel("c1", "web")
+	if string(live.Config.RuleJSON) != "payload" {
+		t.Errorf("snapshot mutation leaked into live RuleJSON: %q", live.Config.RuleJSON)
+	}
+}
+
+// TestGetAllPendingActions_ReturnsCopies verifies that GetAllPendingActions
+// returns value copies, not live pointers. The compensation goroutine mutates
+// RetryCount/NextRetryAt/Dead on the live records; returning live pointers let
+// callers race with those writes (caught by -race in
+// TestRunCompensation_RetryableFailureBacksOff).
+func TestGetAllPendingActions_ReturnsCopies(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "a.example.com"},
+		&types.RetryableError{Err: errorsNew("503")})
+
+	pending := sm.GetAllPendingActions()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending record, got %d", len(pending))
+	}
+
+	// Mutating the returned record must not leak into live state.
+	pending[0].RetryCount = 999
+	pending[0].Dead = true
+
+	live := sm.GetAllPendingActions()
+	if len(live) != 1 {
+		t.Fatalf("expected live state to keep 1 pending record, got %d", len(live))
+	}
+	if live[0].RetryCount != 0 {
+		t.Errorf("copy mutation leaked into live RetryCount: %d", live[0].RetryCount)
+	}
+	if live[0].Dead {
+		t.Error("copy mutation leaked into live Dead flag")
+	}
+}

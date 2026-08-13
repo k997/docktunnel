@@ -167,11 +167,21 @@ func (m *Manager) listenOnce(ctx context.Context, eventChannel chan<- events.Eve
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case err := <-errs:
+		case err, ok := <-errs:
+			if !ok {
+				// Error channel closed — treat as stream termination so the
+				// reconnect loop kicks in (B16). Relying on the SDK contract
+				// alone risks a busy loop when both channels close silently.
+				return fmt.Errorf("docker event error channel closed")
+			}
 			if err != nil {
 				return fmt.Errorf("docker event stream error: %w", err)
 			}
-		case message := <-messages:
+		case message, ok := <-messages:
+			if !ok {
+				// Message channel closed — same reconnect trigger.
+				return fmt.Errorf("docker event message channel closed")
+			}
 			if message.Type != "container" {
 				continue
 			}
@@ -200,7 +210,10 @@ func (m *Manager) listenOnce(ctx context.Context, eventChannel chan<- events.Eve
 				} else {
 					event.ContainerInfo = &containerInfo
 				}
-			case message.Action == eventTypes.ActionDie:
+			case message.Action == eventTypes.ActionDie || message.Action == eventTypes.ActionDestroy:
+				// destroy carries the same semantics as die for our purposes:
+				// the container is gone. Inspect failure is tolerable — the
+				// handler falls back to in-memory state (B16).
 				event.Type = eventTypes.ActionDie
 				containerInfo, err := m.client.ContainerInspect(ctx, event.ContainerID)
 				if err != nil {
@@ -228,7 +241,17 @@ func (m *Manager) listenOnce(ctx context.Context, eventChannel chan<- events.Eve
 					event.ContainerInfo = &containerInfo
 				}
 			case message.Action == "health_status: starting":
+				// B16: fill ContainerInfo like the other health events —
+				// without it the dispatcher's isDocktunnelEnabled check drops
+				// the event and this mapping becomes a dead end.
 				event.Type = events.ActionHealthStarting
+				containerInfo, err := m.client.ContainerInspect(ctx, event.ContainerID)
+				if err != nil {
+					slog.Warn("Failed to inspect container on health event",
+						"containerID", event.ContainerID, "error", err)
+				} else {
+					event.ContainerInfo = &containerInfo
+				}
 			default:
 				continue
 			}

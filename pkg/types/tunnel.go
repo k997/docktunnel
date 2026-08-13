@@ -70,6 +70,12 @@ type TunnelConfiguration struct {
 	Protocol      string
 	Port          int
 	IPAddress     string
+	// RuleJSON is the JSON-serialized Cloudflare ingress rule
+	// (zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
+	// for this service. Persisted so retention (Timed/Forever) entries can
+	// restore their full rule after a process restart without gob-encoding
+	// SDK structs directly (B1).
+	RuleJSON []byte
 }
 
 // OriginRequestConfig represents connection and security settings for origin communication
@@ -119,13 +125,6 @@ type RetentionPolicy struct {
 	Duration time.Duration // For Timed type
 }
 
-// FlappingState tracks flapping detection state for a container
-type FlappingState struct {
-	Transitions  []time.Time
-	LastFlapped  time.Time
-	CoolingUntil time.Time
-}
-
 // TransitionEvent represents lifecycle events that trigger state transitions
 type TransitionEvent int
 
@@ -142,6 +141,7 @@ type ActionKind int
 const (
 	ActionNone        ActionKind = iota
 	ActionDeleteRoute            // Delete ingress rule and DNS for hostname
+	ActionSync                   // Re-run a full Cloudflare sync (compensation for failed syncs)
 )
 
 // Action represents an action the controller should perform after a state transition
@@ -166,10 +166,9 @@ type CompensationRecord struct {
 
 // StateSnapshot represents the persisted state of the controller for recovery after restart
 type StateSnapshot struct {
-	Version            int
-	Timestamp          time.Time
-	ActiveTunnels      map[string]*TunnelEntry
-	PendingDeletions   map[string]*TunnelEntry
-	FlappingContainers map[string]FlappingState
-	PendingActions     map[string]*CompensationRecord
+	Version          int
+	Timestamp        time.Time
+	ActiveTunnels    map[string]*TunnelEntry
+	PendingDeletions map[string]*TunnelEntry
+	PendingActions   map[string]*CompensationRecord
 }

@@ -4,14 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"docktunnel/internal/diagnostics"
-	"docktunnel/internal/label"
 	"docktunnel/internal/metrics"
-	"docktunnel/pkg/types"
 
 	"github.com/cloudflare/cloudflare-go/v5"
 	"github.com/cloudflare/cloudflare-go/v5/dns"
@@ -42,131 +41,22 @@ func (s *syncer) Sync(ctx context.Context) error {
 
 	slog.Info("Starting synchronization", "action", "sync", "tunnelID", tunnel.ID)
 
-	// 扫描运行中的容器
-	eventsList, err := s.c.dockerManager.ScanRunningContainers(ctx)
+	// Compute the full desired state: running containers plus persisted
+	// retention entries (B1). buildDesiredRules also reconciles state entries
+	// for containers that started/stopped during downtime.
+	desired, err := s.c.buildDesiredRules(ctx, false)
 	if err != nil {
-		return fmt.Errorf("failed to scan running containers: %w", err)
+		return fmt.Errorf("failed to build desired rules: %w", err)
 	}
 
-	slog.Info("Found containers with docktunnel labels", "count", len(eventsList))
+	slog.Info("Found containers with docktunnel labels", "count", len(desired.containerIDs))
 
-	// Reconcile with persisted state (T074)
-	// Detect containers that started during downtime and restore them if needed
-	reconciledCount := 0
-	for _, event := range eventsList {
-		if !s.c.isDocktunnelEnabled(event) {
-			continue
-		}
-
-		containerID := event.ContainerID
-
-		// Check if container is in pending deletions (was stopped, now restarted)
-		if pendingEntry, exists := s.c.stateManager.GetPendingDeletion(containerID); exists {
-			slog.Info("Container restarted during downtime, restoring from pending deletion",
-				"containerID", containerID,
-				"service_name", pendingEntry.ServiceName,
-			)
-
-			// Restore to active state
-			if err := s.c.stateManager.RestoreActiveTunnel(containerID); err != nil {
-				slog.Warn("Failed to restore active tunnel for container",
-					"containerID", containerID,
-					"error", err)
-			} else {
-				reconciledCount++
-			}
-		}
-	}
-
-	if reconciledCount > 0 {
-		slog.Info("Reconciled containers from pending deletion state", "count", reconciledCount)
-	}
-
-	// 收集所有ingress规则
-	allParsedRules := make(map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
-	containerHostnames := make(map[string][]string) // containerID -> hostnames
-
-	for _, event := range eventsList {
-		// 检查容器是否启用了docktunnel
-		if !s.c.isDocktunnelEnabled(event) {
-			continue
-		}
-
-		// 解析标签获取主机名
-		parsedRules, err := label.Parse(event.ContainerInfo)
-		if err != nil {
-			slog.Error("Failed to parse container labels during sync",
-				"action", "parse_labels",
-				"result", "failure",
-				"containerID", event.ContainerID,
-				"error", err)
-			continue
-		}
-
-		// 合并规则，确保服务名唯一
-		for serviceName, rule := range parsedRules {
-			if _, exists := allParsedRules[serviceName]; exists {
-				slog.Warn("Duplicate service name found during sync, skipping.", "service_name", serviceName, "container_id", event.ContainerID)
-				continue
-			}
-			allParsedRules[serviceName] = rule
-
-			// Populate per-service state entries if not already present
-			if _, exists := s.c.stateManager.GetActiveTunnel(event.ContainerID, serviceName); !exists {
-				labels := event.ContainerInfo.Config.Labels
-				policy := s.c.getServiceRetentionPolicy(labels, serviceName)
-				hostname := ""
-				if rule.Hostname.Value != "" {
-					hostname = rule.Hostname.Value
-				}
-				s.c.stateManager.AddActiveTunnel(&types.TunnelEntry{
-					ContainerID:     event.ContainerID,
-					ServiceName:     serviceName,
-					RetentionPolicy: policy,
-					Status:          types.StatusActive,
-					CreatedAt:       time.Now(),
-					LastSyncAt:      time.Now(),
-					Config:          types.TunnelConfiguration{Hostname: hostname},
-				})
-			}
-		}
-
-		hostnames := make([]string, 0, len(parsedRules))
-		for _, rule := range parsedRules {
-			if rule.Hostname.Value != "" {
-				hostnames = append(hostnames, rule.Hostname.Value)
-			}
-		}
-
-		if len(hostnames) > 0 {
-			containerHostnames[event.ContainerID] = hostnames
-		}
-	}
-
-	// 验证所有规则
-	if err := s.c.ruleValidator.Validate(allParsedRules, nil); err != nil {
-		slog.Error("Invalid ingress rules during sync",
-			"action", "validate_rules",
-			"result", "failure",
-			"error", err)
-		return fmt.Errorf("invalid ingress rules during sync: %w", err)
-	}
-
-	// 更新内部状态
+	// 更新内部状态 — 全量替换为新的期望状态
+	// (Validation moved into buildDesiredRules: per-container/per-service
+	// isolation, review R6.)
 	s.c.mu.Lock()
-	// 重新创建ingress规则map
-	s.c.ingressRules = make(map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress)
-
-	// 添加所有新规则
-	for _, rule := range allParsedRules {
-		// 添加所有有主机名的规则
-		if rule.Hostname.Value != "" {
-			s.c.ingressRules[rule.Hostname.Value] = *rule
-		}
-	}
-
-	// 更新容器与主机名的关联关系
-	s.c.containerRules = containerHostnames
+	s.c.ingressRules = desired.rules
+	s.c.containerRules = desired.containerHostnames
 	s.c.mu.Unlock()
 
 	// 同步到Cloudflare
@@ -252,11 +142,11 @@ func (s *syncer) syncDNSRecords(ctx context.Context) error {
 
 	s.c.mu.RLock()
 	// Collect hostnames from ingressRules (source of truth for active routes).
-	// This correctly preserves DNS for Timed/Forever retention where
-	// containerRules is cleared but ingressRules are kept.
+	// Keys are compound (hostname\x00path) since B10 — extract the hostname
+	// part so one DNS record covers all paths of a hostname.
 	currentHostnames := make(map[string]bool)
-	for hostname := range s.c.ingressRules {
-		currentHostnames[hostname] = true
+	for key := range s.c.ingressRules {
+		currentHostnames[hostnameFromKey(key)] = true
 	}
 	s.c.mu.RUnlock()
 
@@ -348,9 +238,24 @@ func (s *syncer) GetIngressRules() []zero_trust.TunnelCloudflaredConfigurationUp
 		rules = append(rules, rule)
 	}
 
-	// 总是添加catch-all规则作为最后一个规则
+	// Deterministic ordering: sort by (hostname, path, service) so the rule
+	// list is stable across restarts and independent of map iteration order
+	// (B10). Stored rules always carry a hostname.
+	sort.Slice(rules, func(i, j int) bool {
+		hi, hj := rules[i].Hostname.Value, rules[j].Hostname.Value
+		if hi != hj {
+			return hi < hj
+		}
+		pi, pj := rules[i].Path.Value, rules[j].Path.Value
+		if pi != pj {
+			return pi < pj
+		}
+		return rules[i].Service.Value < rules[j].Service.Value
+	})
+
+	// 总是添加catch-all规则作为最后一个规则 (B4: 使用配置的 catch-all service)
 	rules = append(rules, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-		Service: cloudflare.F("http_status:404"),
+		Service: cloudflare.F(s.c.getCatchAllService()),
 	})
 
 	return rules

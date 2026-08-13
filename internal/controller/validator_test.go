@@ -100,6 +100,80 @@ func TestHostnameUniquenessValidator_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestHostnameUniquenessValidator_SameHostnameDifferentPaths verifies the B9/B10
+// semantics: one hostname may expose multiple paths, so only identical
+// (hostname, path) pairs collide.
+func TestHostnameUniquenessValidator_SameHostnameDifferentPaths(t *testing.T) {
+	validator := &HostnameUniquenessValidator{}
+
+	rules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"service1": {
+			Hostname: cloudflare.F("api.example.com"),
+			Path:     cloudflare.F("/v1"),
+			Service:  cloudflare.F("http://localhost:8080"),
+		},
+		"service2": {
+			Hostname: cloudflare.F("api.example.com"),
+			Path:     cloudflare.F("/v2"),
+			Service:  cloudflare.F("http://localhost:8081"),
+		},
+		"service3": {
+			Hostname: cloudflare.F("api.example.com"), // no path
+			Service:  cloudflare.F("http://localhost:8082"),
+		},
+	}
+
+	if err := validator.Validate(rules, nil); err != nil {
+		t.Errorf("same hostname with different paths must be allowed, got %v", err)
+	}
+
+	// Same (hostname, path) again → collision.
+	rules["service4"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("api.example.com"),
+		Path:     cloudflare.F("/v1"),
+		Service:  cloudflare.F("http://localhost:8083"),
+	}
+	if err := validator.Validate(rules, nil); err == nil {
+		t.Error("identical (hostname, path) must be rejected")
+	}
+}
+
+// TestHostnameUniquenessValidator_ExistingRulesWithPaths verifies the
+// validator checks new rules against existing (hostname, path) keys,
+// allowing a different path on an existing hostname.
+func TestHostnameUniquenessValidator_ExistingRulesWithPaths(t *testing.T) {
+	validator := &HostnameUniquenessValidator{}
+
+	existing := map[string]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		ingressKey("api.example.com", "/v1"): {
+			Hostname: cloudflare.F("api.example.com"),
+			Path:     cloudflare.F("/v1"),
+			Service:  cloudflare.F("http://localhost:8080"),
+		},
+	}
+
+	newRules := map[string]*zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		"service-new": {
+			Hostname: cloudflare.F("api.example.com"),
+			Path:     cloudflare.F("/v2"),
+			Service:  cloudflare.F("http://localhost:8081"),
+		},
+	}
+	if err := validator.Validate(newRules, existing); err != nil {
+		t.Errorf("different path on existing hostname must be allowed, got %v", err)
+	}
+
+	// Same (hostname, path) as existing → rejected.
+	newRules["service-new2"] = &zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+		Hostname: cloudflare.F("API.Example.com"), // case-insensitive
+		Path:     cloudflare.F("/v1"),
+		Service:  cloudflare.F("http://localhost:8082"),
+	}
+	if err := validator.Validate(newRules, existing); err == nil {
+		t.Error("case-variant duplicate (hostname, path) must be rejected")
+	}
+}
+
 func TestRequiredFieldsValidator(t *testing.T) {
 	validator := &RequiredFieldsValidator{}
 

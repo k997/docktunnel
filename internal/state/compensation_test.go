@@ -171,10 +171,10 @@ func eventually(t *testing.T, timeout time.Duration, cond func() bool) {
 
 func TestRunCompensation_RetryableFailureBacksOff(t *testing.T) {
 	sm := NewManager(slog.New(slog.NewTextHandler(os.Stdout, nil)))
-	sm.compInitialDelay = 50 * time.Millisecond
-	sm.compMaxDelay = 10 * time.Millisecond
-	sm.compMaxRetries = 10
-	sm.compPollInterval = 10 * time.Millisecond
+	sm.compInitialDelay = 20 * time.Millisecond
+	sm.compMaxDelay = 50 * time.Millisecond
+	sm.compMaxRetries = 1000 // far above what the observation window can reach
+	sm.compPollInterval = 5 * time.Millisecond
 
 	action := types.Action{
 		Kind:     types.ActionDeleteRoute,
@@ -196,21 +196,20 @@ func TestRunCompensation_RetryableFailureBacksOff(t *testing.T) {
 
 	go sm.RunCompensation(ctx, executor)
 
-	// Wait for at least one retry but not long enough to exhaust
-	time.Sleep(100 * time.Millisecond)
-
-	records := sm.GetAllPendingActions()
-	if len(records) != 1 {
-		t.Fatalf("expected 1 pending action, got %d", len(records))
-	}
-	for _, rec := range records {
-		if rec.Dead {
-			t.Error("record should not be dead yet")
+	// Wait until at least one retry has happened while the record is still
+	// alive (RetryCount is far below MaxRetries, so it cannot exhaust during
+	// the observation window). Bounded polling replaces the previous fixed
+	// time.Sleep(100ms), which was both timing-flaky and — because
+	// GetAllPendingActions used to return live pointers — raced with the
+	// compensation goroutine under -race.
+	eventually(t, 2*time.Second, func() bool {
+		records := sm.GetAllPendingActions()
+		if len(records) != 1 {
+			return false
 		}
-		if rec.RetryCount == 0 {
-			t.Error("expected RetryCount > 0 after failed retry")
-		}
-	}
+		rec := records[0]
+		return rec.RetryCount > 0 && !rec.Dead
+	})
 }
 
 func TestRunCompensation_ExhaustedRetriesMarksDead(t *testing.T) {
@@ -242,9 +241,11 @@ func TestRunCompensation_ExhaustedRetriesMarksDead(t *testing.T) {
 	go sm.RunCompensation(ctx, executor)
 	time.Sleep(500 * time.Millisecond)
 
-	dead := sm.GetDeadActions()
-	if len(dead) != 1 {
-		t.Fatalf("expected 1 dead action, got %d", len(dead))
+	// Retry-exhausted records are marked Dead and then cleaned up at the end
+	// of the compensation round (B3/B15) — the queue must not retain them
+	// forever.
+	if got := len(sm.GetAllPendingActions()); got != 0 {
+		t.Errorf("expected retry-exhausted record to be cleaned up, got %d pending", got)
 	}
 }
 
@@ -285,12 +286,11 @@ func TestLoadFromSnapshot_MigratesV2ToV3(t *testing.T) {
 	sm := NewManager(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 
 	snap := &types.StateSnapshot{
-		Version:            2,
-		Timestamp:          time.Now().UTC(),
-		ActiveTunnels:      map[string]*types.TunnelEntry{},
-		PendingDeletions:   map[string]*types.TunnelEntry{},
-		FlappingContainers: map[string]types.FlappingState{},
-		PendingActions:     nil,
+		Version:          2,
+		Timestamp:        time.Now().UTC(),
+		ActiveTunnels:    map[string]*types.TunnelEntry{},
+		PendingDeletions: map[string]*types.TunnelEntry{},
+		PendingActions:   nil,
 	}
 
 	sm.LoadFromSnapshot(snap)

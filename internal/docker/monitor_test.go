@@ -254,3 +254,118 @@ func TestTrySendEvent_ReturnsFalseOnContextCancel(t *testing.T) {
 		t.Error("expected send to be false after ctx cancel")
 	}
 }
+
+// TestListenOnce_DestroyEventMapsToDie verifies that a container "destroy"
+// event is translated to ActionDie semantics (B16).
+func TestListenOnce_DestroyEventMapsToDie(t *testing.T) {
+	msgs := make(chan eventTypes.Message, 1)
+	errs := make(chan error)
+
+	msgs <- eventTypes.Message{
+		Type:   "container",
+		Action: eventTypes.ActionDestroy,
+		Actor:  eventTypes.Actor{ID: "container-destroyed"},
+	}
+	close(msgs)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		errs <- errors.New("stream closed")
+	}()
+
+	client := &simpleMockClient{
+		msgs:          msgs,
+		errs:          errs,
+		inspectResult: containerTypes.InspectResponse{},
+	}
+	mgr := &Manager{client: client}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	eventCh := make(chan events.Event, 1)
+	if err := mgr.listenOnce(ctx, eventCh); err == nil {
+		t.Fatal("expected error when stream ends")
+	}
+
+	select {
+	case event := <-eventCh:
+		if event.Type != eventTypes.ActionDie {
+			t.Errorf("destroy event: expected ActionDie, got %s", event.Type)
+		}
+		if event.ContainerID != "container-destroyed" {
+			t.Errorf("expected container-destroyed, got %s", event.ContainerID)
+		}
+	default:
+		t.Fatal("expected destroy event to be emitted")
+	}
+}
+
+// TestListenOnce_HealthStartingFillsContainerInfo verifies the B16 fix: a
+// "health_status: starting" event now performs ContainerInspect so the event
+// carries ContainerInfo and is not dropped by the dispatcher.
+func TestListenOnce_HealthStartingFillsContainerInfo(t *testing.T) {
+	msgs := make(chan eventTypes.Message, 1)
+	errs := make(chan error)
+
+	msgs <- eventTypes.Message{
+		Type:   "container",
+		Action: "health_status: starting",
+		Actor:  eventTypes.Actor{ID: "container-starting"},
+	}
+	close(msgs)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		errs <- errors.New("stream closed")
+	}()
+
+	inspect := containerTypes.InspectResponse{
+		Config: &containerTypes.Config{Labels: map[string]string{"docktunnel.enable": "true"}},
+	}
+	client := &simpleMockClient{msgs: msgs, errs: errs, inspectResult: inspect}
+	mgr := &Manager{client: client}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	eventCh := make(chan events.Event, 1)
+	if err := mgr.listenOnce(ctx, eventCh); err == nil {
+		t.Fatal("expected error when stream ends")
+	}
+
+	select {
+	case event := <-eventCh:
+		if event.Type != events.ActionHealthStarting {
+			t.Errorf("expected ActionHealthStarting, got %s", event.Type)
+		}
+		if event.ContainerInfo == nil {
+			t.Error("health_starting event must carry ContainerInfo (B16)")
+		}
+	default:
+		t.Fatal("expected health_starting event to be emitted")
+	}
+}
+
+// TestListenOnce_ClosedMessageChannelReturnsError verifies B16(3): a closed
+// messages channel makes listenOnce return an error so ListenForEvents
+// triggers reconnection instead of busy-looping.
+func TestListenOnce_ClosedMessageChannelReturnsError(t *testing.T) {
+	msgs := make(chan eventTypes.Message)
+	close(msgs)
+	errs := make(chan error) // never closed, never sends
+
+	client := &simpleMockClient{msgs: msgs, errs: errs}
+	mgr := &Manager{client: client}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	eventCh := make(chan events.Event, 1)
+	done := make(chan error, 1)
+	go func() { done <- mgr.listenOnce(ctx, eventCh) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error when message channel is closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("listenOnce did not return after message channel close")
+	}
+}

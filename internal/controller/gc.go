@@ -38,8 +38,10 @@ func (g *gc) RunGarbageCollection(ctx context.Context) error {
 	for _, entry := range expiredEntries {
 		hostname := entry.Config.Hostname
 		if hostname != "" {
-			if _, exists := g.c.ingressRules[hostname]; exists {
-				delete(g.c.ingressRules, hostname)
+			if hostnameRegisteredLocked(g.c, hostname) {
+				// Keys are (hostname, path) since B10 — remove every path of
+				// the expired hostname.
+				deleteIngressByHostnameLocked(g.c, hostname)
 				removed++
 				slog.Info("Removed expired route from ingress rules",
 					"container_id", entry.ContainerID,
