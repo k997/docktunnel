@@ -2,6 +2,7 @@ package cloudflareManager
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"testing"
@@ -12,6 +13,35 @@ import (
 	"github.com/cloudflare/cloudflare-go/v5/dns"
 	"golang.org/x/time/rate"
 )
+
+// TestNewHTTPClient_HasTimeouts verifies the dedicated HTTP client used by
+// NewManager carries explicit timeouts: the SDK default http.DefaultClient has
+// none, so a hung Cloudflare connection could block startup/sync forever. The
+// client-level Timeout is the final backstop; transport-level timeouts bound
+// connection, TLS handshake and response headers individually.
+func TestNewHTTPClient_HasTimeouts(t *testing.T) {
+	c := newHTTPClient()
+	if c.Timeout <= 0 {
+		t.Errorf("expected a positive client-level Timeout, got %v", c.Timeout)
+	}
+
+	transport, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", c.Transport)
+	}
+	if transport.DialContext == nil {
+		t.Error("expected a DialContext with connect timeout")
+	}
+	if transport.TLSHandshakeTimeout <= 0 {
+		t.Errorf("expected positive TLSHandshakeTimeout, got %v", transport.TLSHandshakeTimeout)
+	}
+	if transport.ResponseHeaderTimeout <= 0 {
+		t.Errorf("expected positive ResponseHeaderTimeout, got %v", transport.ResponseHeaderTimeout)
+	}
+	if transport.IdleConnTimeout <= 0 {
+		t.Errorf("expected positive IdleConnTimeout, got %v", transport.IdleConnTimeout)
+	}
+}
 
 func TestNewManager(t *testing.T) {
 	// 跳过需要实际API调用的测试
@@ -416,10 +446,12 @@ func TestMatchExistingCNAME(t *testing.T) {
 
 func TestCollectDeleteIDs(t *testing.T) {
 	records := []dns.RecordResponse{
-		{ID: "id-1"},
-		{ID: "id-2"},
+		{ID: "id-1", Content: "tun-1.cfargotunnel.com"},
+		{ID: "id-2", Content: "TUN-1.CFARGOTUNNEL.COM."}, // 大小写与 trailing dot 归一化后应匹配
+		{ID: "id-3", Content: "other.cfargotunnel.com"},  // 非本隧道 content：应被跳过
+		{ID: "id-4", Content: ""},                        // 空 content：应被跳过
 	}
-	deletes := collectDeleteIDs(records)
+	deletes := collectDeleteIDs(records, "tun-1.cfargotunnel.com")
 	if len(deletes) != 2 {
 		t.Fatalf("expected 2 delete payloads, got %d", len(deletes))
 	}
@@ -428,7 +460,151 @@ func TestCollectDeleteIDs(t *testing.T) {
 	}
 
 	// Empty input yields empty (non-nil) slice
-	if out := collectDeleteIDs(nil); out == nil || len(out) != 0 {
+	if out := collectDeleteIDs(nil, "tun-1.cfargotunnel.com"); out == nil || len(out) != 0 {
 		t.Errorf("expected empty non-nil slice, got %#v", out)
+	}
+}
+
+// TestCollectDeleteIDs_FiltersForeignContent verifies the defense-in-depth
+// content guard: records whose normalized content differs from the tunnel's
+// target are never collected for deletion (C5).
+func TestCollectDeleteIDs_FiltersForeignContent(t *testing.T) {
+	records := []dns.RecordResponse{
+		{ID: "mine", Content: "tun-1.cfargotunnel.com."},
+		{ID: "theirs", Content: "other-tunnel.cfargotunnel.com"},
+	}
+	deletes := collectDeleteIDs(records, "tun-1.cfargotunnel.com")
+	if len(deletes) != 1 || deletes[0].ID.Value != "mine" {
+		t.Fatalf("expected only the matching record to be deleted, got %+v", deletes)
+	}
+}
+
+// TestGenerateTunnelSecret verifies the generated tunnel secret is a base64
+// string that decodes to exactly 32 bytes, as required by Cloudflare's
+// create-tunnel API (C1).
+func TestGenerateTunnelSecret(t *testing.T) {
+	secret, err := generateTunnelSecret()
+	if err != nil {
+		t.Fatalf("generateTunnelSecret failed: %v", err)
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(secret)
+	if err != nil {
+		t.Fatalf("secret %q is not valid base64: %v", secret, err)
+	}
+	if len(decoded) != 32 {
+		t.Errorf("expected decoded secret to be 32 bytes, got %d (secret %q)", len(decoded), secret)
+	}
+
+	// 两次生成不应相同（随机性）
+	secret2, err := generateTunnelSecret()
+	if err != nil {
+		t.Fatalf("generateTunnelSecret failed: %v", err)
+	}
+	if secret == secret2 {
+		t.Error("expected two generated secrets to differ")
+	}
+}
+
+// TestRetryAfterDelay verifies Retry-After extraction from a 429 typed API
+// error, supporting both delta-seconds and HTTP-date formats (C7).
+func TestRetryAfterDelay(t *testing.T) {
+	req, _ := http.NewRequest("GET", "https://api.cloudflare.com/test", nil)
+	mkErr := func(status int, retryAfter string) error {
+		resp := &http.Response{
+			StatusCode: status,
+			Status:     http.StatusText(status),
+			Header:     make(http.Header),
+		}
+		if retryAfter != "" {
+			resp.Header.Set("Retry-After", retryAfter)
+		}
+		return &cloudflare.Error{StatusCode: status, Request: req, Response: resp}
+	}
+
+	t.Run("429 delta seconds", func(t *testing.T) {
+		if got := retryAfterDelay(mkErr(429, "5")); got != 5*time.Second {
+			t.Errorf("retryAfterDelay = %v, want 5s", got)
+		}
+	})
+	t.Run("429 delta seconds with whitespace", func(t *testing.T) {
+		if got := retryAfterDelay(mkErr(429, " 12 ")); got != 12*time.Second {
+			t.Errorf("retryAfterDelay = %v, want 12s", got)
+		}
+	})
+	t.Run("429 HTTP-date", func(t *testing.T) {
+		when := time.Now().Add(90 * time.Second).UTC().Format(http.TimeFormat)
+		got := retryAfterDelay(mkErr(429, when))
+		if got < 89*time.Second || got > 91*time.Second {
+			t.Errorf("retryAfterDelay = %v, want ~90s", got)
+		}
+	})
+	t.Run("429 without header", func(t *testing.T) {
+		if got := retryAfterDelay(mkErr(429, "")); got != 0 {
+			t.Errorf("retryAfterDelay = %v, want 0", got)
+		}
+	})
+	t.Run("non-429 status ignores header", func(t *testing.T) {
+		if got := retryAfterDelay(mkErr(500, "5")); got != 0 {
+			t.Errorf("retryAfterDelay = %v, want 0", got)
+		}
+	})
+	t.Run("invalid value", func(t *testing.T) {
+		if got := retryAfterDelay(mkErr(429, "abc")); got != 0 {
+			t.Errorf("retryAfterDelay = %v, want 0", got)
+		}
+	})
+	t.Run("past HTTP-date", func(t *testing.T) {
+		when := time.Now().Add(-1 * time.Hour).UTC().Format(http.TimeFormat)
+		if got := retryAfterDelay(mkErr(429, when)); got != 0 {
+			t.Errorf("retryAfterDelay = %v, want 0", got)
+		}
+	})
+	t.Run("non-API error", func(t *testing.T) {
+		if got := retryAfterDelay(errors.New("boom")); got != 0 {
+			t.Errorf("retryAfterDelay = %v, want 0", got)
+		}
+	})
+}
+
+// TestCallWithRetry_HonorsRetryAfter verifies the retry loop actually waits at
+// least the Retry-After duration returned by a 429 before retrying (C7).
+func TestCallWithRetry_HonorsRetryAfter(t *testing.T) {
+	m := &Manager{
+		rateLimiter:   rate.NewLimiter(rate.Inf, 0),
+		maxRetries:    1,
+		retryDelay:    1 * time.Millisecond,
+		maxRetryDelay: 5 * time.Millisecond,
+	}
+
+	// Retry-After 以秒为单位；用 1 秒即可验证“至少等待该时长”的机制
+	req, _ := http.NewRequest("GET", "https://api.cloudflare.com/test", nil)
+	resp := &http.Response{
+		StatusCode: 429,
+		Status:     "429 Too Many Requests",
+		Header:     make(http.Header),
+	}
+	resp.Header.Set("Retry-After", "1")
+
+	attempts := 0
+	start := time.Now()
+	err := m.callWithRetry(context.Background(), func() error {
+		attempts++
+		if attempts == 1 {
+			return &cloudflare.Error{StatusCode: 429, Request: req, Response: resp}
+		}
+		return nil
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected success after retry, got %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	// full jitter 最大只有 backoff（约 1ms），Retry-After=1s 应主导等待
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("expected to wait at least Retry-After (1s), waited %v", elapsed)
 	}
 }
