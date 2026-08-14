@@ -1,0 +1,112 @@
+name: Release
+
+# 打 tag（vX.Y.Z）时自动构建并发布：
+#   git tag v0.1.0 && git push origin v0.1.0
+# 产物：
+#   - GitHub Release 二进制（版本号去掉前导 v，如 v0.1.0 → 0.1.0）
+#   - Docker 镜像（多架构 linux/amd64 + linux/arm64）：
+#       * GHCR（ghcr.io/<owner>/<repo>）总是推送
+#       * Docker Hub（<DOCKERHUB_USERNAME>/docktunnel）仅在配置了
+#         DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD secrets 时推送
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  # 推送 GHCR 镜像需要 packages: write
+  packages: write
+
+jobs:
+  release:
+    name: Release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    # secrets 上下文不能用于 if 条件，因此在 job 级 env 中展开后按空值判断。
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+
+      - name: Run tests
+        run: go test -race ./...
+
+      # 版本号去掉前导 v：镜像 tag / 二进制版本统一为 0.1.0 而非 v0.1.0。
+      - name: Compute version (strip leading v)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "Releasing version: ${VERSION}"
+
+      - name: Cross-compile binaries
+        run: |
+          mkdir -p dist
+          for target in "linux amd64" "linux arm64" "darwin amd64" "darwin arm64"; do
+            set -- $target
+            GOOS=$1 GOARCH=$2 CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.Version=${VERSION} -X main.GitCommit=${GITHUB_SHA} -X main.BuildDate=${BUILD_DATE}" \
+              -o dist/docktunnel-$1-$2 ./cmd/docktunnel
+          done
+          sha256sum dist/* > dist/SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+      # ---- 镜像发布：多架构 ----
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR：总是推送（github.repository 即 <owner>/<repo>，无需额外 secret）
+      - name: Build & push image (GHCR)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ env.VERSION }}
+            ghcr.io/${{ github.repository }}:latest
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+
+      # Docker Hub：仅在配置了 DOCKERHUB_USERNAME/PASSWORD secrets 时推送；
+      # 未配置则跳过（仓库名由 DOCKERHUB_USERNAME 决定）。
+      - name: Build & push image (Docker Hub)
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        env:
+          DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+        run: |
+          echo "$DOCKERHUB_PASSWORD" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION=${VERSION} \
+            --build-arg GIT_COMMIT=${GITHUB_SHA} \
+            --build-arg BUILD_DATE=${BUILD_DATE} \
+            -t "${DOCKERHUB_USERNAME}/docktunnel:${VERSION}" \
+            -t "${DOCKERHUB_USERNAME}/docktunnel:latest" \
+            --push .
+
+      - name: Skip Docker Hub (secrets not configured)
+        if: ${{ env.DOCKERHUB_USERNAME == '' }}
+        run: echo "DOCKERHUB_USERNAME/PASSWORD secrets not configured — skipping Docker Hub image push"

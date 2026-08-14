@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (fmt / vet / race)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ["1.24.x"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Check formatting
+        run: |
+          diff=$(gofmt -s -d cmd internal pkg tests)
+          if [ -n "$diff" ]; then
+            echo "gofmt found unformatted files:"; echo "$diff"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # govulncheck 以 @latest 方式临时运行，不修改 go.mod / go.sum。
+      # 仅作情报参考、不阻塞流水线：上游可能存在暂无修复版本的漏洞
+      # （如 docker SDK 间接引入的 Moby 漏洞，官方标记 Fixed in: N/A），
+      # 阻塞 CI 只会让主分支长期红灯；升级依赖是修复的正道。
+      - name: Vulnerability scan (govulncheck)
+        continue-on-error: true
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Unit tests (with race detector)
+        run: go test -race ./...
+
+      - name: Build binary
+        run: go build -trimpath -o /tmp/docktunnel ./cmd/docktunnel
+
+  docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg VERSION=${GITHUB_REF_NAME} \
+            --build-arg GIT_COMMIT=${GITHUB_SHA} \
+            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t docktunnel:ci .

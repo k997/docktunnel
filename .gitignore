@@ -1,0 +1,47 @@
+# ---> Go <---
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test binaries and coverage output
+*_test
+*.test
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# ---> DockTunnel <---
+# Local build artifacts
+/docktunnel
+/dist/
+/build/
+*.log
+
+# ---> Secrets <---
+# Environment files: .env* is ignored to prevent committing real tokens;
+# .env.example is force-added as the committed template.
+.env
+.env.*
+!.env.example
+
+# ---> IDE <---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---> OS <---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

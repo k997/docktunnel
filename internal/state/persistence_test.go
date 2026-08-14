@@ -1,0 +1,686 @@
+package state
+
+import (
+	"encoding/gob"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"docktunnel/pkg/types"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestSaveAndLoadGob tests state snapshot serialization with gob encoding (T066)
+func TestSaveAndLoadGob(t *testing.T) {
+	// Create temporary directory for test files
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	logger := slog.Default()
+
+	// Create and populate state manager
+	sm1 := NewManager(logger)
+	now := time.Now().UTC()
+
+	// Add active tunnel
+	activeEntry := &types.TunnelEntry{
+		ContainerID: "active-1",
+		TunnelID:    "tunnel-123",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   now,
+		LastSyncAt:  now,
+		Config: types.TunnelConfiguration{
+			Hostname:   "active.example.com",
+			ServiceURL: "http://localhost:8080",
+		},
+	}
+	sm1.AddActiveTunnel(activeEntry)
+
+	// Add pending deletion
+	pastTime := now.Add(-1 * time.Hour)
+	pendingEntry := &types.TunnelEntry{
+		ContainerID: "pending-1",
+		TunnelID:    "tunnel-123",
+		ServiceName: "api",
+		Status:      types.StatusPendingDelete,
+		CreatedAt:   now.Add(-2 * time.Hour),
+		DeletedAt:   &pastTime,
+		LastSyncAt:  pastTime,
+		Config: types.TunnelConfiguration{
+			Hostname:   "pending.example.com",
+			ServiceURL: "http://localhost:9000",
+		},
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm1.AddPendingDeletion(pendingEntry)
+
+	// Save state
+	err := sm1.Save(statePath)
+	require.NoError(t, err, "Save should succeed")
+
+	// Verify file exists
+	_, err = os.Stat(statePath)
+	require.NoError(t, err, "State file should exist")
+
+	// Create new state manager and load
+	sm2 := NewManager(slog.Default())
+	err = sm2.Load(statePath)
+	require.NoError(t, err, "Load should succeed")
+
+	// Verify active tunnels were restored
+	loadedActive, ok := sm2.GetActiveTunnel("active-1", "web")
+	assert.True(t, ok, "Active tunnel should be loaded")
+	assert.Equal(t, "active-1", loadedActive.ContainerID)
+	assert.Equal(t, "web", loadedActive.ServiceName)
+	assert.Equal(t, "active.example.com", loadedActive.Config.Hostname)
+	assert.Equal(t, types.StatusActive, loadedActive.Status)
+
+	// Verify pending deletions were restored and migrated
+	loadedPending, ok := sm2.GetPendingDeletion("pending-1")
+	assert.True(t, ok, "Pending deletion should be loaded")
+	assert.Equal(t, "pending-1", loadedPending.ContainerID)
+	assert.Equal(t, types.StatusRetaining, loadedPending.Status) // Should be migrated from PendingDelete to Retaining
+	assert.Equal(t, types.Timed, loadedPending.RetentionPolicy.Type)
+}
+
+// TestLoadCorruptedFile tests handling of corrupted state files (T067, T075)
+func TestLoadCorruptedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Create a corrupted file
+	corruptedData := []byte{0x00, 0x01, 0x02, 0x03}
+	err := os.WriteFile(statePath, corruptedData, 0644)
+	require.NoError(t, err)
+
+	// Try to load - should not fail startup (T075)
+	sm := NewManager(slog.Default())
+	err = sm.Load(statePath)
+
+	// Load returns nil (continues on error per T075)
+	assert.NoError(t, err, "Load should not fail startup, continues with empty state")
+
+	// State manager should still be functional with empty state
+	assert.NotNil(t, sm)
+	stats := sm.GetStats()
+	assert.Equal(t, 0, stats["active_tunnels"], "Should start with empty state")
+	assert.Equal(t, 0, stats["pending_deletions"], "Should start with empty state")
+}
+
+// TestLoadNonexistentFile tests loading when no state file exists
+func TestLoadNonexistentFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "nonexistent.bin")
+
+	sm := NewManager(slog.Default())
+	err := sm.Load(statePath)
+
+	// Should not fail
+	assert.NoError(t, err, "Load should succeed when file doesn't exist")
+
+	// Should start with empty state
+	stats := sm.GetStats()
+	assert.Equal(t, 0, stats["active_tunnels"])
+}
+
+// TestSaveJSON tests JSON serialization for debugging
+func TestSaveJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	jsonPath := filepath.Join(tmpDir, "state.json")
+
+	sm := NewManager(slog.Default())
+	now := time.Now().UTC()
+
+	entry := &types.TunnelEntry{
+		ContainerID: "test-1",
+		TunnelID:    "tunnel-123",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   now,
+		LastSyncAt:  now,
+		Config: types.TunnelConfiguration{
+			Hostname:   "test.example.com",
+			ServiceURL: "http://localhost:8080",
+		},
+	}
+	sm.AddActiveTunnel(entry)
+
+	// Save as JSON
+	err := sm.SaveJSON(jsonPath)
+	require.NoError(t, err)
+
+	// Verify file exists and is readable
+	data, err := os.ReadFile(jsonPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "test.example.com", "JSON should contain hostname")
+	assert.Contains(t, string(data), "test-1", "JSON should contain container ID")
+}
+
+// TestLoadJSONFallback tests loading from JSON when gob fails
+func TestLoadJSONFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+	jsonPath := statePath + ".json"
+
+	// Create JSON file manually
+	sm1 := NewManager(slog.Default())
+	now := time.Now().UTC()
+
+	entry := &types.TunnelEntry{
+		ContainerID: "json-test",
+		TunnelID:    "tunnel-456",
+		ServiceName: "api",
+		Status:      types.StatusActive,
+		CreatedAt:   now,
+		LastSyncAt:  now,
+		Config: types.TunnelConfiguration{
+			Hostname:   "json.example.com",
+			ServiceURL: "http://localhost:8080",
+		},
+	}
+	sm1.AddActiveTunnel(entry)
+
+	// Save as JSON
+	err := sm1.SaveJSON(jsonPath)
+	require.NoError(t, err)
+
+	// Load with JSON fallback (corrupted gob, valid JSON)
+	sm2 := NewManager(slog.Default())
+
+	// Try to load the JSON file directly
+	err = sm2.loadJSON(jsonPath)
+	require.NoError(t, err)
+
+	// Verify entry was loaded
+	loaded, ok := sm2.GetActiveTunnel("json-test", "api")
+	assert.True(t, ok)
+	assert.Equal(t, "json.example.com", loaded.Config.Hostname)
+}
+
+// TestPeriodicSave tests SaveIfDirty functionality (T072)
+func TestPeriodicSave(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetStatePath(statePath)
+
+	// Add entry - should mark dirty
+	entry := &types.TunnelEntry{
+		ContainerID: "periodic-test",
+		TunnelID:    "tunnel-789",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		LastSyncAt:  time.Now().UTC(),
+		Config: types.TunnelConfiguration{
+			Hostname:   "periodic.example.com",
+			ServiceURL: "http://localhost:8080",
+		},
+	}
+	sm.AddActiveTunnel(entry)
+
+	// SaveIfDirty should save
+	err := sm.SaveIfDirty()
+	require.NoError(t, err)
+
+	// Verify file was created
+	_, err = os.Stat(statePath)
+	require.NoError(t, err, "State file should be created")
+
+	// SaveIfDirty again should not save (not dirty, not enough time passed)
+	err = sm.SaveIfDirty()
+	require.NoError(t, err)
+
+	// Load and verify
+	sm2 := NewManager(slog.Default())
+	sm2.SetStatePath(statePath)
+	err = sm2.Load(statePath)
+	require.NoError(t, err)
+
+	loaded, ok := sm2.GetActiveTunnel("periodic-test", "web")
+	assert.True(t, ok)
+	assert.Equal(t, "periodic.example.com", loaded.Config.Hostname)
+}
+
+// TestForceSave tests ForceSave functionality
+func TestForceSave(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetStatePath(statePath)
+
+	// Force save even without state changes
+	err := sm.ForceSave()
+	require.NoError(t, err)
+
+	// Verify file exists
+	_, err = os.Stat(statePath)
+	require.NoError(t, err)
+}
+
+// TestAtomicWrite tests that atomic write prevents partial state
+func TestAtomicWrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetStatePath(statePath)
+
+	// Add multiple entries
+	for i := 1; i <= 10; i++ {
+		entry := &types.TunnelEntry{
+			ContainerID: "atomic-test-" + string(rune('0'+i)),
+			TunnelID:    "tunnel-atomic",
+			ServiceName: "service",
+			Status:      types.StatusActive,
+			CreatedAt:   time.Now().UTC(),
+			LastSyncAt:  time.Now().UTC(),
+			Config: types.TunnelConfiguration{
+				Hostname:   "atomic" + string(rune('0'+i)) + ".example.com",
+				ServiceURL: "http://localhost:8080",
+			},
+		}
+		sm.AddActiveTunnel(entry)
+	}
+
+	// Force save
+	err := sm.ForceSave()
+	require.NoError(t, err)
+
+	// Load and verify all entries present
+	sm2 := NewManager(slog.Default())
+	err = sm2.Load(statePath)
+	require.NoError(t, err)
+
+	stats := sm2.GetStats()
+	assert.Equal(t, 10, stats["active_tunnels"], "All entries should be saved atomically")
+}
+
+// TestVersionMismatch tests loading state with different version
+func TestVersionMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm1 := NewManager(slog.Default())
+	sm1.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "version-test",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		LastSyncAt:  time.Now().UTC(),
+	})
+
+	// Save
+	err := sm1.Save(statePath)
+	require.NoError(t, err)
+
+	// Manually modify version in file to simulate future version
+	// (This is a simplified test - in real scenario, file format might change)
+	// For now, we just verify that version check exists
+
+	sm2 := NewManager(slog.Default())
+	err = sm2.Load(statePath)
+
+	// Should succeed with current version
+	assert.NoError(t, err)
+}
+
+// TestSave_FileMode0600 verifies B14(1): state files are created with 0600
+// permissions (they contain container IDs and hostnames).
+func TestSave_FileMode0600(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		Config:      types.TunnelConfiguration{Hostname: "a.example.com"},
+	})
+	require.NoError(t, sm.Save(statePath))
+
+	info, err := os.Stat(statePath)
+	require.NoError(t, err)
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("state file perm = %o, want 600", perm)
+	}
+
+	// JSON fallback file gets the same treatment.
+	jsonPath := filepath.Join(tmpDir, "state.json")
+	require.NoError(t, sm.SaveJSON(jsonPath))
+	info, err = os.Stat(jsonPath)
+	require.NoError(t, err)
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("json state file perm = %o, want 600", perm)
+	}
+}
+
+// TestSave_ConcurrentSavesDoNotCorrupt verifies B14(2): concurrent Save and
+// ForceSave calls are serialized by saveMu and never corrupt the file.
+func TestSave_ConcurrentSavesDoNotCorrupt(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetStatePath(statePath)
+	for i := 0; i < 20; i++ {
+		sm.AddActiveTunnel(&types.TunnelEntry{
+			ContainerID: "c",
+			ServiceName: "s",
+			Status:      types.StatusActive,
+			Config:      types.TunnelConfiguration{Hostname: "a.example.com"},
+		})
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = sm.Save(statePath)
+		}()
+	}
+	wg.Wait()
+
+	// The file must still load cleanly.
+	sm2 := NewManager(slog.Default())
+	require.NoError(t, sm2.Load(statePath))
+}
+
+// TestNewManager_DefaultBackupCount tests default backupCount value
+func TestNewManager_DefaultBackupCount(t *testing.T) {
+	sm := NewManager(slog.Default())
+	assert.Equal(t, 3, sm.BackupCount(), "default backupCount should be 3")
+}
+
+// TestNewManager_DefaultValidateOnLoad tests default validateOnLoad value
+func TestNewManager_DefaultValidateOnLoad(t *testing.T) {
+	sm := NewManager(slog.Default())
+	assert.True(t, sm.ValidateOnLoad(), "default validateOnLoad should be true")
+}
+
+// TestSetBackupCount tests setting backupCount value
+func TestSetBackupCount(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.SetBackupCount(5)
+	assert.Equal(t, 5, sm.BackupCount())
+}
+
+// TestSetValidateOnLoad tests setting validateOnLoad value
+func TestSetValidateOnLoad(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.SetValidateOnLoad(false)
+	assert.False(t, sm.ValidateOnLoad())
+}
+
+func TestValidateSnapshot_Valid(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: now,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"abc123:web": {
+				ContainerID: "abc123",
+				ServiceName: "web",
+				Status:      types.StatusActive,
+				Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+			},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{
+			"def456:api": {
+				ContainerID: "def456",
+				ServiceName: "api",
+				Status:      types.StatusPendingDelete,
+				Config:      types.TunnelConfiguration{Hostname: "api.example.com"},
+			},
+		},
+		PendingActions: map[string]*types.CompensationRecord{
+			"rec1": {ID: "rec1", CreatedAt: now, Action: types.Action{Kind: types.ActionDeleteRoute}},
+		},
+	}
+	err := validateSnapshot(snapshot)
+	assert.NoError(t, err)
+}
+
+func TestValidateSnapshot_ZeroTimestamp(t *testing.T) {
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Time{},
+	}
+	err := validateSnapshot(snapshot)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "timestamp")
+}
+
+func TestValidateSnapshot_FutureTimestamp(t *testing.T) {
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Now().UTC().Add(10 * time.Minute),
+	}
+	err := validateSnapshot(snapshot)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "future")
+}
+
+func TestValidateSnapshot_KeyMismatch(t *testing.T) {
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Now().UTC(),
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"wrong-key": {
+				ContainerID: "abc123",
+				ServiceName: "web",
+				Status:      types.StatusActive,
+			},
+		},
+	}
+	err := validateSnapshot(snapshot)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "key mismatch")
+}
+
+func TestValidateSnapshot_InvalidCompensationRecord(t *testing.T) {
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Now().UTC(),
+		PendingActions: map[string]*types.CompensationRecord{
+			"rec1": {ID: "", CreatedAt: time.Time{}},
+		},
+	}
+	err := validateSnapshot(snapshot)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "compensation record")
+}
+
+func TestLoadGob_ValidatesSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Save a valid snapshot
+	sm1 := NewManager(slog.Default())
+	sm1.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		LastSyncAt:  time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+	require.NoError(t, sm1.Save(statePath))
+
+	// Load with validation enabled (default)
+	sm2 := NewManager(slog.Default())
+	err := sm2.Load(statePath)
+	assert.NoError(t, err)
+
+	_, ok := sm2.GetActiveTunnel("abc", "web")
+	assert.True(t, ok, "valid snapshot should load successfully")
+}
+
+func TestLoadGob_ValidationSkippedWhenDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Create a snapshot with future timestamp manually
+	snapshot := &types.StateSnapshot{
+		Version:   3,
+		Timestamp: time.Now().UTC().Add(1 * time.Hour), // far future
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"abc:web": {ContainerID: "abc", ServiceName: "web", Status: types.StatusActive},
+		},
+	}
+
+	// Write the gob file directly
+	file, err := os.Create(statePath)
+	require.NoError(t, err)
+	require.NoError(t, gob.NewEncoder(file).Encode(snapshot))
+	file.Close()
+
+	// Load with validation disabled — should succeed
+	sm := NewManager(slog.Default())
+	sm.SetValidateOnLoad(false)
+	err = sm.Load(statePath)
+	assert.NoError(t, err, "should load even with invalid data when validation disabled")
+
+	_, ok := sm.GetActiveTunnel("abc", "web")
+	assert.True(t, ok, "entry should be loaded despite invalid timestamp")
+}
+
+func TestRotateBackups_CreatesTimestampedBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Create initial state file
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+	require.NoError(t, sm.Save(statePath))
+	require.FileExists(t, statePath)
+
+	// Save again — should create a backup
+	require.NoError(t, sm.Save(statePath))
+	require.FileExists(t, statePath)
+
+	// Check that a backup file was created
+	matches, err := filepath.Glob(statePath + ".bak.*")
+	require.NoError(t, err)
+	assert.Len(t, matches, 1, "should have exactly one backup")
+	assert.Contains(t, filepath.Base(matches[0]), ".bak.")
+}
+
+func TestRotateBackups_PrunesOldBackups(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetBackupCount(2)
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+
+	// Save 4 times — should only keep 2 backups
+	for i := 0; i < 4; i++ {
+		time.Sleep(1100 * time.Millisecond) // ensure different timestamps
+		require.NoError(t, sm.Save(statePath))
+	}
+
+	matches, err := filepath.Glob(statePath + ".bak.*")
+	require.NoError(t, err)
+	assert.Len(t, matches, 2, "should have exactly 2 backups (backupCount=2)")
+}
+
+func TestRotateBackups_DisabledWhenZero(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.SetBackupCount(0)
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+
+	require.NoError(t, sm.Save(statePath))
+
+	matches, err := filepath.Glob(statePath + ".bak.*")
+	require.NoError(t, err)
+	assert.Len(t, matches, 0, "no backups when backupCount=0")
+}
+
+func TestLoad_FallsBackToBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "abc",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	})
+
+	// Save — creates the state file and a backup (since no prior file exists, first save has no backup)
+	require.NoError(t, sm.Save(statePath))
+
+	// Save again to create a backup (the first file gets rotated)
+	require.NoError(t, sm.Save(statePath))
+
+	// Verify backup exists
+	matches, err := filepath.Glob(statePath + ".bak.*")
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "should have at least one backup")
+
+	// Corrupt the primary state file
+	require.NoError(t, os.WriteFile(statePath, []byte{0x00, 0x01, 0x02}, 0644))
+
+	// Load should fall back to the backup
+	sm2 := NewManager(slog.Default())
+	err = sm2.Load(statePath)
+	assert.NoError(t, err, "should load from backup when primary is corrupt")
+
+	loaded, ok := sm2.GetActiveTunnel("abc", "web")
+	assert.True(t, ok, "entry should be restored from backup")
+	assert.Equal(t, "web.example.com", loaded.Config.Hostname)
+}
+
+func TestLoad_AllBackupsCorrupt_DegradesToEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.bin")
+
+	// Create a corrupted primary file
+	require.NoError(t, os.WriteFile(statePath, []byte{0x00, 0x01, 0x02}, 0644))
+
+	// Create a corrupted backup file
+	require.NoError(t, os.WriteFile(statePath+".bak.20260613-120000", []byte{0xFF, 0xFE}, 0644))
+
+	sm := NewManager(slog.Default())
+	err := sm.Load(statePath)
+	assert.NoError(t, err, "should degrade to empty state without error")
+
+	stats := sm.GetStats()
+	assert.Equal(t, 0, stats["active_tunnels"], "should start with empty state")
+}

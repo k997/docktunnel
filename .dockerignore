@@ -1,0 +1,22 @@
+# DockTunnel .dockerignore
+# Purpose: keep the build context small and keep binaries/credentials out of the image.
+
+# Local build artifacts (never baked into the image)
+docktunnel
+dist/
+*.test
+integration.test
+
+# VCS / CI metadata
+.git
+.github/
+
+.local/
+
+# Credentials / environment files (never into the image)
+.env
+.env.*
+
+# Runtime configuration is injected via mounts or environment variables,
+# never baked into the image
+config.yaml

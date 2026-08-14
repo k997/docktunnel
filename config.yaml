@@ -1,0 +1,103 @@
+# 日志配置
+log:
+  # 日志级别, 支持: debug, info, warn, error
+  level: info
+  # 日志格式, 支持: text, json
+  format: text
+
+# Cloudflare 配置
+cloudflare:
+  # Cloudflare 账户 ID (必填)
+  accountId: ""
+  # Cloudflare API Token (必填，推荐使用这种方式认证)
+  apiToken: ""
+  # 可选: 预创建的 Tunnel ID (如果为空，将自动创建一个新的)
+  tunnelId: ""
+  # 可选: Tunnel 名称 (当 tunnelId 为空时使用，如果此项也为空则使用系统内置名称)
+  tunnelName: "DockTunnel"
+  # Catch-all 服务配置 (当没有匹配的规则时使用的默认服务)
+  # 默认值为 http_status:404，也可以设置为其他服务如 http://localhost:8080
+  catchAll: "http_status:404"
+  # API 调用相关配置
+  # 速率限制（请求/秒）。Cloudflare 官方 API 限额约 1200 请求/5 分钟（≈4 RPS），
+  # 默认 4；高于官方限额会触发 429 限流。
+  rateLimit: 4              # 每秒最大请求数
+  maxRetries: 3              # 最大重试次数
+  retryDelay: 1s             # 初始重试延迟
+  maxRetryDelay: 30s         # 最大重试延迟
+  # OriginRequest 默认配置 (容器标签未指定时使用)
+  originRequest:
+    noTLSVerify: false                 # 是否跳过 TLS 证书校验
+    connectTimeout: 0s                 # 连接超时 (0 表示不设置)
+    tlsTimeout: 0s                     # TLS 握手超时
+    tcpKeepAlive: 0s                   # TCP KeepAlive 间隔
+    keepAliveConnections: 0            # 最大 KeepAlive 连接数 (0 表示使用默认)
+    keepAliveTimeout: 0s               # KeepAlive 超时
+    noHappyEyeballs: false             # 禁用 Happy Eyeballs
+    proxyType: ""                      # 代理类型 (socks, "")
+    httpHostHeader: ""                 # 自定义 HTTP Host 头
+    originServerName: ""               # TLS SNI 名称
+    caPool: ""                         # 自定义 CA 证书路径
+    http2Origin: false                 # 启用 HTTP/2 到源站
+    disableChunkedEncoding: false      # 禁用分块编码
+    # Cloudflare Access 默认配置
+    accessRequired: false              # 是否要求 Cloudflare Access
+    accessTeamName: ""                 # Access 团队名称
+    accessAudTag: ""                   # Access Audience Tag
+
+# 控制器配置
+controller:
+  # 容器抖动检测配置
+  flappingWindow: 60s        # 抖动检测窗口
+  flappingThreshold: 5       # 抖动阈值（重启次数）
+  coolingPeriod: 300s        # 基础冷却期
+  maxCoolingPeriod: 1800s    # 最大冷却期
+  debounceDuration: 2s       # 防抖延迟
+  # 对账配置 (Docker 与 Cloudflare 状态同步)
+  reconcileEnabled: true       # 是否启用对账
+  reconcileInterval: 120s      # 对账间隔
+
+# 清理配置
+cleanup:
+  # 程序退出时是否清理资源 (true/false)
+  # 总开关，默认 false：false 时退出绝不清理（任何策略都不生效），
+  # 进程崩溃/重启不会拆 DNS 导致外部域名短暂不可达。
+  # 仅当确认希望退出时回收资源（如临时演示环境）才设为 true。
+  onExit: false
+  # 状态文件路径 (用于持久化与清理追踪)
+  stateFile: ""
+  # 清理策略（仅 onExit=true 时生效）：
+  #   graceful-cleanup —— 退出时清理 DNS/隧道配置（唯一会真正清理的值）
+  #   fast-exit        —— 退出时不做清理、直接退出
+  # 旧的 force-cleanup / none 取值已被配置校验拒绝（见错误信息迁移提示）。
+  strategy: "graceful-cleanup"
+  # 清理超时时间
+  timeout: 30s
+
+# 全局默认配置 (当容器标签未指定时使用)
+# 4层优先级: DockTunnel标签 > Traefik标签 > 自动检测 > 全局默认
+defaults:
+  scheme: http    # 默认 scheme (http, https, tcp) - 与 Traefik 保持一致
+  port: 80        # 默认端口
+  path: ""        # 默认路径 (留空表示根路径)
+
+# 补偿队列配置 (处理 Cloudflare 操作失败后的重试)
+compensation:
+  initialDelay: 30s       # 初始重试延迟
+  maxDelay: 30m           # 最大重试延迟 (指数退避上限)
+  maxRetries: 10          # 最大重试次数
+  pollInterval: 30s       # 轮询间隔
+  maxQueueSize: 1000      # 补偿队列最大容量
+
+# 状态持久化配置
+persistence:
+  backupCount: 3            # 状态文件备份数量
+  validateOnLoad: true      # 加载时校验状态文件
+
+# 诊断/指标 HTTP 服务配置
+server:
+  bindAddr: "127.0.0.1"   # 绑定地址（默认仅回环）
+  port: 9100              # 端口 (Prometheus 指标 / healthz / debug/state)
+  # 非回环绑定（如 0.0.0.0）时必须设置，否则启动校验拒绝；
+  # 设置后 /debug/state 需要 Bearer token（该端点泄露全部 hostname/service URL）。
+  # debugToken: ""

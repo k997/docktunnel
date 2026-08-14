@@ -1,0 +1,1120 @@
+package state
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"log/slog"
+
+	"docktunnel/pkg/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestNewManager(t *testing.T) {
+	logger := slog.Default()
+	sm := NewManager(logger)
+
+	assert.NotNil(t, sm)
+	assert.NotNil(t, sm.activeTunnels)
+	assert.NotNil(t, sm.pendingDeletes)
+}
+
+func TestAddActiveTunnel(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	entry := &types.TunnelEntry{
+		ContainerID: "test-container-1",
+		TunnelID:    "tunnel-123",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		CreatedAt:   time.Now().UTC(),
+		LastSyncAt:  time.Now().UTC(),
+		Config: types.TunnelConfiguration{
+			Hostname:   "test.example.com",
+			ServiceURL: "http://localhost:8080",
+		},
+	}
+
+	sm.AddActiveTunnel(entry)
+
+	retrieved, ok := sm.GetActiveTunnel("test-container-1", "web")
+	assert.True(t, ok)
+	assert.Equal(t, entry.ContainerID, retrieved.ContainerID)
+	assert.Equal(t, entry.ServiceName, retrieved.ServiceName)
+	assert.Equal(t, types.StatusActive, retrieved.Status)
+}
+
+func TestRemoveActiveTunnel(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	entry := &types.TunnelEntry{
+		ContainerID: "test-container-1",
+		Status:      types.StatusActive,
+	}
+
+	sm.AddActiveTunnel(entry)
+	sm.RemoveActiveTunnel("test-container-1")
+
+	_, ok := sm.GetActiveTunnel("test-container-1", "web")
+	assert.False(t, ok)
+}
+
+func TestGetAllActiveTunnels(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add multiple tunnels
+	for i := 1; i <= 3; i++ {
+		entry := &types.TunnelEntry{
+			ContainerID: "test-container-" + string(rune('0'+i)),
+			Status:      types.StatusActive,
+		}
+		sm.AddActiveTunnel(entry)
+	}
+
+	all := sm.GetAllActiveTunnels()
+	assert.Len(t, all, 3)
+}
+
+func TestAddPendingDeletion(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+	entry := &types.TunnelEntry{
+		ContainerID: "test-container-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+
+	sm.AddPendingDeletion(entry)
+
+	// Should not be in active tunnels
+	_, ok := sm.GetActiveTunnel("test-container-1", "web")
+	assert.False(t, ok)
+
+	// Should be in pending deletions
+	retrieved, ok := sm.GetPendingDeletion("test-container-1")
+	assert.True(t, ok)
+	assert.Equal(t, entry.ContainerID, retrieved.ContainerID)
+	assert.Equal(t, types.StatusPendingDelete, retrieved.Status)
+}
+
+func TestAddPendingDeletion_MultiService(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+
+	webEntry := &types.TunnelEntry{
+		ContainerID: "container-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	apiEntry := &types.TunnelEntry{
+		ContainerID: "container-1",
+		ServiceName: "api",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		Config:      types.TunnelConfiguration{Hostname: "api.example.com"},
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+
+	sm.AddPendingDeletion(webEntry)
+	sm.AddPendingDeletion(apiEntry)
+
+	// Both services should be retrievable
+	entries := sm.GetPendingDeletionsByContainer("container-1")
+	assert.Len(t, entries, 2, "Both services should be stored, not overwritten")
+
+	hostnames := map[string]bool{}
+	for _, e := range entries {
+		hostnames[e.Config.Hostname] = true
+	}
+	assert.True(t, hostnames["web.example.com"])
+	assert.True(t, hostnames["api.example.com"])
+}
+
+func TestRestoreActiveTunnel(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+	entry := &types.TunnelEntry{
+		ContainerID: "test-container-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+	}
+
+	sm.AddPendingDeletion(entry)
+	err := sm.RestoreActiveTunnel("test-container-1")
+
+	require.NoError(t, err)
+
+	// Should be back in active tunnels
+	retrieved, ok := sm.GetActiveTunnel("test-container-1", "web")
+	assert.True(t, ok)
+	assert.Equal(t, types.StatusActive, retrieved.Status)
+	assert.Nil(t, retrieved.DeletedAt)
+
+	// Should not be in pending deletions
+	_, ok = sm.GetPendingDeletion("test-container-1")
+	assert.False(t, ok)
+}
+
+// containsExpiredEntry checks if the expired entries contain one for the given containerID
+func containsExpiredEntry(entries []*types.TunnelEntry, containerID string) bool {
+	for _, e := range entries {
+		if e.ContainerID == containerID {
+			return true
+		}
+	}
+	return false
+}
+
+func TestGetSnapshot(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add active tunnel
+	activeEntry := &types.TunnelEntry{
+		ContainerID: "active-1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+	}
+	sm.AddActiveTunnel(activeEntry)
+
+	// Add pending deletion
+	now := time.Now()
+	pendingEntry := &types.TunnelEntry{
+		ContainerID: "pending-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+	}
+	sm.AddPendingDeletion(pendingEntry)
+
+	// Get snapshot
+	snapshot := sm.GetSnapshot()
+
+	assert.NotNil(t, snapshot)
+	assert.Equal(t, 3, snapshot.Version)
+	assert.Len(t, snapshot.ActiveTunnels, 1)
+	assert.Len(t, snapshot.PendingDeletions, 1)
+	assert.Contains(t, snapshot.ActiveTunnels, "active-1:web")
+	assert.Contains(t, snapshot.PendingDeletions, "pending-1:web")
+}
+
+func TestLoadFromSnapshot(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Create a snapshot with compound keys
+	now := time.Now()
+	snapshot := &types.StateSnapshot{
+		Version:   2,
+		Timestamp: now,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"active-1:web": {
+				ContainerID: "active-1",
+				ServiceName: "web",
+				Status:      types.StatusActive,
+			},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{
+			"pending-1:web": {
+				ContainerID: "pending-1",
+				ServiceName: "web",
+				Status:      types.StatusPendingDelete,
+				DeletedAt:   &now,
+			},
+		},
+	}
+
+	// Load snapshot
+	sm.LoadFromSnapshot(snapshot)
+
+	// Verify loaded state
+	entry, ok := sm.GetActiveTunnel("active-1", "web")
+	assert.True(t, ok)
+	assert.Equal(t, "active-1", entry.ContainerID)
+
+	pending, ok := sm.GetPendingDeletion("pending-1")
+	assert.True(t, ok)
+	assert.Equal(t, "pending-1", pending.ContainerID)
+}
+
+func TestRunGC_ImmediatePolicy(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+	entry := &types.TunnelEntry{
+		ContainerID: "immediate-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+		RetentionPolicy: types.RetentionPolicy{
+			Type: types.Immediate,
+		},
+	}
+	sm.AddPendingDeletion(entry)
+
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+	assert.True(t, containsExpiredEntry(expired, "immediate-1"), "Immediate entry should be expired")
+
+	// Should be removed
+	_, ok := sm.GetPendingDeletion("immediate-1")
+	assert.False(t, ok)
+}
+
+func TestRunGC_TimedPolicy(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Create entry with expired retention
+	past := time.Now().Add(-1 * time.Hour)
+	entry := &types.TunnelEntry{
+		ContainerID: "timed-1",
+		ServiceName: "web",
+		Status:      types.StatusRetaining,
+		DeletedAt:   &past,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm.AddPendingDeletion(entry)
+
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+	assert.True(t, containsExpiredEntry(expired, "timed-1"), "Expired timed entry should be expired")
+
+	// Should be removed
+	_, ok := sm.GetPendingDeletion("timed-1")
+	assert.False(t, ok)
+}
+
+func TestRunGC_TimedPolicyNotExpired(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Create entry with unexpired retention
+	recent := time.Now().Add(-5 * time.Minute)
+	entry := &types.TunnelEntry{
+		ContainerID: "timed-not-expired",
+		ServiceName: "web",
+		Status:      types.StatusRetaining,
+		DeletedAt:   &recent,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm.AddPendingDeletion(entry)
+
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+	assert.False(t, containsExpiredEntry(expired, "timed-not-expired"), "Unexpired entry should not be expired")
+
+	// Should still be present
+	_, ok := sm.GetPendingDeletion("timed-not-expired")
+	assert.True(t, ok)
+}
+
+func TestRunGC_ForeverPolicy(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	now := time.Now()
+	entry := &types.TunnelEntry{
+		ContainerID: "forever-1",
+		ServiceName: "web",
+		Status:      types.StatusRetaining,
+		DeletedAt:   &now,
+		RetentionPolicy: types.RetentionPolicy{
+			Type: types.Forever,
+		},
+	}
+	sm.AddPendingDeletion(entry)
+
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+	assert.False(t, containsExpiredEntry(expired, "forever-1"), "Forever entries should not be expired")
+
+	// Should still be present (forever policy)
+	_, ok := sm.GetPendingDeletion("forever-1")
+	assert.True(t, ok)
+}
+
+func TestGetStats(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add active tunnels
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "active-1", Status: types.StatusActive})
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "active-2", Status: types.StatusActive})
+
+	// Add pending deletion
+	now := time.Now()
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID: "pending-1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+	})
+
+	stats := sm.GetStats()
+	assert.Equal(t, 2, stats["active_tunnels"])
+	assert.Equal(t, 1, stats["pending_deletions"])
+}
+
+// TestContainerRestartCancelsRetention tests that a container restart
+// cancels the retention timer and restores ACTIVE status (T057)
+func TestContainerRestartCancelsRetention(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add a tunnel to active tunnels
+	entry := &types.TunnelEntry{
+		ContainerID: "restart-test",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		Config: types.TunnelConfiguration{
+			Hostname: "test.example.com",
+		},
+	}
+	sm.AddActiveTunnel(entry)
+
+	// Simulate container stop - move to pending deletion
+	now := time.Now()
+	entry.DeletedAt = &now
+	entry.Status = types.StatusPendingDelete
+	entry.RetentionPolicy = types.RetentionPolicy{
+		Type:     types.Timed,
+		Duration: 30 * time.Minute,
+	}
+	sm.AddPendingDeletion(entry)
+
+	// Verify it's in pending deletions
+	_, ok := sm.GetPendingDeletion("restart-test")
+	assert.True(t, ok, "Should be in pending deletions")
+
+	// Simulate container restart - restore to active
+	err := sm.RestoreActiveTunnel("restart-test")
+	require.NoError(t, err)
+
+	// Verify it's back in active tunnels
+	retrieved, ok := sm.GetActiveTunnel("restart-test", "web")
+	assert.True(t, ok, "Should be back in active tunnels")
+	assert.Equal(t, types.StatusActive, retrieved.Status, "Status should be Active")
+	assert.Nil(t, retrieved.DeletedAt, "DeletedAt should be cleared")
+
+	// Verify it's no longer in pending deletions
+	_, ok = sm.GetPendingDeletion("restart-test")
+	assert.False(t, ok, "Should not be in pending deletions anymore")
+}
+
+// TestGC_PreservesForeverEntries tests that Forever retention policy
+// entries are preserved during garbage collection (T056)
+func TestGC_PreservesForeverEntries(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add entries with different retention policies
+	now := time.Now()
+
+	// Forever entry
+	foreverEntry := &types.TunnelEntry{
+		ContainerID: "forever-entry",
+		ServiceName: "web",
+		Status:      types.StatusRetaining,
+		DeletedAt:   &now,
+		RetentionPolicy: types.RetentionPolicy{
+			Type: types.Forever,
+		},
+	}
+	sm.AddPendingDeletion(foreverEntry)
+
+	// Run GC
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+
+	// Forever entry should NOT be expired
+	assert.False(t, containsExpiredEntry(expired, "forever-entry"), "Forever entries should not be garbage collected")
+
+	// Should still be in pending deletions
+	_, ok := sm.GetPendingDeletion("forever-entry")
+	assert.True(t, ok, "Forever entry should still be in pending deletions")
+}
+
+// TestGC_ExpireTimedEntries tests that timed retention policy entries
+// are expired when their timer elapses (T056)
+func TestGC_ExpireTimedEntries(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add a timed entry that expired long ago
+	oldTime := time.Now().Add(-2 * time.Hour)
+	expiredEntry := &types.TunnelEntry{
+		ContainerID: "expired-timed",
+		ServiceName: "web",
+		Status:      types.StatusRetaining,
+		DeletedAt:   &oldTime,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm.AddPendingDeletion(expiredEntry)
+
+	// Run GC
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+
+	// Should be expired
+	assert.True(t, containsExpiredEntry(expired, "expired-timed"), "Expired timed entry should be garbage collected")
+
+	// Should no longer be in pending deletions
+	_, ok := sm.GetPendingDeletion("expired-timed")
+	assert.False(t, ok, "Expired entry should be removed from pending deletions")
+}
+
+// TestGC_PreserveUnexpiredTimedEntries tests that unexpired timed
+// retention policy entries are preserved (T056)
+func TestGC_PreserveUnexpiredTimedEntries(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	// Add a timed entry that hasn't expired yet
+	recentTime := time.Now().Add(-5 * time.Minute)
+	unexpiredEntry := &types.TunnelEntry{
+		ContainerID: "unexpired-timed",
+		ServiceName: "web",
+		Status:      types.StatusRetaining,
+		DeletedAt:   &recentTime,
+		RetentionPolicy: types.RetentionPolicy{
+			Type:     types.Timed,
+			Duration: 30 * time.Minute,
+		},
+	}
+	sm.AddPendingDeletion(unexpiredEntry)
+
+	// Run GC
+	expired, err := sm.RunGC(context.Background())
+	require.NoError(t, err)
+
+	// Should NOT be expired
+	assert.False(t, containsExpiredEntry(expired, "unexpired-timed"), "Unexpired timed entry should not be garbage collected")
+
+	// Should still be in pending deletions
+	_, ok := sm.GetPendingDeletion("unexpired-timed")
+	assert.True(t, ok, "Unexpired entry should still be in pending deletions")
+}
+
+func TestRunGC_RetainingTimed_Expired(t *testing.T) {
+	sm := NewManager(slog.Default())
+	past := time.Now().Add(-2 * time.Hour)
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+		DeletedAt:       &past,
+	})
+
+	expired, err := sm.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	if len(expired) != 1 {
+		t.Fatalf("expected 1 expired entry, got %d", len(expired))
+	}
+	if expired[0].ContainerID != "c1" {
+		t.Errorf("expected c1, got %s", expired[0].ContainerID)
+	}
+
+	_, exists := sm.GetPendingDeletion("c1")
+	if exists {
+		t.Error("expired entry should be removed")
+	}
+}
+
+func TestRunGC_RetainingTimed_NotExpired(t *testing.T) {
+	sm := NewManager(slog.Default())
+	recent := time.Now().Add(-5 * time.Minute)
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+		DeletedAt:       &recent,
+	})
+
+	expired, err := sm.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	if len(expired) != 0 {
+		t.Fatalf("expected 0 expired entries, got %d", len(expired))
+	}
+
+	_, exists := sm.GetPendingDeletion("c1")
+	if !exists {
+		t.Error("non-expired Retaining entry should still exist")
+	}
+}
+
+func TestRunGC_RetainingForever_NeverExpires(t *testing.T) {
+	sm := NewManager(slog.Default())
+	past := time.Now().Add(-365 * 24 * time.Hour)
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Forever},
+		DeletedAt:       &past,
+	})
+
+	expired, err := sm.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	if len(expired) != 0 {
+		t.Fatalf("Forever entries should never expire, got %d expired", len(expired))
+	}
+}
+
+func TestRunGC_PendingDelete_CleanedUp(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Config:          types.TunnelConfiguration{Hostname: "app.example.com"},
+		Status:          types.StatusPendingDelete,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+	})
+
+	expired, err := sm.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC failed: %v", err)
+	}
+
+	if len(expired) != 1 {
+		t.Fatalf("expected 1 expired entry, got %d", len(expired))
+	}
+
+	_, exists := sm.GetPendingDeletion("c1")
+	if exists {
+		t.Error("PendingDelete entry should be removed")
+	}
+}
+
+func TestLoadFromSnapshot_MigratesPendingDeleteToRetaining(t *testing.T) {
+	sm := NewManager(slog.Default())
+	now := time.Now()
+
+	snapshot := &types.StateSnapshot{
+		Version: 1,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"c2": {ContainerID: "c2", ServiceName: "web", Status: types.StatusActive},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{
+			"c1:web": {
+				ContainerID:     "c1",
+				ServiceName:     "web",
+				Status:          types.StatusPendingDelete, // Phase 1 status
+				RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: 1 * time.Hour},
+				DeletedAt:       &now,
+			},
+			"c3:api": {
+				ContainerID:     "c3",
+				ServiceName:     "api",
+				Status:          types.StatusPendingDelete, // Phase 1 status
+				RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+			},
+		},
+	}
+
+	sm.LoadFromSnapshot(snapshot)
+
+	// Timed should be migrated to Retaining
+	entry, _ := sm.GetPendingDeletion("c1")
+	if entry.Status != types.StatusRetaining {
+		t.Errorf("Timed entry should be migrated to StatusRetaining, got %d", entry.Status)
+	}
+
+	// Immediate should stay PendingDelete
+	entry3, _ := sm.GetPendingDeletion("c3")
+	if entry3.Status != types.StatusPendingDelete {
+		t.Errorf("Immediate entry should stay StatusPendingDelete, got %d", entry3.Status)
+	}
+}
+
+func TestAddActiveTunnel_CompoundKey(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	webEntry := &types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+	}
+	apiEntry := &types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "api",
+		Status:      types.StatusActive,
+		Config:      types.TunnelConfiguration{Hostname: "api.example.com"},
+	}
+
+	sm.AddActiveTunnel(webEntry)
+	sm.AddActiveTunnel(apiEntry)
+
+	got, ok := sm.GetActiveTunnel("c1", "web")
+	if !ok || got.Config.Hostname != "web.example.com" {
+		t.Errorf("expected web entry, got ok=%v hostname=%s", ok, got.Config.Hostname)
+	}
+	got2, ok2 := sm.GetActiveTunnel("c1", "api")
+	if !ok2 || got2.Config.Hostname != "api.example.com" {
+		t.Errorf("expected api entry, got ok=%v hostname=%s", ok2, got2.Config.Hostname)
+	}
+
+	entries := sm.GetActiveTunnelsByContainer("c1")
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	hostnames := map[string]bool{}
+	for _, e := range entries {
+		hostnames[e.Config.Hostname] = true
+	}
+	if !hostnames["web.example.com"] || !hostnames["api.example.com"] {
+		t.Errorf("expected both hostnames, got %v", hostnames)
+	}
+}
+
+func TestRemoveActiveTunnel_RemovesAllServices(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "c1", ServiceName: "web", Status: types.StatusActive})
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "c1", ServiceName: "api", Status: types.StatusActive})
+
+	sm.RemoveActiveTunnel("c1")
+
+	_, ok1 := sm.GetActiveTunnel("c1", "web")
+	_, ok2 := sm.GetActiveTunnel("c1", "api")
+	if ok1 || ok2 {
+		t.Error("both entries should be removed")
+	}
+	entries := sm.GetActiveTunnelsByContainer("c1")
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries after remove, got %d", len(entries))
+	}
+}
+
+func TestRestoreActiveTunnel_MultiService(t *testing.T) {
+	sm := NewManager(slog.Default())
+	now := time.Now()
+
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID: "c1", ServiceName: "web",
+		Status:    types.StatusRetaining,
+		Config:    types.TunnelConfiguration{Hostname: "web.example.com"},
+		DeletedAt: &now,
+	})
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID: "c1", ServiceName: "api",
+		Status:    types.StatusRetaining,
+		Config:    types.TunnelConfiguration{Hostname: "api.example.com"},
+		DeletedAt: &now,
+	})
+
+	err := sm.RestoreActiveTunnel("c1")
+	if err != nil {
+		t.Fatalf("RestoreActiveTunnel failed: %v", err)
+	}
+
+	webEntry, ok1 := sm.GetActiveTunnel("c1", "web")
+	apiEntry, ok2 := sm.GetActiveTunnel("c1", "api")
+	if !ok1 || !ok2 {
+		t.Fatal("both entries should be restored to active")
+	}
+	if webEntry.Status != types.StatusActive || apiEntry.Status != types.StatusActive {
+		t.Error("restored entries should be Active")
+	}
+	if webEntry.DeletedAt != nil || apiEntry.DeletedAt != nil {
+		t.Error("DeletedAt should be nil after restoration")
+	}
+
+	_, pendingExists := sm.GetPendingDeletion("c1")
+	if pendingExists {
+		t.Error("pending deletes should be empty after restoration")
+	}
+}
+
+func TestLoadFromSnapshot_MigratesV1ToV2Keys(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	snapshot := &types.StateSnapshot{
+		Version: 1,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			// v1 key: bare containerID
+			"container-1": {
+				ContainerID: "container-1",
+				ServiceName: "web",
+				Status:      types.StatusActive,
+				Config:      types.TunnelConfiguration{Hostname: "web.example.com"},
+			},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{},
+	}
+
+	sm.LoadFromSnapshot(snapshot)
+
+	// Should be accessible with compound key
+	entry, ok := sm.GetActiveTunnel("container-1", "web")
+	if !ok {
+		t.Fatal("expected entry with compound key after v1 migration")
+	}
+	if entry.Config.Hostname != "web.example.com" {
+		t.Errorf("expected web.example.com, got %s", entry.Config.Hostname)
+	}
+}
+
+func TestLoadFromSnapshot_MigratesV1EmptyServiceName(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	snapshot := &types.StateSnapshot{
+		Version: 1,
+		ActiveTunnels: map[string]*types.TunnelEntry{
+			"container-1": {
+				ContainerID: "container-1",
+				ServiceName: "", // Empty — should be assigned "default"
+				Status:      types.StatusActive,
+			},
+		},
+		PendingDeletions: map[string]*types.TunnelEntry{},
+	}
+
+	sm.LoadFromSnapshot(snapshot)
+
+	entry, ok := sm.GetActiveTunnel("container-1", "default")
+	if !ok {
+		t.Fatal("expected entry with 'default' service name after v1 migration")
+	}
+	if entry.ServiceName != "default" {
+		t.Errorf("expected ServiceName='default', got %s", entry.ServiceName)
+	}
+}
+
+func TestGetSnapshot_DeepCopiesTunnelEntry(t *testing.T) {
+	sm := NewManager(slog.Default())
+	deletedAt := time.Now().UTC()
+	entry := &types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		DeletedAt:   &deletedAt,
+	}
+	sm.AddActiveTunnel(entry)
+
+	snap := sm.GetSnapshot()
+	got := snap.ActiveTunnels["c1:web"]
+
+	// Mutate the snapshot; original must be untouched
+	got.Status = types.StatusDeleted
+	*got.DeletedAt = time.Time{}
+	got.ContainerID = "MUTATED"
+
+	orig, ok := sm.GetActiveTunnel("c1", "web")
+	if !ok {
+		t.Fatal("entry disappeared from active map")
+	}
+	if orig.Status != types.StatusActive {
+		t.Errorf("snapshot mutation leaked into live state: status=%v", orig.Status)
+	}
+	if orig.ContainerID != "c1" {
+		t.Errorf("snapshot mutation leaked into live state: ContainerID=%s", orig.ContainerID)
+	}
+	if orig.DeletedAt == nil || !orig.DeletedAt.Equal(deletedAt) {
+		t.Errorf("DeletedAt should be preserved; got %v", orig.DeletedAt)
+	}
+}
+
+func TestGetSnapshot_DeepCopiesCompensationRecord(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c1",
+		Hostname:    "app.example.com",
+	}, errorsNew("transient"))
+
+	snap := sm.GetSnapshot()
+	if len(snap.PendingActions) != 1 {
+		t.Fatalf("expected 1 pending action, got %d", len(snap.PendingActions))
+	}
+	for _, rec := range snap.PendingActions {
+		rec.RetryCount = 999
+		rec.Action.Hostname = "MUTATED"
+	}
+
+	// Live state must be untouched
+	for _, rec := range sm.GetAllPendingActions() {
+		if rec.RetryCount == 999 {
+			t.Error("snapshot mutation leaked: RetryCount=999")
+		}
+		if rec.Action.Hostname == "MUTATED" {
+			t.Error("snapshot mutation leaked: Hostname=MUTATED")
+		}
+	}
+}
+
+func TestRestoreActiveTunnel_CancelsPendingDeleteActions(t *testing.T) {
+	sm := NewManager(slog.Default())
+	// Simulate a stop that enqueued a delete, before the container comes back
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c1",
+		ServiceName: "web",
+		Hostname:    "app.example.com",
+	}, errorsNew("transient"))
+
+	if len(sm.GetAllPendingActions()) != 1 {
+		t.Fatal("expected 1 pending action before restore")
+	}
+
+	// Now restore — pending action must be cancelled
+	if err := sm.RestoreActiveTunnel("c1"); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+
+	if got := len(sm.GetAllPendingActions()); got != 0 {
+		t.Errorf("expected 0 pending actions after restore, got %d", got)
+	}
+}
+
+func TestRestoreActiveTunnel_PreservesOtherContainersActions(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c1",
+		ServiceName: "web",
+		Hostname:    "app.example.com",
+	}, errorsNew("transient"))
+	sm.EnqueueAction(types.Action{
+		Kind:        types.ActionDeleteRoute,
+		ContainerID: "c2",
+		ServiceName: "web",
+		Hostname:    "other.example.com",
+	}, errorsNew("transient"))
+
+	if err := sm.RestoreActiveTunnel("c1"); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+
+	// Only c1 should be cancelled; c2 untouched
+	pending := sm.GetAllPendingActions()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending action for c2, got %d", len(pending))
+	}
+	if pending[0].Action.ContainerID != "c2" {
+		t.Errorf("expected c2 to remain, got %s", pending[0].Action.ContainerID)
+	}
+}
+
+// errorsNew is a tiny helper so we don't have to import "errors" in every test file.
+func errorsNew(s string) error { return &simpleErr{msg: s} }
+
+type simpleErr struct{ msg string }
+
+func (e *simpleErr) Error() string { return e.msg }
+
+// TestListRetaining_ReturnsOnlyRetainingDeepCopies verifies ListRetaining
+// (B1): only StatusRetaining entries are returned, deep-copied so callers
+// cannot mutate live state.
+func TestListRetaining_ReturnsOnlyRetainingDeepCopies(t *testing.T) {
+	sm := NewManager(slog.Default())
+
+	ruleJSON := []byte(`{"hostname":"retained.example.com","service":"http://origin:8080"}`)
+	past := time.Now().Add(-time.Minute)
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c1",
+		ServiceName:     "web",
+		Status:          types.StatusRetaining,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Timed, Duration: time.Hour},
+		DeletedAt:       &past,
+		Config:          types.TunnelConfiguration{Hostname: "retained.example.com", RuleJSON: ruleJSON},
+	})
+	// Immediate-pending entry must NOT be listed.
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID:     "c2",
+		ServiceName:     "web",
+		Status:          types.StatusPendingDelete,
+		RetentionPolicy: types.RetentionPolicy{Type: types.Immediate},
+		DeletedAt:       &past,
+	})
+
+	retaining := sm.ListRetaining()
+	if len(retaining) != 1 {
+		t.Fatalf("expected 1 retaining entry, got %d", len(retaining))
+	}
+	if retaining[0].ContainerID != "c1" {
+		t.Errorf("expected c1, got %s", retaining[0].ContainerID)
+	}
+
+	// Deep copy: mutating the returned RuleJSON must not touch live state.
+	retaining[0].Config.RuleJSON[0] = 'X'
+	retaining[0].Config.Hostname = "MUTATED"
+
+	live, _ := sm.GetPendingDeletion("c1")
+	if live.Config.Hostname == "MUTATED" {
+		t.Error("snapshot mutation leaked into live state (Hostname)")
+	}
+	if live.Config.RuleJSON[0] == 'X' {
+		t.Error("snapshot mutation leaked into live state (RuleJSON)")
+	}
+}
+
+// TestAddPendingDeletion_RemovesActiveWithCompoundKey verifies B13: moving a
+// per-service entry to pending deletion removes only that service's active
+// entry, leaving sibling services of the same container untouched.
+func TestAddPendingDeletion_RemovesActiveWithCompoundKey(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "c1", ServiceName: "web", Status: types.StatusActive})
+	sm.AddActiveTunnel(&types.TunnelEntry{ContainerID: "c1", ServiceName: "api", Status: types.StatusActive})
+
+	now := time.Now()
+	sm.AddPendingDeletion(&types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusPendingDelete,
+		DeletedAt:   &now,
+	})
+
+	if _, ok := sm.GetActiveTunnel("c1", "web"); ok {
+		t.Error("web entry should be removed from active tunnels")
+	}
+	if _, ok := sm.GetActiveTunnel("c1", "api"); !ok {
+		t.Error("api entry must remain active (compound-key delete, B13)")
+	}
+	if _, ok := sm.GetPendingDeletion("c1"); !ok {
+		t.Error("web entry should be in pending deletions")
+	}
+}
+
+// TestHasPendingActionKind verifies the dedup helper used by the sync-failure
+// compensation path (B3).
+func TestHasPendingActionKind(t *testing.T) {
+	sm := NewManager(slog.Default())
+	if sm.HasPendingActionKind(types.ActionSync) {
+		t.Error("no actions yet — HasPendingActionKind must be false")
+	}
+
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "a.example.com"},
+		&types.RetryableError{Err: errorsNew("503")})
+	if sm.HasPendingActionKind(types.ActionSync) {
+		t.Error("ActionDeleteRoute must not satisfy ActionSync lookup")
+	}
+
+	sm.EnqueueAction(types.Action{Kind: types.ActionSync}, &types.RetryableError{Err: errorsNew("503")})
+	if !sm.HasPendingActionKind(types.ActionSync) {
+		t.Error("expected ActionSync record to be found")
+	}
+
+	// A Dead ActionSync must not block re-enqueue. Mark the live record dead
+	// via the internal map: GetAllPendingActions returns copies (so mutations
+	// through it cannot reach live state).
+	for _, rec := range sm.pendingActions {
+		if rec.Action.Kind == types.ActionSync {
+			rec.Dead = true
+		}
+	}
+	if sm.HasPendingActionKind(types.ActionSync) {
+		t.Error("Dead ActionSync record must not count as pending")
+	}
+}
+
+// TestProcessCompensationQueue_CleansDeadRecords verifies B3(6)/B15: dead
+// records are removed at the end of each compensation round so they cannot
+// occupy the queue forever.
+func TestProcessCompensationQueue_CleansDeadRecords(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "dead.example.com"},
+		&types.PermanentError{Err: errorsNew("403")}) // dead immediately
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "alive.example.com"},
+		&types.RetryableError{Err: errorsNew("503")})
+
+	if got := len(sm.GetDeadActions()); got != 1 {
+		t.Fatalf("expected 1 dead record before processing, got %d", got)
+	}
+
+	sm.processCompensationQueue(func(types.Action) error { return nil })
+
+	if got := len(sm.GetAllPendingActions()); got != 1 {
+		t.Fatalf("expected 1 pending record after cleanup, got %d", got)
+	}
+	for _, rec := range sm.GetAllPendingActions() {
+		if rec.Action.Hostname == "dead.example.com" {
+			t.Error("dead record should have been cleaned up")
+		}
+	}
+}
+
+// TestGetSnapshot_DeepCopiesRuleJSON verifies B14(3): the RuleJSON byte slice
+// is deep-copied in GetSnapshot so gob encoding outside the lock cannot tear.
+func TestGetSnapshot_DeepCopiesRuleJSON(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.AddActiveTunnel(&types.TunnelEntry{
+		ContainerID: "c1",
+		ServiceName: "web",
+		Status:      types.StatusActive,
+		Config:      types.TunnelConfiguration{Hostname: "a.example.com", RuleJSON: []byte("payload")},
+	})
+
+	snap := sm.GetSnapshot()
+	snap.ActiveTunnels["c1:web"].Config.RuleJSON[0] = 'X'
+
+	live, _ := sm.GetActiveTunnel("c1", "web")
+	if string(live.Config.RuleJSON) != "payload" {
+		t.Errorf("snapshot mutation leaked into live RuleJSON: %q", live.Config.RuleJSON)
+	}
+}
+
+// TestGetAllPendingActions_ReturnsCopies verifies that GetAllPendingActions
+// returns value copies, not live pointers. The compensation goroutine mutates
+// RetryCount/NextRetryAt/Dead on the live records; returning live pointers let
+// callers race with those writes (caught by -race in
+// TestRunCompensation_RetryableFailureBacksOff).
+func TestGetAllPendingActions_ReturnsCopies(t *testing.T) {
+	sm := NewManager(slog.Default())
+	sm.EnqueueAction(types.Action{Kind: types.ActionDeleteRoute, Hostname: "a.example.com"},
+		&types.RetryableError{Err: errorsNew("503")})
+
+	pending := sm.GetAllPendingActions()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending record, got %d", len(pending))
+	}
+
+	// Mutating the returned record must not leak into live state.
+	pending[0].RetryCount = 999
+	pending[0].Dead = true
+
+	live := sm.GetAllPendingActions()
+	if len(live) != 1 {
+		t.Fatalf("expected live state to keep 1 pending record, got %d", len(live))
+	}
+	if live[0].RetryCount != 0 {
+		t.Errorf("copy mutation leaked into live RetryCount: %d", live[0].RetryCount)
+	}
+	if live[0].Dead {
+		t.Error("copy mutation leaked into live Dead flag")
+	}
+}
