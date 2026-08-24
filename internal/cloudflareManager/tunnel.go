@@ -474,6 +474,31 @@ func (m *Manager) GetTunnel() *zero_trust.TunnelCloudflaredGetResponse {
 	return m.tunnel
 }
 
+// DeleteTunnel 删除当前管理的 Tunnel，供集成测试等清理场景使用。
+// 隧道尚未创建（同步从未执行过）时为安全空操作；删除成功后置空 m.tunnel，
+// 重复调用幂等。注意：删除 Tunnel 不会清理指向它的 DNS CNAME 记录，
+// 需要 DNS 一并清理时由调用方先调用 DeleteDNSRecords。
+func (m *Manager) DeleteTunnel(ctx context.Context) error {
+	if m.tunnel == nil {
+		return nil
+	}
+	tunnelID := m.tunnel.ID
+	if err := m.callWithRetry(ctx, func() error {
+		if err := m.waitRateLimit(ctx); err != nil {
+			return err
+		}
+		_, err := m.client.ZeroTrust.Tunnels.Cloudflared.Delete(ctx, tunnelID, zero_trust.TunnelCloudflaredDeleteParams{
+			AccountID: cloudflare.F(m.account),
+		})
+		return err
+	}); err != nil {
+		return fmt.Errorf("failed to delete tunnel %s: %w", tunnelID, err)
+	}
+	slog.Info("Deleted tunnel", "tunnelID", tunnelID)
+	m.tunnel = nil
+	return nil
+}
+
 // UpdateConfiguration 更新Tunnel的配置
 func (m *Manager) UpdateConfiguration(ctx context.Context, ingressRules []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress) error {
 	if m.tunnel == nil {

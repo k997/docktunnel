@@ -89,6 +89,19 @@ func TestEndToEndLifecycle(t *testing.T) {
 		t.Fatalf("Failed to create Cloudflare manager: %v", err)
 	}
 
+	// Teardown runs in reverse registration order (LIFO): the container is
+	// removed first, then the tunnel created/reused by this run is deleted so
+	// the account does not accumulate leftover "DockTunnel-E2E-Test" tunnels.
+	// DeleteTunnel is a safe no-op if the controller never synced (no tunnel).
+	defer func() {
+		t.Log("Cleanup: Deleting test tunnel...")
+		if err := cfManager.DeleteTunnel(ctx); err != nil {
+			t.Logf("Warning: Failed to delete test tunnel: %v", err)
+		} else {
+			t.Log("Tunnel deleted")
+		}
+	}()
+
 	// Create controller options
 	controllerOpts := controller.ControllerOptions{
 		DebounceDuration: 2 * time.Second,
