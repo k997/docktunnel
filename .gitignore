@@ -1,4 +1,7 @@
-# ---> Go <---
+# ---> Go
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
 # Binaries for programs and plugins
 *.exe
 *.exe~
@@ -6,9 +9,10 @@
 *.so
 *.dylib
 
-# Go test binaries and coverage output
+# Go test binary
 *_test
-*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
 # Dependency directories
@@ -17,27 +21,25 @@ vendor/
 # Go workspace file
 go.work
 
-# ---> DockTunnel <---
-# Local build artifacts
-/docktunnel
-/dist/
-/build/
+# DockTunnel specific
+docktunnel
 *.log
 
-# ---> Secrets <---
-# Environment files: .env* is ignored to prevent committing real tokens;
-# .env.example is force-added as the committed template.
+# Environment files（.env 已被忽略，勿提交真实 token；.env.example 保留为模板）
 .env
 .env.*
 !.env.example
 
-# ---> IDE <---
+# vendored Traefik 源码参考（仅本地参考，不参与构建，勿提交）
+traefik-source/
+
+# IDE specific
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# ---> OS <---
+# OS generated files
 .DS_Store
 .DS_Store?
 ._*
@@ -45,3 +47,17 @@ go.work
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Go build artifacts
+*.test
+*.exe
+dist/
+build/
+
+# Development documentation
+.claude/
+.specify/
+specs/
+*.plan.md
+label_table.csv
+gemini-plan.md

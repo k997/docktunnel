@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -183,9 +182,13 @@ func (s *syncer) syncDNSRecords(ctx context.Context) error {
 		}
 	}
 
-	// 收集需要删除的DNS记录（精确匹配cfargotunnel.com格式）
+	// 收集需要删除的DNS记录。
+	// 只删除指向【本隧道】的记录（内容精确等于 <tunnelID>.cfargotunnel.com，
+	// 兼容 Cloudflare 返回的尾部点格式），绝不触碰指向其他隧道的记录——
+	// 那些属于其他设施或用户手工维护，与本控制器无关。
 	for hostname, record := range existingRecords {
-		if !currentHostnames[hostname] && strings.HasSuffix(record.Content, ".cfargotunnel.com") {
+		ownTunnelContent := expectedContent
+		if !currentHostnames[hostname] && (record.Content == ownTunnelContent || record.Content == ownTunnelContent+".") {
 			// 记录存在但不再需要，添加到删除列表
 			deleteHostnames = append(deleteHostnames, hostname)
 		}
