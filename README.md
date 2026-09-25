@@ -21,6 +21,7 @@ English | [简体中文](README.zh-CN.md)
   - Event debouncing
   - Three-layer fault tolerance design (config validation, state sync, resource cleanup)
 - **Flexible cleanup policies**: Immediate delete, delayed retention, permanent retention, and more
+- **DNS ownership ledger**: Only records this controller wrote (or adopted) are ever deleted. Records pointing at the same tunnel but maintained manually or by other tools are skipped with a warning — reconciliation can no longer wipe domains it does not own (state is persisted, and an empty/lost ledger fails safe towards "delete nothing")
 - **Batch DNS management**: Efficient batched DNS record operations that reduce API calls
 - **Rate limiting & retries**: Token bucket + exponential backoff to protect API resources
 
