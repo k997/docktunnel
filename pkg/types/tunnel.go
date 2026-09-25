@@ -171,4 +171,13 @@ type StateSnapshot struct {
 	ActiveTunnels    map[string]*TunnelEntry
 	PendingDeletions map[string]*TunnelEntry
 	PendingActions   map[string]*CompensationRecord
+
+	// ManagedDNS is the ownership ledger of DNS records this controller
+	// created: hostname -> record content it wrote. DNS deletion is gated on
+	// this ledger — records absent from it are never touched, so records
+	// maintained manually or by other tools survive reconciliation. A nil
+	// map (snapshots written before this field existed) loads as "nothing
+	// managed yet", which is the safe direction: nothing gets deleted until
+	// the controller has written (or adopted) a record itself.
+	ManagedDNS map[string]string
 }

@@ -25,6 +25,7 @@ type Manager struct {
 	activeTunnels    map[string]*types.TunnelEntry // key: containerID:serviceName (compound)
 	pendingDeletes   map[string]*types.TunnelEntry // key: containerID:serviceName (compound)
 	pendingActions   map[string]*types.CompensationRecord
+	managedDNS       map[string]string // DNS ownership ledger: hostname -> content we wrote
 	compInitialDelay time.Duration
 	compMaxDelay     time.Duration
 	compMaxRetries   int
@@ -66,6 +67,7 @@ func NewManager(logger *slog.Logger) *Manager {
 		activeTunnels:    make(map[string]*types.TunnelEntry),
 		pendingDeletes:   make(map[string]*types.TunnelEntry),
 		pendingActions:   make(map[string]*types.CompensationRecord),
+		managedDNS:       make(map[string]string),
 		logger:           logger,
 		statePath:        "",
 		lastSaved:        time.Time{},
@@ -399,6 +401,50 @@ func (sm *Manager) RestoreActiveTunnel(containerID string) error {
 // lock, so without deep copies the encoder would race with concurrent
 // mutations (transitionStoppedLocked mutating entry.Status, etc.) and could
 // emit a torn snapshot.
+// RecordManagedDNS adds hostnames to the DNS ownership ledger with the
+// record content this controller wrote. Called after a successful DNS
+// upsert (or adoption of an existing own-tunnel record).
+func (sm *Manager) RecordManagedDNS(hostnames []string, content string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, h := range hostnames {
+		sm.managedDNS[h] = content
+	}
+	sm.markDirty()
+}
+
+// ForgetManagedDNS removes hostnames from the DNS ownership ledger. Called
+// after the records were successfully deleted, or when they were observed
+// repointed externally (the entry is stale; the record is no longer ours).
+func (sm *Manager) ForgetManagedDNS(hostnames []string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	changed := false
+	for _, h := range hostnames {
+		if _, ok := sm.managedDNS[h]; ok {
+			delete(sm.managedDNS, h)
+			changed = true
+		}
+	}
+	if changed {
+		sm.markDirty()
+	}
+}
+
+// ManagedDNS returns a copy of the DNS ownership ledger.
+func (sm *Manager) ManagedDNS() map[string]string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	out := make(map[string]string, len(sm.managedDNS))
+	for k, v := range sm.managedDNS {
+		out[k] = v
+	}
+	return out
+}
+
 func (sm *Manager) GetSnapshot() *types.StateSnapshot {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -435,12 +481,18 @@ func (sm *Manager) GetSnapshot() *types.StateSnapshot {
 		pendingActions[k] = &copied
 	}
 
+	managedDNS := make(map[string]string, len(sm.managedDNS))
+	for k, v := range sm.managedDNS {
+		managedDNS[k] = v
+	}
+
 	return &types.StateSnapshot{
 		Version:          3,
 		Timestamp:        time.Now().UTC(),
 		ActiveTunnels:    activeTunnels,
 		PendingDeletions: pendingDeletions,
 		PendingActions:   pendingActions,
+		ManagedDNS:       managedDNS,
 	}
 }
 
@@ -495,6 +547,16 @@ func (sm *Manager) LoadFromSnapshot(snapshot *types.StateSnapshot) {
 		sm.pendingActions = snapshot.PendingActions
 	} else {
 		sm.pendingActions = make(map[string]*types.CompensationRecord)
+	}
+
+	// Restore the DNS ownership ledger. Snapshots written before the ledger
+	// existed carry a nil map — that must load as "nothing managed yet"
+	// (never delete anything until we have written/adopted records again),
+	// not as "everything is unmanaged garbage".
+	if snapshot.ManagedDNS != nil {
+		sm.managedDNS = snapshot.ManagedDNS
+	} else {
+		sm.managedDNS = make(map[string]string)
 	}
 
 	sm.logger.Info("Loaded state from snapshot",

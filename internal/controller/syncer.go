@@ -182,21 +182,68 @@ func (s *syncer) syncDNSRecords(ctx context.Context) error {
 		}
 	}
 
-	// 收集需要删除的DNS记录。
-	// 只删除指向【本隧道】的记录（内容精确等于 <tunnelID>.cfargotunnel.com，
-	// 兼容 Cloudflare 返回的尾部点格式），绝不触碰指向其他隧道的记录——
-	// 那些属于其他设施或用户手工维护，与本控制器无关。
+	// DNS 所有权账本闸门：只有【本控制器写入过（或收养过）】的记录才允许
+	// 删除。账本随状态快照持久化；账本为空（首次升级/状态丢失）时删除数为
+	// 零 —— fail-safe 方向是"不删"，与traefik-adguard-sync的所有权语义一致。
+	// 另外始终不触碰内容不指向本隧道的记录（其他设施/用户手工维护）。
+	ledger := s.c.stateManager.ManagedDNS()
+	sameTunnel := func(content string) bool {
+		// Cloudflare 可能返回带尾部点的规范名，两种形态都算指向本隧道。
+		return content == expectedContent || content == expectedContent+"."
+	}
+	sameRecord := func(got, ledgerContent string) bool {
+		return got == ledgerContent || got == ledgerContent+"."
+	}
+
+	var (
+		adopt     []string // 期望内且已指向本隧道、但尚未入账 → 收养
+		skipped   []string // 指向本隧道但账本无记录 → 永不删，仅告警
+		forgotten []string // 账本有记录但内容已变（被外部改指/隧道重建）→ 只遗忘
+	)
 	for hostname, record := range existingRecords {
-		ownTunnelContent := expectedContent
-		if !currentHostnames[hostname] && (record.Content == ownTunnelContent || record.Content == ownTunnelContent+".") {
-			// 记录存在但不再需要，添加到删除列表
-			deleteHostnames = append(deleteHostnames, hostname)
+		if currentHostnames[hostname] {
+			// 期望内的主机名：若记录已指向本隧道而账本未记，收养入账，
+			// 使其此后受本控制器的删除语义管辖。
+			if sameTunnel(record.Content) && ledger[hostname] == "" {
+				adopt = append(adopt, hostname)
+			}
+			continue
 		}
+		if !sameTunnel(record.Content) {
+			// 内容指向别的隧道：不是我们的记录，也一并遗弃账本里的旧条目
+			// （隧道重建后旧账本条目即走此路径），绝不删除远端记录。
+			if _, managed := ledger[hostname]; managed {
+				forgotten = append(forgotten, hostname)
+			}
+			continue
+		}
+		ledgerContent, managed := ledger[hostname]
+		if !managed {
+			skipped = append(skipped, hostname)
+			continue
+		}
+		if !sameRecord(record.Content, ledgerContent) {
+			forgotten = append(forgotten, hostname)
+			continue
+		}
+		// 账本在册 + 内容与写入时一致 + 期望状态已不含 → 才允许删除
+		deleteHostnames = append(deleteHostnames, hostname)
 	}
 
 	slog.Info("DNS sync operations",
 		"toUpsert", len(upsertHostnames), "upsertList", upsertHostnames,
-		"toDelete", len(deleteHostnames), "deleteList", deleteHostnames)
+		"toDelete", len(deleteHostnames), "deleteList", deleteHostnames,
+		"adopted", len(adopt), "skippedUnmanaged", len(skipped), "forgotten", len(forgotten))
+	if len(skipped) > 0 {
+		slog.Warn("Skipping DNS records pointing at this tunnel but absent from the ownership ledger",
+			"hostnames", skipped,
+			"hint", "they were not created (or adopted) by this controller; manage them manually or adopt them once")
+	}
+	if len(forgotten) > 0 {
+		slog.Warn("Forgetting ledger entries for records no longer pointing at this tunnel",
+			"hostnames", forgotten)
+		s.c.stateManager.ForgetManagedDNS(forgotten)
+	}
 
 	// 执行批量删除操作
 	if len(deleteHostnames) > 0 {
@@ -209,6 +256,8 @@ func (s *syncer) syncDNSRecords(ctx context.Context) error {
 			return err
 		}
 		slog.Info("Batch deleted DNS records", "count", len(deleteHostnames))
+		// 删除成功后销账
+		s.c.stateManager.ForgetManagedDNS(deleteHostnames)
 	}
 
 	// 执行批量创建/更新操作
@@ -221,6 +270,15 @@ func (s *syncer) syncDNSRecords(ctx context.Context) error {
 			return err
 		}
 		slog.Info("Batch upserted DNS records", "count", len(upsertHostnames))
+		// 写入成功后入账（内容为本隧道的规范 CNAME 目标）
+		s.c.stateManager.RecordManagedDNS(upsertHostnames, expectedContent)
+	}
+
+	// 收养无需远端写入：记录内容已正确，仅登记所有权
+	if len(adopt) > 0 {
+		s.c.stateManager.RecordManagedDNS(adopt, expectedContent)
+		slog.Info("Adopted existing DNS records into the ownership ledger",
+			"count", len(adopt), "hostnames", adopt)
 	}
 
 	slog.Info("Finished syncing DNS records")
